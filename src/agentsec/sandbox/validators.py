@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
 import re
 import socket
@@ -71,6 +72,21 @@ def _is_nonpublic(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
+def _ascii_host(host: str) -> str | None:
+    """The host as a normalising fetcher would see it, or None if it is not a valid name.
+
+    URL libraries fold Unicode look-alikes (fullwidth digits, etc.) to ASCII via IDNA and
+    ignore a trailing dot, so a fullwidth "127.0.0.1" and ``https://127.0.0.1./`` both reach
+    loopback. Checking the raw string would let both through; check this form instead.
+    """
+    host = host.strip()
+    try:
+        ascii_form = host if host.isascii() else host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+    return ascii_form.rstrip(".").lower()
+
+
 def _parse_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     try:
         return ipaddress.ip_address(host.strip("[]"))
@@ -100,16 +116,20 @@ def check_url(value: str, rule: ArgRule, resolver: Resolver | None = None) -> li
     if not host:
         errors.append("URL has no host")
         return errors
-    if rule.hosts and not _host_matches(host, rule.hosts):
+    ascii_host = _ascii_host(host)
+    if ascii_host is None:
+        errors.append(f"host {host!r} is not a valid hostname")
+        return errors
+    if rule.hosts and not _host_matches(ascii_host, rule.hosts):
         errors.append(f"host {host!r} not in allowlist")
-    literal = _parse_ip_literal(host)
+    literal = _parse_ip_literal(ascii_host)
     if rule.block_private:
         if literal is not None:
             if _is_nonpublic(literal):
                 errors.append(f"host {host!r} is a non-public address")
         elif rule.resolve_dns:
             try:
-                addrs = (resolver or _default_resolver)(host)
+                addrs = (resolver or _default_resolver)(ascii_host)
             except OSError:
                 errors.append(f"host {host!r} did not resolve")
                 addrs = []
@@ -135,6 +155,10 @@ def check_arg(value: Any, rule: ArgRule, *, resolver: Resolver | None = None) ->
         return ["expected boolean"]
     if t in {"string", "path", "url"} and not isinstance(value, str):
         return ["expected string"]
+    if isinstance(value, float) and not math.isfinite(value):
+        # NaN compares false to everything, so it would sail past every minimum/maximum
+        # below (and json.loads accepts it by default). Infinity is rejected for symmetry.
+        return ["non-finite number (NaN/Infinity) is not allowed"]
 
     if rule.enum is not None and value not in rule.enum:
         errors.append(f"value not in allowed set {rule.enum}")

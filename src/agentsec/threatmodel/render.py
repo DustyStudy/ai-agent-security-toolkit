@@ -119,7 +119,25 @@ def _priority(comp: dict[str, Any], threat: Threat) -> str:
 
 
 def _esc(text: str) -> str:
-    return text.replace("|", "\\|").replace("\n", " ").strip()
+    """Make spec/catalog text safe to place in one inline markdown or table-cell position.
+
+    The system description is an input file (often from a repo or a pull request) and the
+    result is published as a document, so it must not be able to end a cell, start a heading
+    or row, or smuggle in raw HTML.
+    """
+    return (
+        text.replace("|", "\\|")
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .strip()
+    )
+
+
+def _mm(text: str) -> str:
+    """Escape text for a double-quoted mermaid label: a bare quote would end the label."""
+    return _esc(text).replace('"', "#quot;")
 
 
 def _mermaid(spec: dict[str, Any]) -> str:
@@ -128,14 +146,16 @@ def _mermaid(spec: dict[str, Any]) -> str:
     for c in spec["components"]:
         zones.setdefault(c.get("trust_zone", "default"), []).append(c)
     for zone, comps in zones.items():
-        lines.append(f'  subgraph zone_{re.sub(r"[^A-Za-z0-9]", "_", zone)}["{zone}"]')
+        lines.append(
+            f'  subgraph zone_{re.sub(r"[^A-Za-z0-9]", "_", str(zone))}["{_mm(str(zone))}"]'
+        )
         for c in comps:
-            lines.append(f'    {c["id"]}["{_esc(c["name"])}<br/><i>{c["type"]}</i>"]')
+            lines.append(f'    {c["id"]}["{_mm(str(c["name"]))}<br/><i>{c["type"]}</i>"]')
         lines.append("  end")
     zone_of = {c["id"]: c.get("trust_zone", "default") for c in spec["components"]}
     for f in spec.get("data_flows", []):
         arrow = "-.->" if zone_of[f["from"]] != zone_of[f["to"]] else "-->"
-        label = _esc(str(f.get("data", "")))
+        label = _mm(str(f.get("data", "")))
         lines.append(f'  {f["from"]} {arrow}|"{label}"| {f["to"]}')
     lines.append("```")
     return "\n".join(lines)
@@ -144,9 +164,10 @@ def _mermaid(spec: dict[str, Any]) -> str:
 def render_markdown(spec: dict[str, Any], catalog: list[Threat] | None = None) -> str:
     catalog = catalog if catalog is not None else load_catalog()
     comps = spec["components"]
-    lines = [f"# Threat model: {spec['name']}", ""]
+    lines = [f"# Threat model: {_esc(str(spec['name']))}", ""]
     if spec.get("description"):
-        lines += [spec["description"].strip(), ""]
+        # Multi-line markdown is intended here, so keep newlines but never raw HTML.
+        lines += [str(spec["description"]).strip().replace("<", "&lt;"), ""]
     meta = [
         ("Owner", spec.get("owner")),
         ("Data classification", spec.get("data_classification")),
@@ -154,7 +175,9 @@ def render_markdown(spec: dict[str, Any], catalog: list[Threat] | None = None) -
         ("Review date", spec.get("review_date")),
     ]
     lines += [
-        f"- **{k}:** {', '.join(map(str, v)) if isinstance(v, list) else v}" for k, v in meta if v
+        f"- **{k}:** {_esc(', '.join(map(str, v)) if isinstance(v, list) else str(v))}"
+        for k, v in meta
+        if v
     ]
     lines += [
         "",
@@ -181,7 +204,7 @@ def render_markdown(spec: dict[str, Any], catalog: list[Threat] | None = None) -
     ]
     for c in comps:
         lines.append(
-            f"| {c['id']} | {_esc(c['name'])} | {c['type']} | {c.get('trust_zone', 'default')} | "
+            f"| {c['id']} | {_esc(str(c['name']))} | {c['type']} | {_esc(str(c.get('trust_zone', 'default')))} | "
             f"{'yes' if c.get('ingests_untrusted') else 'no'} | "
             f"{'yes' if c.get('side_effects') else 'no'} | {_esc(str(c.get('notes', c.get('privileges', ''))))} |"
         )

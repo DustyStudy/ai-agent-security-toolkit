@@ -63,7 +63,14 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(
         "private_key_block",
         "secret",
-        re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"),
+        # The whole block, not just the BEGIN line: matching only the header would leave the
+        # base64 key material itself in the log/output. An unterminated block (truncated
+        # output) is redacted to the end of the text rather than left exposed.
+        re.compile(
+            r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"
+            r"[\s\S]*?"
+            r"(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----|\Z)"
+        ),
     ),
     _Rule(
         "jwt",

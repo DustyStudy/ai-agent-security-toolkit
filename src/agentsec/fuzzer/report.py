@@ -10,6 +10,24 @@ from typing import Any
 from agentsec.fuzzer.harness import CaseResult, FuzzConfig, group_rate
 
 
+def _cell(text: str) -> str:
+    """Neutralise text that came back from the system under test before it enters a table.
+
+    ``evidence`` quotes the target's own output, which an attacker may have steered. Left raw
+    it could end the cell, add rows, or embed an image/link/HTML in a report a human or a CI
+    comment bot then renders.
+    """
+    return (
+        text.replace("|", "\\|")
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 @dataclass
 class FuzzReport:
     generated_at: str
@@ -93,7 +111,9 @@ class FuzzReport:
                 "|---|---|---|",
             ]
             for r in wins[:max_bypasses]:
-                lines.append(f"| `{r.case_id}` | {', '.join(r.hits)} | {r.evidence} |")
+                lines.append(
+                    f"| `{_cell(r.case_id)}` | {_cell(', '.join(r.hits))} | {_cell(r.evidence)} |"
+                )
             if len(wins) > max_bypasses:
                 lines.append(f"\n*...and {len(wins) - max_bypasses} more (see JSON report).*")
             lines.append("")

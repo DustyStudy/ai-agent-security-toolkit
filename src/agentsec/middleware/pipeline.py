@@ -59,8 +59,15 @@ class AgentMiddleware:
         session: Session | None = None,
     ) -> InputScreen:
         scan = self.scanner.scan(text) if self.scanner else ScanResult(score=0.0)
-        if untrusted and session is not None:
-            session.mark_untrusted(source)
+        if untrusted:
+            # ToolGuard falls back to its default session when none is passed, so taint must
+            # land there too. Skipping it silently would leave side-effecting tools available
+            # after the agent read attacker-controlled content.
+            target = session
+            if target is None and self.guard is not None:
+                target = self.guard.default_session
+            if target is not None:
+                target.mark_untrusted(source)
         self._log(ev.UNTRUSTED_INPUT if untrusted else ev.PROMPT, source=source, text=text)
         blocked = bool(scan.flagged and self.block_on_injection)
         if scan.signals:

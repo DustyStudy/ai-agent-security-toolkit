@@ -14,6 +14,17 @@ from agentsec.fuzzer.mock_agents import GuardedAgent, NaiveAgent
 from agentsec.types import AttackInput, Target, TargetResponse, ToolCall, coerce_response
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow redirects: custom headers (auth) would be replayed to whatever host answers."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+
+
 def flatten(inp: AttackInput) -> str:
     """Single-string view of an attack input for text-only targets."""
     if inp.untrusted_content:
@@ -55,8 +66,13 @@ class HttpTarget:
             }
         ).encode()
         req = urllib.request.Request(self.url, data=body, headers=self.headers, method="POST")  # noqa: S310
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310
-            payload = json.loads(resp.read().decode("utf-8"))
+        with _OPENER.open(req, timeout=self.timeout) as resp:  # noqa: S310 - scheme checked in __init__
+            raw = resp.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise ValueError(f"target response exceeds {MAX_RESPONSE_BYTES} bytes")
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("target response must be a JSON object")
         return TargetResponse(
             text=str(payload.get("text", "")),
             tool_calls=[

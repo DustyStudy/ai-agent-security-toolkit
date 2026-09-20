@@ -127,8 +127,12 @@ class ProtectedStringValidator:
         ]
 
     def sanitize(self, text: str) -> str:
+        # check() ignores case AND whitespace, so removal must too. Matching the literal string
+        # would report "redacted" while leaving a spaced-out copy of the secret in the output.
         for p in self._protected:
-            text = re.sub(re.escape(p), "[REDACTED:protected]", text, flags=re.IGNORECASE)
+            chars = [re.escape(c) for c in re.sub(r"\s+", "", p)]
+            if chars:
+                text = re.sub(r"\s*".join(chars), "[REDACTED:protected]", text, flags=re.IGNORECASE)
         return text
 
 
@@ -179,6 +183,11 @@ class ExfilLinkValidator:
         return bad_images, bad_links
 
     def _is_external(self, url: str) -> bool:
+        # "//host/x" (and the backslash forms browsers normalise to it) is a network-path
+        # reference: a UI resolves it against its own scheme and fetches it from ``host``.
+        # It has no scheme, so without this it looks relative and is never flagged.
+        if re.match(r"[\\/]{2}", url):
+            url = "https:" + url.replace("\\", "/")
         parts = urlsplit(url)
         if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
             # relative/data/javascript URLs are handled by DangerousContentValidator
@@ -207,11 +216,23 @@ class ExfilLinkValidator:
         return text
 
 
+def _scheme(word: str) -> re.Pattern[str]:
+    # Browsers drop tabs, newlines and other control characters inside a URL scheme, so
+    # "java<TAB>script:" executes even though it does not contain the word "javascript".
+    gap = r"[\s\x00-\x1f]*"
+    return re.compile(gap.join(word) + gap + ":", re.IGNORECASE)
+
+
 _DANGEROUS = (
     (re.compile(r"<\s*script\b", re.IGNORECASE), "script tag"),
-    (re.compile(r"javascript\s*:", re.IGNORECASE), "javascript: URL"),
+    (_scheme("javascript"), "javascript: URL"),
+    (_scheme("vbscript"), "vbscript: URL"),
     (
-        re.compile(r"\bon(?:error|load|click|mouseover|focus)\s*=", re.IGNORECASE),
+        re.compile(
+            r"\bon(?:error|load|click|mouseover|mouseenter|focus|focusin|toggle|"
+            r"animationstart|pointerover)\s*=",
+            re.IGNORECASE,
+        ),
         "inline event handler",
     ),
     (re.compile(r"data\s*:\s*text/html", re.IGNORECASE), "data:text/html URL"),
@@ -351,6 +372,15 @@ class OutputGuard:
                 blocked = True
             elif any(x.action == Action.REDACT for x in found):
                 current = v.sanitize(current)
+                # Fail closed: if the validator still objects to its own sanitised output it
+                # could not remove what it found, and "redacted" would be a lie.
+                if any(x.action == Action.REDACT for x in v.check(current)):
+                    violations.append(
+                        Violation(
+                            v.name, "could not be fully redacted; output withheld", Action.BLOCK
+                        )
+                    )
+                    blocked = True
         if blocked:
             return GuardResult(self.blocked_message, False, violations)
         return GuardResult(current, True, violations)

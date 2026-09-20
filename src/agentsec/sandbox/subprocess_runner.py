@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess  # noqa: S404 - the point of this module is to constrain subprocess use
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -68,6 +69,57 @@ class SafeCommandRunner:
         self.max_output_bytes = max_output_bytes
         self._env = dict(env or {})
 
+    def _run_bounded(self, argv: list[str], workdir: str) -> tuple[bytes, bytes, int, bool, bool]:
+        """Run ``argv`` and read its output incrementally, stopping the process at the cap.
+
+        ``subprocess.run(capture_output=True)`` buffers everything the child writes and only
+        then lets us truncate it, so a command that prints gigabytes exhausts the host's memory
+        before ``max_output_bytes`` is ever consulted.
+        """
+        limit = self.max_output_bytes
+        proc = subprocess.Popen(  # noqa: S603 - argv list, shell=False, allowlisted binary
+            argv,
+            cwd=workdir,
+            env=self._env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+        )
+        buffers = {"out": bytearray(), "err": bytearray()}
+        overflow = threading.Event()
+
+        def pump(stream: object, key: str) -> None:
+            buf = buffers[key]
+            read = stream.read1  # type: ignore[attr-defined]
+            while True:
+                chunk = read(65536)
+                if not chunk:
+                    return
+                room = limit + 1 - len(buf)
+                if room > 0:
+                    buf.extend(chunk[:room])
+                if len(buf) > limit:
+                    overflow.set()
+                    proc.kill()  # stop the producer; keep draining until the pipe closes
+
+        threads = [
+            threading.Thread(target=pump, args=(proc.stdout, "out"), daemon=True),
+            threading.Thread(target=pump, args=(proc.stderr, "err"), daemon=True),
+        ]
+        for t in threads:
+            t.start()
+        timed_out = False
+        try:
+            proc.wait(timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            proc.kill()
+            proc.wait()
+        for t in threads:
+            t.join(timeout=5)
+        code = -1 if timed_out else proc.returncode
+        return bytes(buffers["out"]), bytes(buffers["err"]), code, timed_out, overflow.is_set()
+
     def run(self, alias: str, args: Sequence[str] = (), *, cwd: str | None = None) -> CommandResult:
         if alias not in self._resolved:
             raise CommandDenied(f"command {alias!r} is not allowlisted")
@@ -92,22 +144,10 @@ class SafeCommandRunner:
             raise CommandDenied("working directory escapes allowed roots")
 
         argv = [exe, *args]
-        try:
-            proc = subprocess.run(  # noqa: S603 - argv list, shell=False, allowlisted binary
-                argv,
-                cwd=workdir,
-                env=self._env,
-                capture_output=True,
-                timeout=self.timeout,
-                shell=False,
-                check=False,
-            )
-            out, err, code, timed_out = proc.stdout, proc.stderr, proc.returncode, False
-        except subprocess.TimeoutExpired as exc:
-            out, err, code, timed_out = exc.stdout or b"", exc.stderr or b"", -1, True
+        out, err, code, timed_out, overflow = self._run_bounded(argv, workdir)
 
         limit = self.max_output_bytes
-        truncated = len(out) > limit or len(err) > limit
+        truncated = overflow or len(out) > limit or len(err) > limit
         return CommandResult(
             argv=argv,
             returncode=code,

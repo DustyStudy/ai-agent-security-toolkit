@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import functools
 import threading
 import uuid
@@ -162,8 +163,15 @@ class ToolGuard:
 
         if decision.allowed:
             with self._lock:
-                session.calls[call.name] += 1
-                session.total_calls += 1
+                # evaluate() ran without the lock (and an approver may have blocked for a
+                # long time), so concurrent calls could all have passed the limit check.
+                # Re-check and count atomically so a limit really is a limit.
+                over = self._over_limit(call.name, session)
+                if over is not None:
+                    decision = Decision(Verdict.DENY, call.name, (over,))
+                else:
+                    session.calls[call.name] += 1
+                    session.total_calls += 1
         self._audit(
             "tool_decision",
             session,
@@ -178,13 +186,20 @@ class ToolGuard:
     ) -> Any:
         """Authorize then run ``fn(**call.arguments)``. Raises :class:`ToolDenied`."""
         session = session or self.default_session
+        # Judge and run the SAME snapshot: the caller (or another thread) still holds the
+        # original dict and could change it between authorization and execution.
+        call = ToolCall(name=call.name, arguments=copy.deepcopy(call.arguments), id=call.id)
         decision = self.authorize(call, session)
         if not decision.allowed:
             raise ToolDenied(decision)
-        result = fn(**call.arguments)
         rule = self.policy.tools[call.name]
-        if rule.returns_untrusted:
-            session.mark_untrusted(call.name)
+        try:
+            result = fn(**call.arguments)
+        finally:
+            # Taint even if the tool raised: it may already have fetched attacker-controlled
+            # content before failing, and the model is shown the error either way.
+            if rule.returns_untrusted:
+                session.mark_untrusted(call.name)
         self._audit("tool_result", session, tool=call.name, result=result)
         return result
 
@@ -198,6 +213,15 @@ class ToolGuard:
             return self.execute(ToolCall(name=name, arguments=kwargs), fn, session)
 
         return guarded
+
+    def _over_limit(self, name: str, session: Session) -> str | None:
+        rule = self.policy.tools[name]
+        if rule.max_calls is not None and session.calls[name] >= rule.max_calls:
+            return f"per-session limit of {rule.max_calls} calls reached"
+        cap = self.policy.max_total_calls
+        if cap is not None and session.total_calls >= cap:
+            return f"session total limit of {cap} tool calls reached"
+        return None
 
     def _audit(self, event: str, session: Session, **data: Any) -> None:
         if self.audit is not None:

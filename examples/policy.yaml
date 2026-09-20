@@ -1,0 +1,52 @@
+# Example tool policy for a document-assistant agent.
+# Deny-by-default: anything not listed here is refused.
+# Validate in CI:  agentsec policy validate --strict examples/policy.yaml
+version: 1
+
+# Once the session has read untrusted content (a retrieved doc, a web page, another
+# tool's output), tools marked side_effects are denied for the rest of the session.
+# Use `action: approve` to send them to a human instead.
+taint:
+  enabled: true
+  action: deny
+
+max_total_calls: 40
+
+tools:
+  search_docs:
+    description: Search the internal knowledge base.
+    returns_untrusted: true        # results may contain attacker-written text
+    max_calls: 10
+    args:
+      query: {type: string, required: true, max_length: 300}
+
+  read_file:
+    description: Read a file from the agent workspace.
+    returns_untrusted: true
+    args:
+      path:
+        type: path
+        required: true
+        roots: [/srv/agent/workspace]     # symlinks and .. are resolved before the check
+        deny_patterns: ['(^|/)\.env$', '\.pem$', '(^|/)id_rsa']
+
+  http_get:
+    description: Fetch JSON from approved internal APIs.
+    side_effects: true             # egress channel: can carry data out in the URL
+    args:
+      url:
+        type: url
+        required: true
+        schemes: [https]
+        hosts: [api.corp.example, "*.internal.corp.example"]
+        block_private: true        # rejects 169.254.169.254, 10/8, loopback, decimal/hex IP forms
+        resolve_dns: true          # also rejects hostnames that resolve to private ranges
+
+  send_email:
+    description: Send a message to a colleague.
+    side_effects: true
+    require_approval: true         # human approves every send, with the exact recipient and body
+    args:
+      to: {type: string, required: true, pattern: '[^@\s]+@corp\.example'}
+      subject: {type: string, max_length: 200}
+      body: {type: string, required: true, max_length: 5000}

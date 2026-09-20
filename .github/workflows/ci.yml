@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same branch/PR instead of letting them pile up.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: this workflow only reads the repo and installs from PyPI.
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package + dev dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check src tests
+
+      - name: Ruff format check
+        run: ruff format --check src tests
+
+      - name: Mypy
+        run: mypy src
+
+      - name: Pytest
+        run: pytest -v --cov=agentsec --cov-report=term-missing
+
+  toolkit-self-checks:
+    # Dogfooding: the toolkit's own CLI validates its example assets and proves the
+    # containment layers still hold against the reference simulator.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: python -m pip install -e .
+
+      - name: Validate example tool policy (strict)
+        run: agentsec policy validate --strict examples/policy.yaml
+
+      - name: Example threat model is current
+        run: |
+          agentsec threatmodel render examples/support-copilot.system.yaml -o /tmp/tm.md
+          diff -u docs/threat-model/EXAMPLE-support-copilot.md /tmp/tm.md
+
+      - name: Containment regression - guarded reference agent must allow 0% tool misuse / exfil / prompt leak
+        run: >
+          agentsec fuzz --target builtin:guarded
+          --categories tool_misuse,exfiltration,prompt_leak
+          --max-asr 0 --quiet --json fuzz.json
+
+      - name: Baseline sanity - naive reference agent must be fully compromised
+        run: |
+          agentsec fuzz --target builtin:naive --quiet --json naive.json
+          python -c 'import json; d = json.load(open("naive.json")); assert d["asr"] == 1.0, d["asr"]'
+
+      - name: Upload fuzz report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-report
+          path: fuzz.json
+          retention-days: 14

@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# runtime artifacts: audit logs and fuzz output can contain prompts and evidence
+audit*.jsonl
+fuzz*.json
+fuzz*.md
+!docs/sample-fuzz-report.md
+*.local.yaml
+.env
+
+.DS_Store

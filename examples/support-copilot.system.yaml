@@ -1,0 +1,59 @@
+# Worked example input for:  agentsec threatmodel render examples/support-copilot.system.yaml
+name: Support Copilot
+description: >
+  Customer-support assistant embedded in the agent console. It reads incoming tickets and the
+  public help-center, drafts replies, looks up the customer's order in the CRM, and can issue
+  refunds up to a limit after agent approval.
+owner: support-platform-team
+data_classification: confidential
+models: [claude-sonnet-5]
+review_date: 2026-09-20
+
+components:
+  - {id: console,  name: Agent console UI,        type: user_interface, trust_zone: corp}
+  - {id: runtime,  name: Copilot runtime,         type: orchestrator,   trust_zone: platform}
+  - {id: llm,      name: Hosted model API,        type: llm,            trust_zone: vendor}
+  - id: tickets
+    name: Inbound tickets (customer-written)
+    type: retrieval_store
+    trust_zone: internet
+    ingests_untrusted: true
+    notes: Any customer can write arbitrary text here.
+  - id: helpcenter
+    name: Help-center index
+    type: retrieval_store
+    trust_zone: platform
+    ingests_untrusted: true
+    notes: Community-editable articles are indexed.
+  - id: memory
+    name: Per-agent conversation memory
+    type: memory
+    trust_zone: platform
+  - id: crm
+    name: CRM lookup tool
+    type: tool
+    trust_zone: platform
+    holds_sensitive_data: true
+    privileges: read customer PII and order history
+  - id: refund
+    name: Refund tool
+    type: tool
+    trust_zone: platform
+    side_effects: true
+    privileges: issue refunds up to 200 USD
+  - id: mailer
+    name: Reply e-mail tool
+    type: tool
+    trust_zone: platform
+    side_effects: true
+    privileges: send e-mail as support@
+
+data_flows:
+  - {from: console,    to: runtime, data: agent prompt}
+  - {from: tickets,    to: runtime, data: ticket text}
+  - {from: helpcenter, to: runtime, data: retrieved articles}
+  - {from: runtime,    to: llm,     data: prompt + ticket + articles}
+  - {from: runtime,    to: memory,  data: conversation summary}
+  - {from: runtime,    to: crm,     data: customer id}
+  - {from: runtime,    to: refund,  data: order id + amount}
+  - {from: runtime,    to: mailer,  data: reply body}

@@ -11,6 +11,7 @@ import json
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from agentsec.middleware.redact import redact_text
 from agentsec.sandbox.guard import Session, ToolDenied, ToolGuard
 from agentsec.types import ToolCall
 
@@ -39,7 +40,10 @@ def _run(
     except ToolDenied as exc:
         return f"Tool call refused by security policy: {exc.decision.message()}", True
     except Exception as exc:  # noqa: BLE001 - tool failures are reported to the model, not raised
-        return f"Tool raised {type(exc).__name__}: {exc}", True
+        # The model (and so anything that can steer it) reads this text: an exception message
+        # can carry connection strings, tokens or internal paths. Redact and bound it.
+        detail, _ = redact_text(str(exc))
+        return f"Tool raised {type(exc).__name__}: {detail[:300]}", True
 
 
 def run_anthropic_tool_uses(
@@ -53,8 +57,14 @@ def run_anthropic_tool_uses(
     for block in content_blocks:
         if block.get("type") != "tool_use":
             continue
+        raw_input: Any = block.get("input")
+        # dict() on a malformed (non-object) input would raise and crash the whole agent loop.
+        # Pass it through instead: the guard denies non-object arguments and audits the attempt.
+        arguments: Any = dict(raw_input) if isinstance(raw_input, dict) else raw_input
         call = ToolCall(
-            name=block["name"], arguments=dict(block.get("input") or {}), id=block.get("id", "")
+            name=block["name"],
+            arguments={} if arguments is None else arguments,
+            id=block.get("id", ""),
         )
         content, is_error = _run(guard, session, registry, call)
         item: dict[str, Any] = {

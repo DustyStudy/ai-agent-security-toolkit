@@ -28,6 +28,8 @@ flowchart LR
   F[Fuzzer] -. measures .-> S & G & O
 ```
 
+**New here?** Take the [five-minute tour](docs/TOUR.md) (real output, no API key needed). **Deploying it?** Read the [production guide](docs/PRODUCTION.md).
+
 ## Why this exists
 
 A prompt-injection filter will be bypassed; that is a property of the problem, not of any one filter. What you can control is **blast radius**: what the agent is *allowed* to do once its instructions have been hijacked, what leaves the system, and whether you can reconstruct what happened. This toolkit is built around that idea, and around **measuring** it rather than asserting it.

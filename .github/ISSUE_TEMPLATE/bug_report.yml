@@ -1,0 +1,37 @@
+name: Bug report
+description: Something behaves differently from the documentation
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this is a **security bypass** (a way around `ToolGuard`, the audit log, redaction, or the renderer), do not file it here. Use the private link on the issue chooser page instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Include what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: A short script, policy file or command. Remove any real secrets or prompts.
+      render: python
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: agentsec version
+      placeholder: "0.1.0 (from `pip show ai-agent-security-toolkit`)"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Python version and OS
+      placeholder: "3.12, Windows 11"
+    validations:
+      required: true

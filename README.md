@@ -169,7 +169,7 @@ mypy src
 pytest --cov=agentsec
 ```
 
-CI runs lint, type-check and tests on Python 3.11/3.12, validates the example policy, re-generates the example threat model to confirm it is current, and runs the fuzzer as a regression check that the containment layers still hold at 0% for tool misuse, exfiltration and prompt leak. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+CI runs lint, type-check and tests on Linux (Python 3.11 to 3.13) and Windows and macOS (3.11, 3.12), builds and checks the package, validates the example policy, re-generates the example threat model to confirm it is current, and runs the fuzzer as a regression check that the containment layers still hold at 0% for tool misuse, exfiltration and prompt leak. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 ## License
 

@@ -41,6 +41,12 @@ dev = [
     "types-jsonschema>=4.20",
 ]
 
+[project.urls]
+Homepage = "https://github.com/DustyStudy/ai-agent-security-toolkit"
+Issues = "https://github.com/DustyStudy/ai-agent-security-toolkit/issues"
+Changelog = "https://github.com/DustyStudy/ai-agent-security-toolkit/blob/main/CHANGELOG.md"
+Security = "https://github.com/DustyStudy/ai-agent-security-toolkit/security/policy"
+
 [project.scripts]
 agentsec = "agentsec.cli:main"
 

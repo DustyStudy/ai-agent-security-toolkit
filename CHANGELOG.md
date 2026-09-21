@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- The Scorecard workflow can be run on demand (`workflow_dispatch`), and the README explains how to read the score for a solo-maintained project.
+
 ## [0.2.1] - 2026-09-21
 
 ### Added

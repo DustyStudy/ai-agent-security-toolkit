@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-21
+
 ### Added
 - `docs/TOUR.md` (a five-minute tour with real CLI output), `docs/PRODUCTION.md` (rollout order, policy and audit guidance, an operating checklist), and `scripts/bench_overhead.py`, which measures the per-call overhead the toolkit adds (a table of results is in the production guide).
 - `format_cef` and `CefSink`: audit records as ArcSight Common Event Format for SIEM ingestion, with CEF-compliant escaping and bounding of attacker-influenceable values and severities that rank denials and findings above routine activity. `TeeSink` writes to several sinks with the first as the source of truth, so a SIEM outage cannot break the hash chain.
@@ -41,5 +43,6 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/releases/tag/v0.1.0

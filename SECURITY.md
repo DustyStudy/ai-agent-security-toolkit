@@ -23,5 +23,5 @@ The fuzzer's payloads are inert strings that ask for observable, harmless outcom
 - CodeQL runs on every push/PR and weekly; dependency review runs on PRs and fails on high-severity findings.
 - Dependabot updates Python dependencies and GitHub Actions weekly.
 - Releases are built by a tag-triggered workflow that attaches a CycloneDX SBOM and a build provenance attestation to the GitHub Release. Verify an artifact with `gh attestation verify <file> --repo DustyStudy/ai-agent-security-toolkit`.
-- OpenSSF Scorecard runs weekly and on pushes to `main`; results appear under Security -> Code scanning.
+- OpenSSF Scorecard runs weekly and on pushes to `main`; results are published to the public Scorecard API (api.scorecard.dev).
 - Dependency review rejects GPL and AGPL licensed dependencies.

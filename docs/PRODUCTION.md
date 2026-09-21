@@ -35,7 +35,7 @@ Each step is useful on its own, and later steps build on earlier ones.
 
 ## Performance
 
-The overhead is small next to a model call, which takes hundreds of milliseconds to seconds. Measured with [`scripts/bench_overhead.py`](../scripts/bench_overhead.py) on one machine (agentsec 0.1.0, Python 3.14.7, Windows 11, AMD64). Re-run it on your hardware; these numbers are indicative, not a guarantee.
+The overhead is small next to a model call, which takes hundreds of milliseconds to seconds. Measured with [`scripts/bench_overhead.py`](../scripts/bench_overhead.py) on one machine (the code that became agentsec 0.2.0, Python 3.14.7, Windows 11, AMD64). Re-run it on your hardware; these numbers are indicative, not a guarantee.
 
 | Operation | median (us) |
 |---|---:|

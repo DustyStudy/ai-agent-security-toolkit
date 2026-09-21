@@ -4,6 +4,15 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- Fuzz targets for the toolkit's own security-critical code (`fuzz/`): CEF formatting, URL allowlisting, private-address blocking across IP encodings, path confinement, redaction, the injection scanner, policy loading, the tool guard and audit-chain verification. They run as ordinary tests on a seed corpus and random inputs, and in CI with coverage-guided fuzzing (Atheris). Each target's ability to fail is itself tested.
+- Releases attach the attestation bundle (`*.sigstore.json` and `*.intoto.jsonl`) next to the artifacts, so they can be verified offline with `gh attestation verify --bundle`. The release workflow verifies every artifact against the bundle before publishing.
+
+### Fixed
+- URL host checks were more lenient than the fetchers they protect. Extra trailing dots (`api.example.com..`) were stripped, and leading or trailing whitespace, control, zero-width, bidirectional and line-separator characters were trimmed instead of rejected, so the guard could judge a different host than the one a client connects to. Such hosts are now refused. IP literals were already blocked in these forms.
+- Loading a policy with a wrongly typed value crashed with `TypeError` instead of raising `PolicyError`, and a quoted `allow: "false"` (a truthy string) silently enabled the tool. Policy fields are now type-checked, a `hosts: api.example.com` given as a string instead of a list is an error, and `max_total_calls`, `max_calls` and `version` must be integers. Policies that only worked by accident may now be rejected with a clear message.
+- CEF header fields (vendor, product, version, event name) kept U+2028 and U+2029, which several parsers treat as line breaks. They are now replaced with spaces.
+
 ## [0.2.0] - 2026-09-21
 
 ### Added

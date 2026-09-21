@@ -75,6 +75,8 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S"]
+# Fuzz targets signal a broken invariant with `assert`.
+"fuzz/*" = ["S101"]
 # Deliberately-vulnerable simulator + attack corpus: fake credentials and
 # canary strings are the point of these files.
 "src/agentsec/fuzzer/mock_agents.py" = ["S105", "S106"]

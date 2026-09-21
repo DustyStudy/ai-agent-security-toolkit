@@ -5,6 +5,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ## [Unreleased]
 
 ### Added
+- `agentsec fuzz --sarif` (SARIF 2.1.0 for GitHub code scanning, with `--sarif-artifact` to choose the file alerts attach to) and `--junit` (JUnit XML). `FuzzReport.to_sarif()` / `to_junit()`.
 - Async API for `asyncio` applications: `ToolGuard.aauthorize`, `aexecute` and `awrap` (async or sync approvers; async or sync tools, with sync tools run in a worker thread), `arun_anthropic_tool_uses`, `arun_openai_tool_calls` and `SafeCommandRunner.arun`. See `examples/async_agent_loop.py`.
 - `async def` fuzz targets: `agentsec fuzz --target module:callable`, `text_target` and the new `sync_target` accept coroutine functions and run them on a single reused event loop.
 

@@ -71,6 +71,21 @@ Each case plants a random **canary** (split in two so a model that merely *quote
 
 `--max-asr 0.05` makes the command exit `1` above 5%, so it can gate a release. Add `--categories tool_misuse,exfiltration,prompt_leak --max-asr 0` to gate specifically on containment.
 
+**CI reports.** `--sarif report.sarif` writes SARIF 2.1.0 for GitHub code scanning and `--junit report.xml` writes JUnit XML for any CI test UI. Successful attacks become findings (`error` for tool misuse, exfiltration and prompt leak; `warning` for instruction-following), each tagged with its OWASP LLM Top 10 (2025) id. Fuzz findings have no source location, so pass `--sarif-artifact path/to/agent.py` (repo-relative) to say which file the alerts attach to.
+
+```yaml
+# .github/workflows/agent-fuzz.yml (excerpt)
+permissions: {contents: read, security-events: write}
+steps:
+  - run: agentsec fuzz --target mypkg.agent:respond --max-asr 0.10 --quiet
+         --sarif agentsec.sarif --sarif-artifact src/mypkg/agent.py
+  - uses: github/codeql-action/upload-sarif@v4
+    if: always()
+    with: {sarif_file: agentsec.sarif}
+```
+
+Text taken from the target's output is bounded and stripped of control characters before it enters either format. The SARIF output is validated against the official 2.1.0 schema in the tests; it has not been uploaded to GitHub code scanning by this repo's CI.
+
 Targets may be `async def`: `agentsec fuzz --target mypkg.agent:respond` detects a coroutine function and runs it on one reused event loop, and `text_target` / `sync_target` do the same when you call the harness from Python.
 
 For richer targets, pass a callable that accepts an `AttackInput` and returns a `TargetResponse` (with `tool_calls`); see [`targets.py`](src/agentsec/fuzzer/targets.py).

@@ -143,6 +143,21 @@ out = await runner.arun("git", ["status"])                    # SafeCommandRunne
 
 Complete loop: [`examples/async_agent_loop.py`](examples/async_agent_loop.py).
 
+### LangChain and LangGraph
+
+`guard_tool` / `guard_tools` return tools with the same name, description and argument schema whose every call goes through the guard first, for both `invoke` and `ainvoke`:
+
+```python
+from agentsec.integrations.langchain import guard_tools
+from langgraph.prebuilt import create_react_agent
+
+agent = create_react_agent(model, guard_tools([search_docs, send_email], guard, session))
+```
+
+A refused call comes back to the model as readable text ("Tool call refused by security policy: ...") instead of crashing the run, and the original tool never runs. The caller's run configuration (callbacks, tags) is passed through to the original tool. `pip install "ai-agent-security-toolkit[langchain]"`.
+
+The guard sees the arguments after LangChain's own validation, including defaults LangChain fills in, so the policy must allow every argument in the tool's schema. Tools with injected arguments (`InjectedState`, `InjectedToolCallId`) and tool artifacts (`content_and_artifact`) are not supported. Tested against real `langchain-core` and a LangGraph `ToolNode` in CI; not run against a live model.
+
 ### MCP servers
 
 MCP servers describe their own tools and return content your model then reads, so both are attacker-influenceable: **tool poisoning** hides instructions in a description or parameter schema, and a **rug pull** swaps a reviewed description later. `GuardedMCPClient` wraps an MCP client (the SDK's `Client` or `ClientSession`) so the guard sits in front of it:

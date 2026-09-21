@@ -22,7 +22,7 @@ The fuzzer's payloads are inert strings that ask for observable, harmless outcom
 - CI installs its Python tooling from hash-pinned requirement files (`pip install --require-hashes`), and a CI job checks they match `pyproject.toml`.
 - `step-security/harden-runner` runs in audit mode to log runner egress.
 - CodeQL runs on every push/PR and weekly; dependency review runs on PRs and fails on high-severity findings.
-- Dependabot updates Python dependencies and GitHub Actions weekly.
+- Dependabot updates GitHub Actions weekly and raises security alerts for Python dependencies. The hash-pinned CI tooling files are refreshed with `python scripts/lock.py --upgrade` (Dependabot cannot resolve them consistently).
 - Releases are built by a tag-triggered workflow that attaches a CycloneDX SBOM and a build provenance attestation to the GitHub Release. Verify an artifact with `gh attestation verify <file> --repo DustyStudy/ai-agent-security-toolkit`, or offline with the attestation bundle attached to the release: `gh attestation verify <file> --bundle <name>.sigstore.json --repo DustyStudy/ai-agent-security-toolkit`.
 - The security-critical parsers and validators (tool-guard argument and URL checks, path confinement, policy loading, redaction, the CEF formatter, audit-chain verification) are fuzzed with Atheris in CI, and the same targets run as regression tests on every change.
 - OpenSSF Scorecard runs weekly and on pushes to `main`; results are published to the public Scorecard API (api.scorecard.dev).

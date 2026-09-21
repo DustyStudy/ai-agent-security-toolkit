@@ -31,6 +31,8 @@ python scripts/lock.py             # re-resolve what changed, keep other pins
 python scripts/lock.py --upgrade   # move every pin forward
 ```
 
+Refresh them with `--upgrade` every so often, and whenever a security alert names a pinned package. Dependabot is deliberately not configured to update them: it bumps single transitive packages in isolation, which leaves the lock inconsistent.
+
 ## Fuzz targets
 
 `fuzz/targets.py` holds functions that must keep an invariant for *any* input (an accepted URL really points at an allowed host, a planted secret never survives redaction, tampering with an audit chain is always detected, and so on). They run as ordinary tests on a seed corpus and random inputs. For coverage-guided fuzzing:

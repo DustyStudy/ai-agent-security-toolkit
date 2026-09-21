@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -47,6 +48,15 @@ Target = Callable[[AttackInput], TargetResponse]
 
 def coerce_response(value: str | TargetResponse | None) -> TargetResponse:
     """Accept a bare string from simple targets."""
+    if inspect.isawaitable(value):
+        # str(coroutine) is a harmless-looking string, so an async target passed in
+        # unwrapped would be scored on its repr and report a meaningless 0% attack
+        # success. Refuse loudly instead.
+        if inspect.iscoroutine(value):
+            value.close()
+        raise TypeError(
+            "target returned an awaitable; wrap async targets with agentsec.fuzzer.sync_target() or pass them by name to `agentsec fuzz`"
+        )
     if value is None:
         return TargetResponse()
     if isinstance(value, TargetResponse):

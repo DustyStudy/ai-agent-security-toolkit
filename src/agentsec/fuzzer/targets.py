@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
+import inspect
 import json
 import urllib.error
 import urllib.request
+import weakref
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit
@@ -32,8 +35,43 @@ def flatten(inp: AttackInput) -> str:
     return inp.user_message
 
 
-def text_target(fn: Callable[[str], str]) -> Target:
-    """Wrap ``fn(prompt) -> reply`` so it accepts an :class:`AttackInput`."""
+class _LoopRunner:
+    """Runs coroutines to completion on ONE event loop that is reused across calls.
+
+    ``asyncio.run`` per case would create a fresh loop each time, which breaks agents
+    that hold loop-bound clients (an ``httpx.AsyncClient``, a database pool).
+    """
+
+    def __init__(self) -> None:
+        self._runner: asyncio.Runner | None = None
+
+    def run(self, coro: Any) -> Any:
+        if self._runner is None:
+            self._runner = asyncio.Runner()
+            weakref.finalize(self, self._runner.close)
+        return self._runner.run(coro)
+
+
+def sync_target(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Make an ``async def`` target callable from the (synchronous) fuzz harness.
+
+    Ordinary callables are returned unchanged. Call it from synchronous code only: it
+    cannot be used from inside a running event loop.
+    """
+    if not inspect.iscoroutinefunction(fn):
+        return fn
+    runner = _LoopRunner()
+
+    def bridged(*args: Any, **kwargs: Any) -> Any:
+        return runner.run(fn(*args, **kwargs))
+
+    bridged.accepts = getattr(fn, "accepts", "text")  # type: ignore[attr-defined]
+    return bridged
+
+
+def text_target(fn: Callable[[str], Any]) -> Target:
+    """Wrap ``fn(prompt) -> reply`` (sync or ``async def``) so it accepts an :class:`AttackInput`."""
+    fn = sync_target(fn)
 
     def target(inp: AttackInput) -> TargetResponse:
         return coerce_response(fn(flatten(inp)))
@@ -166,6 +204,6 @@ def load_target(spec: str) -> Target:
         return AnthropicTarget(model=spec.split(":", 1)[1] or "claude-sonnet-5")
     if ":" in spec:
         module_name, _, attr = spec.partition(":")
-        fn = getattr(importlib.import_module(module_name), attr)
+        fn = sync_target(getattr(importlib.import_module(module_name), attr))
         return fn if getattr(fn, "accepts", "text") == "attack_input" else text_target(fn)
     raise ValueError(f"unrecognised target spec {spec!r}")

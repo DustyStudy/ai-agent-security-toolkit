@@ -71,6 +71,8 @@ Each case plants a random **canary** (split in two so a model that merely *quote
 
 `--max-asr 0.05` makes the command exit `1` above 5%, so it can gate a release. Add `--categories tool_misuse,exfiltration,prompt_leak --max-asr 0` to gate specifically on containment.
 
+Targets may be `async def`: `agentsec fuzz --target mypkg.agent:respond` detects a coroutine function and runs it on one reused event loop, and `text_target` / `sync_target` do the same when you call the harness from Python.
+
 For richer targets, pass a callable that accepts an `AttackInput` and returns a `TargetResponse` (with `tool_calls`); see [`targets.py`](src/agentsec/fuzzer/targets.py).
 
 ## 2. Constrain tool calls
@@ -100,6 +102,31 @@ What the guard enforces:
 - **Human approval** hook, per-tool and per-session call limits, and an audit trail of every request and decision.
 
 Drop-in helpers for the tool-calling wire formats: `run_anthropic_tool_uses` and `run_openai_tool_calls` turn model tool requests into results, with denials returned as error text the model can read. See the complete loop in [`examples/agent_loop.py`](examples/agent_loop.py).
+
+### Async applications
+
+Every entry point has an async form, so the guard fits FastAPI, the MCP Python SDK, LangGraph and other `asyncio` code without blocking the event loop:
+
+```python
+guard = ToolGuard(Policy.from_yaml("policy.yaml"), approver=ask_a_human)   # approver may be sync or async
+session = Session()
+
+search = guard.awrap("search_docs", search_docs, session)   # search_docs may be async def or a plain function
+await search(query="Q3 revenue")
+
+results = await arun_anthropic_tool_uses(guard, session, blocks, registry)   # or arun_openai_tool_calls
+out = await runner.arun("git", ["status"])                    # SafeCommandRunner
+```
+
+- `aauthorize`, `aexecute` and `awrap` mirror `authorize`, `execute` and `wrap`, with the same policy, taint, limit and audit behavior.
+- Plain (non-`async`) tools run in a worker thread so a blocking tool cannot stall the loop. DNS-resolving URL rules are evaluated off the loop too.
+- Limits stay exact under concurrent tasks (`asyncio.gather` over many calls cannot exceed `max_calls`), and the session is tainted even if an untrusted-content tool raises or its task is cancelled.
+- The sync API **fails closed** on async pieces instead of misreading them: an `async def` approver used with `authorize()` is refused, and `execute()` on an `async def` tool raises `TypeError` instead of returning a coroutine.
+- `arun_*_tool_uses` run one model turn's calls in the order given, so taint from a read applies to a later side-effecting call in the same turn. For concurrency, call `aexecute` yourself.
+- A worker thread cannot be interrupted: if a task is cancelled while a plain tool runs, the tool may still finish. Prefer `async def` tools where cancellation matters.
+- `AuditLogger` / `FileSink` do a small synchronous append. For latency-sensitive loops, use a `CallbackSink` that hands records to a queue.
+
+Complete loop: [`examples/async_agent_loop.py`](examples/async_agent_loop.py).
 
 `SafeCommandRunner` runs external commands with no shell, an executable/argument allowlist, a scrubbed environment, a pinned working directory, a timeout, and an output cap. It is **not** an OS sandbox. Put it inside a container or microVM for untrusted code.
 

@@ -7,7 +7,7 @@ This directory has two ways to do it:
 1. **Generate** a first draft from a YAML system description: `agentsec threatmodel render`. See the worked example, [EXAMPLE-support-copilot.md](EXAMPLE-support-copilot.md).
 2. **Fill in by hand** with the [blank template](TEMPLATE.md) if you would rather run a whiteboard session.
 
-Both use the same catalog ([`threats.yaml`](../../src/agentsec/threatmodel/data/threats.yaml), 23 threats). It is a *candidate list*: the value is in the team confirming or dismissing each threat for their system and recording why.
+Both use the same catalog ([`threats.yaml`](../../src/agentsec/threatmodel/data/threats.yaml), 25 threats, each mapped to the OWASP LLM Top 10, the OWASP Top 10 for Agentic Applications and MITRE ATLAS; see the [framework crosswalk](frameworks.md)). It is a *candidate list*: the value is in the team confirming or dismissing each threat for their system and recording why.
 
 ## How STRIDE maps to agents
 

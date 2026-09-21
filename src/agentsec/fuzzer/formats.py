@@ -9,7 +9,7 @@ steered that text, so it is bounded and stripped of control characters before us
 
 from __future__ import annotations
 
-import re
+import unicodedata
 from typing import TYPE_CHECKING, Any
 from xml.etree import ElementTree as ET  # noqa: S405 - only used to *generate* XML
 
@@ -23,8 +23,10 @@ SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
 INFORMATION_URI = "https://github.com/DustyStudy/ai-agent-security-toolkit"
 MAX_TEXT = 300
 
-# Characters XML 1.0 cannot represent, plus C0/C1 controls that only add noise to viewers.
-_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff￾￿]")
+# Unicode categories removed from quoted text: control characters (incl. NUL and ESC), format
+# characters (zero-width and bidirectional overrides that can visually spoof a report),
+# line/paragraph separators and lone surrogates. XML 1.0 cannot carry most of these anyway.
+_STRIP_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
 # goal -> (rule id, name, severity level, GitHub security-severity, OWASP LLM Top 10 (2025), help)
 _RULES: dict[str, tuple[str, str, str, str, str, str]] = {
@@ -80,7 +82,10 @@ _FALLBACK = (
 
 def clean(text: str, limit: int = MAX_TEXT) -> str:
     """Bound and de-fang text that originated in the system under test."""
-    text = _ILLEGAL.sub(" ", text).replace("\r", " ").replace("\n", " ")
+    text = "".join(
+        " " if unicodedata.category(ch) in _STRIP_CATEGORIES or ch in "\ufffe\uffff" else ch
+        for ch in text
+    )
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 

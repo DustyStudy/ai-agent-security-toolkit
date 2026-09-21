@@ -3,6 +3,8 @@
 [![CI](https://github.com/DustyStudy/ai-agent-security-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/DustyStudy/ai-agent-security-toolkit/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/DustyStudy/ai-agent-security-toolkit/actions/workflows/codeql.yml/badge.svg)](https://github.com/DustyStudy/ai-agent-security-toolkit/actions/workflows/codeql.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/DustyStudy/ai-agent-security-toolkit/badge)](https://scorecard.dev/viewer/?uri=github.com/DustyStudy/ai-agent-security-toolkit)
+[![Release](https://img.shields.io/github/v/release/DustyStudy/ai-agent-security-toolkit)](https://github.com/DustyStudy/ai-agent-security-toolkit/releases)
 
 **Fuzz, contain, validate, and audit LLM agents.** Four pieces that fit together:
 

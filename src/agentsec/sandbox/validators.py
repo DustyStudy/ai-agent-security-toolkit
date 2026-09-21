@@ -7,6 +7,7 @@ import math
 import os
 import re
 import socket
+import unicodedata
 from collections.abc import Callable, Sequence
 from pathlib import PurePosixPath
 from typing import Any
@@ -79,12 +80,21 @@ def _ascii_host(host: str) -> str | None:
     ignore a trailing dot, so a fullwidth "127.0.0.1" and ``https://127.0.0.1./`` both reach
     loopback. Checking the raw string would let both through; check this form instead.
     """
-    host = host.strip()
+    # Whitespace, control and format characters (zero-width, bidirectional overrides, line
+    # separators) never belong in a hostname. Trimming them would judge a different host than
+    # the fetcher connects to, so refuse instead.
+    if any(ch.isspace() or unicodedata.category(ch) in {"Cc", "Cf", "Zl", "Zp"} for ch in host):
+        return None
     try:
         ascii_form = host if host.isascii() else host.encode("idna").decode("ascii")
     except UnicodeError:
         return None
-    return ascii_form.rstrip(".").lower()
+    # One trailing dot marks an absolute name and is ignored by fetchers. More than one leaves an
+    # empty DNS label, which fetchers reject, so refuse it rather than guess what they would do.
+    ascii_form = ascii_form.removesuffix(".").lower()
+    if any(label == "" for label in ascii_form.split(".")):
+        return None
+    return ascii_form
 
 
 def _parse_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:

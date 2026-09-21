@@ -37,8 +37,12 @@ def _header(text: str) -> str:
 
 
 def _plain(text: str) -> str:
-    """Replace control characters (including newlines) with spaces."""
-    return "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in text)
+    """Replace control characters and Unicode line/paragraph separators with spaces.
+
+    U+2028 and U+2029 are not control characters, but many parsers (Python's ``splitlines``,
+    JavaScript, several log shippers) treat them as line breaks.
+    """
+    return "".join(" " if unicodedata.category(ch) in ("Cc", "Zl", "Zp") else ch for ch in text)
 
 
 def _value(value: Any, limit: int = MAX_VALUE_CHARS) -> str:

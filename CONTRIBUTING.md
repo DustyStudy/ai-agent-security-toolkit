@@ -13,13 +13,24 @@ python -m pip install -e ".[dev]"
 ## Before opening a PR
 
 ```bash
-ruff check src tests
-ruff format src tests
+ruff check src tests fuzz
+ruff format src tests fuzz
 mypy src
 pytest --cov=agentsec
 ```
 
 All four also run in CI. Tests run on Linux, Windows and macOS, on Python 3.11 to 3.13, with a 90% coverage floor. Add a line to `CHANGELOG.md` under "Unreleased" for user-visible changes.
+
+## Fuzz targets
+
+`fuzz/targets.py` holds functions that must keep an invariant for *any* input (an accepted URL really points at an allowed host, a planted secret never survives redaction, tampering with an audit chain is always detected, and so on). They run as ordinary tests on a seed corpus and random inputs. For coverage-guided fuzzing:
+
+```bash
+pip install atheris                       # Linux and macOS, Python 3.11 to 3.13
+python fuzz/run_fuzzer.py url fuzz/corpus/url -max_total_time=60
+```
+
+When you change a validator, parser or the policy loader, add or extend a target for the property you are relying on. When a fuzz run finds a crash, add the input as a seed under `fuzz/corpus/<target>/` and a regression test.
 
 ## Guidelines
 

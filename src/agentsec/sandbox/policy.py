@@ -9,7 +9,9 @@ is worse than a crash.
 from __future__ import annotations
 
 import dataclasses
+import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -79,16 +81,19 @@ class Policy:
         tools_raw = data.get("tools") or {}
         if not isinstance(tools_raw, dict):
             raise PolicyError("'tools' must be a mapping of tool name -> rule")
+        if not all(isinstance(name, str) for name in tools_raw):
+            raise PolicyError("tool names must be strings")
         tools = {name: _build_tool(name, raw) for name, raw in tools_raw.items()}
         taint = _build(TaintPolicy, data.get("taint") or {}, "taint")
-        if taint.action not in {"deny", "approve"}:
+        if taint.action not in ("deny", "approve"):
             raise PolicyError("taint.action must be 'deny' or 'approve'")
-        return cls(
-            tools=tools,
-            taint=taint,
-            max_total_calls=data.get("max_total_calls"),
-            version=int(data.get("version", 1)),
-        )
+        max_total = data.get("max_total_calls")
+        if max_total is not None and not (_is_int(max_total) and max_total >= 0):
+            raise PolicyError("max_total_calls must be a non-negative integer")
+        version = data.get("version", 1)
+        if not _is_int(version):
+            raise PolicyError("version must be an integer")
+        return cls(tools=tools, taint=taint, max_total_calls=max_total, version=version)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Policy:
@@ -122,11 +127,68 @@ def _reject_unknown(data: dict[str, Any], allowed: set[str], where: str) -> None
         raise PolicyError(f"{where}: unknown key(s) {sorted(unknown)}")
 
 
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+# kind -> (predicate, description). A quoted "false" is a truthy string, so a wrongly typed
+# flag such as `allow: "false"` would otherwise *enable* a tool; reject it instead.
+_KINDS: dict[str, tuple[Callable[[Any], bool], str]] = {
+    "bool": (lambda v: isinstance(v, bool), "true or false"),
+    "str": (lambda v: isinstance(v, str), "a string"),
+    "str?": (lambda v: v is None or isinstance(v, str), "a string"),
+    "int?": (lambda v: v is None or (_is_int(v) and v >= 0), "a non-negative integer"),
+    "num?": (
+        lambda v: (
+            v is None
+            or (isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v))
+        ),
+        "a finite number",
+    ),
+    "list?": (lambda v: v is None or isinstance(v, list), "a list"),
+    "strs": (
+        lambda v: isinstance(v, list) and all(isinstance(x, str) for x in v),
+        "a list of strings",
+    ),
+}
+_FIELD_KINDS: dict[str, dict[str, str]] = {
+    "TaintPolicy": {"enabled": "bool", "action": "str"},
+    "ToolRule": {
+        "name": "str",
+        "allow": "bool",
+        "description": "str",
+        "side_effects": "bool",
+        "returns_untrusted": "bool",
+        "require_approval": "bool",
+        "max_calls": "int?",
+        "allow_extra_args": "bool",
+    },
+    "ArgRule": {
+        "type": "str",
+        "required": "bool",
+        "enum": "list?",
+        "pattern": "str?",
+        "deny_patterns": "strs",
+        "max_length": "int?",
+        "minimum": "num?",
+        "maximum": "num?",
+        "roots": "strs",
+        "schemes": "strs",
+        "hosts": "strs",
+        "block_private": "bool",
+        "resolve_dns": "bool",
+    },
+}
+
+
 def _build(cls: type, raw: Any, where: str) -> Any:
     if not isinstance(raw, dict):
         raise PolicyError(f"{where} must be a mapping")
     names = {f.name for f in dataclasses.fields(cls)}
     _reject_unknown(raw, names, where)
+    for key, kind in _FIELD_KINDS.get(cls.__name__, {}).items():
+        if key in raw and not _KINDS[kind][0](raw[key]):
+            raise PolicyError(f"{where}.{key} must be {_KINDS[kind][1]}")
     return cls(**raw)
 
 

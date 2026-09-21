@@ -19,48 +19,7 @@ from agentsec.middleware import (
     verify_file,
 )
 from agentsec.middleware.cef import MAX_VALUE_CHARS, severity
-
-# ------------------------------------------------ a reference parser, from the CEF rules
-
-
-def _unescape(raw: str) -> str:
-    out, i = [], 0
-    while i < len(raw):
-        if raw[i] == "\\" and i + 1 < len(raw):
-            nxt = raw[i + 1]
-            out.append({"n": "\n", "r": "\r"}.get(nxt, nxt))
-            i += 2
-        else:
-            out.append(raw[i])
-            i += 1
-    return "".join(out)
-
-
-def parse_cef(line: str) -> tuple[list[str], dict[str, str]]:
-    """Header fields (unescaped) and extension key/values, per the CEF escaping rules."""
-    assert "\n" not in line and "\r" not in line, "a CEF event must be one line"
-    fields: list[str] = []
-    cur: list[str] = []
-    i = 0
-    while len(fields) < 7:
-        ch = line[i]
-        if ch == "\\":
-            cur.append(line[i + 1])
-            i += 2
-        elif ch == "|":
-            fields.append("".join(cur))
-            cur = []
-            i += 1
-        else:
-            cur.append(ch)
-            i += 1
-    extension = line[i:]
-    keys = list(re.finditer(r"(?:^| )([A-Za-z][A-Za-z0-9_]*)=", extension))
-    values: dict[str, str] = {}
-    for n, m in enumerate(keys):
-        end = keys[n + 1].start() if n + 1 < len(keys) else len(extension)
-        values[m.group(1)] = _unescape(extension[m.end() : end])
-    return fields, values
+from tests.cef_reference import parse_cef
 
 
 def _record(**data) -> dict:

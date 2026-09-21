@@ -44,10 +44,10 @@ jobs:
         run: python -m pip install -e ".[dev]"
 
       - name: Ruff lint
-        run: ruff check src tests
+        run: ruff check src tests fuzz
 
       - name: Ruff format check
-        run: ruff format --check src tests
+        run: ruff format --check src tests fuzz
 
       - name: Mypy
         run: mypy src
@@ -118,6 +118,48 @@ jobs:
           for needed in ("agentsec/py.typed", "agentsec/threatmodel/data/threats.yaml"):
               assert needed in names, f"missing from wheel: {needed}"
           PY
+
+  fuzz:
+    # Coverage-guided fuzzing (Atheris/libFuzzer) of the security-critical parsers and
+    # validators. The same targets also run as ordinary tests on a seed corpus and random
+    # inputs (tests/test_fuzz_targets.py), so the invariants are enforced even without this job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [cef, url, url_private, path, redact, scan, policy, guard, audit]
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Atheris and the package
+        run: python -m pip install atheris -e .
+
+      - name: Fuzz ${{ matrix.target }} for 30 seconds
+        run: |
+          mkdir -p corpus crashes
+          cp fuzz/corpus/${{ matrix.target }}/* corpus/
+          python fuzz/run_fuzzer.py ${{ matrix.target }} corpus -max_total_time=30 -artifact_prefix=crashes/
+
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: crashes/
+          if-no-files-found: ignore
 
   integrations:
     # Runs the tests that need optional third-party SDKs (skipped in the main matrix).

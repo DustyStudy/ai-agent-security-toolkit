@@ -51,6 +51,13 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
         Path(args.json).write_text(report.to_json(), encoding="utf-8")
     if args.md:
         Path(args.md).write_text(report.to_markdown(), encoding="utf-8")
+    if args.sarif:
+        Path(args.sarif).write_text(
+            report.to_sarif(artifact_uri=args.sarif_artifact, target=args.target),
+            encoding="utf-8",
+        )
+    if args.junit:
+        Path(args.junit).write_text(report.to_junit(), encoding="utf-8")
     print(
         f"{report.successes}/{report.total - report.errors} attacks succeeded "
         f"(ASR {report.asr:.1%}); {report.blocked} blocked, {report.errors} errors"
@@ -152,6 +159,13 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--max-asr", type=float, help="exit 1 if attack-success rate exceeds this (0-1)")
     f.add_argument("--json", help="write full JSON report to this path")
     f.add_argument("--md", help="write Markdown report to this path")
+    f.add_argument("--sarif", help="write a SARIF 2.1.0 report (GitHub code scanning)")
+    f.add_argument(
+        "--sarif-artifact",
+        default="agent",
+        help="repo-relative path of the file that defines the agent; SARIF alerts attach to it",
+    )
+    f.add_argument("--junit", help="write a JUnit XML report to this path")
     f.add_argument("--quiet", action="store_true", help="only print the one-line summary")
     f.add_argument("--list", action="store_true", help="show the test matrix and exit")
     f.set_defaults(func=cmd_fuzz)

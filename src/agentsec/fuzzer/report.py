@@ -79,6 +79,18 @@ class FuzzReport:
     def to_json(self, *, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
 
+    def to_sarif(self, *, artifact_uri: str = "agent", target: str | None = None) -> str:
+        """SARIF 2.1.0 JSON (GitHub code scanning). See :func:`agentsec.fuzzer.formats.to_sarif`."""
+        from agentsec.fuzzer.formats import to_sarif
+
+        return json.dumps(to_sarif(self, artifact_uri=artifact_uri, target=target), indent=2)
+
+    def to_junit(self) -> str:
+        """JUnit XML. See :func:`agentsec.fuzzer.formats.to_junit`."""
+        from agentsec.fuzzer.formats import to_junit
+
+        return to_junit(self)
+
     def to_markdown(self, *, max_bypasses: int = 15) -> str:
         lines = [
             "# Prompt-injection fuzz report",

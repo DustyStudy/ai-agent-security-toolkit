@@ -6,10 +6,12 @@ from agentsec.middleware.audit import (
     FileSink,
     MemorySink,
     StreamSink,
+    TeeSink,
     VerifyResult,
     verify_file,
     verify_records,
 )
+from agentsec.middleware.cef import CefSink, format_cef
 from agentsec.middleware.injection import InjectionScanner, ScanResult, spotlight
 from agentsec.middleware.pipeline import AgentMiddleware, InputScreen
 from agentsec.middleware.redact import Finding, find_sensitive, redact_text
@@ -34,6 +36,7 @@ __all__ = [
     "AuditLogger",
     "BlockedPatternValidator",
     "CallbackSink",
+    "CefSink",
     "DangerousContentValidator",
     "ExfilLinkValidator",
     "FileSink",
@@ -50,9 +53,11 @@ __all__ = [
     "ScanResult",
     "SecretLeakValidator",
     "StreamSink",
+    "TeeSink",
     "VerifyResult",
     "Violation",
     "find_sensitive",
+    "format_cef",
     "redact_text",
     "spotlight",
     "verify_file",

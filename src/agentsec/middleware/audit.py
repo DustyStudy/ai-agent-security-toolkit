@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sys
 import threading
@@ -26,6 +27,8 @@ from pathlib import Path
 from typing import IO, Any, Protocol
 
 from agentsec.middleware.redact import redact_text
+
+_LOG = logging.getLogger("agentsec.audit")
 
 GENESIS_HASH = "0" * 64
 
@@ -119,6 +122,32 @@ class CallbackSink:
 
     def last_record(self) -> dict[str, Any] | None:
         return self._last
+
+
+class TeeSink:
+    """Writes each record to several sinks; the first is the source of truth.
+
+    The *primary* sink (typically a :class:`FileSink`) keeps the hash chain and is what
+    ``AuditLogger`` resumes from, so its errors propagate. A failure in a *secondary* sink
+    (a SIEM feed that is down) is logged to the ``agentsec.audit`` logger and does not
+    interrupt the agent or the chain: raising after the primary write would leave the
+    logger's sequence number behind the file.
+    """
+
+    def __init__(self, primary: AuditSink, *secondary: AuditSink) -> None:
+        self._primary = primary
+        self._secondary = secondary
+
+    def write(self, record: dict[str, Any]) -> None:
+        self._primary.write(record)
+        for sink in self._secondary:
+            try:
+                sink.write(record)
+            except Exception:  # noqa: BLE001 - see the class docstring
+                _LOG.exception("secondary audit sink %s failed", type(sink).__name__)
+
+    def last_record(self) -> dict[str, Any] | None:
+        return self._primary.last_record()
 
 
 def _canonical(obj: Any) -> bytes:

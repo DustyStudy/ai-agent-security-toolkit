@@ -13,13 +13,23 @@ python -m pip install -e ".[dev]"
 ## Before opening a PR
 
 ```bash
-ruff check src tests fuzz
-ruff format src tests fuzz
+ruff check src tests fuzz scripts
+ruff format src tests fuzz scripts
 mypy src
 pytest --cov=agentsec
 ```
 
 All four also run in CI. Tests run on Linux, Windows and macOS, on Python 3.11 to 3.13, with a 90% coverage floor. Add a line to `CHANGELOG.md` under "Unreleased" for user-visible changes.
+
+## Pinned CI dependencies
+
+CI installs from hash-pinned files in `requirements/` (`pip install --require-hashes -r ...`), so a compromised package on the index cannot change what runs. If you add or change a dependency in `pyproject.toml` (or an `.in` file), regenerate them and commit the result; a CI job fails if they are stale:
+
+```bash
+pip install --require-hashes -r requirements/requirements-lock-tools.txt   # pinned uv
+python scripts/lock.py             # re-resolve what changed, keep other pins
+python scripts/lock.py --upgrade   # move every pin forward
+```
 
 ## Fuzz targets
 

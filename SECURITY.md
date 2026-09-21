@@ -19,6 +19,7 @@ The fuzzer's payloads are inert strings that ask for observable, harmless outcom
 ## CI/CD hardening
 
 - Workflows run with `contents: read` and pin third-party actions to full commit SHAs. First-party GitHub actions that track major tags are noted inline.
+- CI installs its Python tooling from hash-pinned requirement files (`pip install --require-hashes`), and a CI job checks they match `pyproject.toml`.
 - `step-security/harden-runner` runs in audit mode to log runner egress.
 - CodeQL runs on every push/PR and weekly; dependency review runs on PRs and fails on high-severity findings.
 - Dependabot updates Python dependencies and GitHub Actions weekly.

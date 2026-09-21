@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import yaml
@@ -236,3 +237,83 @@ def test_cli_threatmodel_flow(tmp_path, capsys):
     assert "AG-E-02" in capsys.readouterr().out
     spec.write_text("name: x\ncomponents: [{id: a, type: nope, name: A}]\n")
     assert main(["threatmodel", "render", str(spec)]) == 2
+
+
+# ------------------------------------------------------- framework crosswalk
+
+
+def test_catalog_framework_ids_all_resolve_to_named_entries():
+    from agentsec.threatmodel import load_frameworks
+
+    fw = load_frameworks()
+    for t in load_catalog():
+        assert all(i in fw["owasp_agentic"]["items"] for i in t.owasp_agentic), t.id
+        assert all(i in fw["mitre_atlas"]["items"] for i in t.mitre_atlas), t.id
+    assert set(fw["owasp_agentic"]["items"]) == {f"ASI{n:02d}" for n in range(1, 11)}
+    # every ATLAS name shipped is one the catalog actually uses (no stale entries)
+    used = {i for t in load_catalog() for i in t.mitre_atlas}
+    assert set(fw["mitre_atlas"]["items"]) == used
+
+
+def test_every_owasp_agentic_risk_has_at_least_one_catalog_threat():
+    covered = {i for t in load_catalog() for i in t.owasp_agentic}
+    assert covered == {f"ASI{n:02d}" for n in range(1, 11)}
+
+
+def test_unknown_framework_id_in_a_custom_catalog_is_rejected(tmp_path):
+    import yaml
+
+    from agentsec.threatmodel import SystemSpecError
+
+    raw = yaml.safe_load(
+        (
+            Path(__file__).resolve().parents[1] / "src/agentsec/threatmodel/data/threats.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    raw["threats"][0]["mitre_atlas"] = ["AML.T9999"]
+    bad = tmp_path / "threats.yaml"
+    bad.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(SystemSpecError, match="AML.T9999"):
+        load_catalog(bad)
+    raw["threats"][0]["mitre_atlas"] = []
+    raw["threats"][0]["owasp_agentic"] = ["ASI99"]
+    bad.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(SystemSpecError, match="ASI99"):
+        load_catalog(bad)
+
+
+def test_crosswalk_marks_uncovered_entries_as_gaps(monkeypatch):
+    from agentsec.threatmodel import crosswalk, crosswalk_markdown
+
+    real = crosswalk.load_catalog()
+    monkeypatch.setattr(
+        crosswalk, "load_catalog", lambda: [t for t in real if "ASI08" not in t.owasp_agentic]
+    )
+    md = crosswalk_markdown()
+    row = next(line for line in md.splitlines() if line.startswith("| ASI08 "))
+    assert "gap: no catalog threat" in row
+
+
+def test_committed_crosswalk_doc_is_current():
+    from agentsec.threatmodel import crosswalk_markdown
+
+    doc = Path(__file__).resolve().parents[1] / "docs" / "threat-model" / "frameworks.md"
+    assert doc.read_text(encoding="utf-8").strip() == crosswalk_markdown().strip(), (
+        "regenerate with: agentsec threatmodel crosswalk > docs/threat-model/frameworks.md"
+    )
+
+
+def test_rendered_threat_details_name_the_framework_entries():
+    from agentsec.threatmodel import render_markdown
+
+    doc = render_markdown(
+        {"name": "x", "components": [{"id": "m", "type": "llm", "name": "Model"}]}, load_catalog()
+    )
+    assert "OWASP Agentic Applications Top 10 (2026): ASI01 Agent Goal Hijack" in doc
+    assert "MITRE ATLAS: AML.T0051 LLM Prompt Injection" in doc
+
+
+def test_cli_threatmodel_crosswalk(capsys):
+    assert main(["threatmodel", "crosswalk"]) == 0
+    out = capsys.readouterr().out
+    assert "ASI10" in out and "AML.T0051" in out

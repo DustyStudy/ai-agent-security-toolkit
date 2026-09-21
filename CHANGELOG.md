@@ -5,6 +5,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ## [Unreleased]
 
 ### Added
+- Threat catalog mapped to the OWASP Top 10 for Agentic Applications (2026) and MITRE ATLAS (content 2026.09). Rendered threat models name the entries, and `agentsec threatmodel crosswalk` (also committed as `docs/threat-model/frameworks.md`) lists the toolkit controls and fuzzer categories behind each one, flagging entries with no catalog threat as gaps. Unknown ids are rejected when a catalog loads.
+- Two catalog threats for OWASP agentic risks that had none: AG-D-04 (cascading failure across chained agents) and AG-E-06 (rogue or unsanctioned agent). The catalog now has 25 threats.
 - `agentsec fuzz --sarif` (SARIF 2.1.0 for GitHub code scanning, with `--sarif-artifact` to choose the file alerts attach to) and `--junit` (JUnit XML). `FuzzReport.to_sarif()` / `to_junit()`.
 - Async API for `asyncio` applications: `ToolGuard.aauthorize`, `aexecute` and `awrap` (async or sync approvers; async or sync tools, with sync tools run in a worker thread), `arun_anthropic_tool_uses`, `arun_openai_tool_calls` and `SafeCommandRunner.arun`. See `examples/async_agent_loop.py`.
 - `async def` fuzz targets: `agentsec fuzz --target module:callable`, `text_target` and the new `sync_target` accept coroutine functions and run them on a single reused event loop.

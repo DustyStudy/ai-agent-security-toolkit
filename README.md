@@ -11,7 +11,7 @@
 | 1 | [`agentsec.fuzzer`](src/agentsec/fuzzer) | Prompt-injection test harness. 25 payloads x 10 obfuscations x 2 delivery modes = 500 cases, mechanically scored with canaries (no judge model). Emits JSON/Markdown and gates CI on attack-success rate. |
 | 2 | [`agentsec.sandbox`](src/agentsec/sandbox) | Deny-by-default tool allowlist for agent frameworks: per-argument validation, path confinement, SSRF-safe URL checks, rate limits, human approval, and **taint tracking** that blocks side-effecting tools after untrusted content is read. Plus a no-shell subprocess runner. |
 | 3 | [`agentsec.middleware`](src/agentsec/middleware) | Output validation (secrets/PII, markdown-image exfiltration, XSS markup, JSON-schema, protected strings) and a **hash-chained, tamper-evident audit log** with secret redaction. |
-| 4 | [`agentsec.threatmodel`](src/agentsec/threatmodel) | **STRIDE-for-agents** threat catalog (23 threats mapped to OWASP LLM Top 10 2025) and a generator that turns a YAML system description into a threat model with data-flow diagram, threat register, and verification plan. |
+| 4 | [`agentsec.threatmodel`](src/agentsec/threatmodel) | **STRIDE-for-agents** threat catalog (25 threats mapped to the OWASP LLM Top 10 2025, the OWASP Top 10 for Agentic Applications 2026 and MITRE ATLAS) and a generator that turns a YAML system description into a threat model with data-flow diagram, threat register, and verification plan. |
 
 ```mermaid
 flowchart LR
@@ -176,7 +176,7 @@ agentsec threatmodel init -o system.yaml     # describe components, trust zones,
 agentsec threatmodel render system.yaml -o THREATMODEL.md
 ```
 
-The generator selects candidate threats by component type, draws the data-flow diagram with trust-boundary crossings, gives each row a triage hint (raised for components that ingest untrusted input, have side effects, or hold sensitive data), and links each threat to its mitigations, the toolkit control that implements it, and the fuzzer categories that test it. See the worked example: [`docs/threat-model/EXAMPLE-support-copilot.md`](docs/threat-model/EXAMPLE-support-copilot.md), the [method and blank template](docs/threat-model/README.md), and `agentsec threatmodel catalog`.
+The generator selects candidate threats by component type, draws the data-flow diagram with trust-boundary crossings, gives each row a triage hint (raised for components that ingest untrusted input, have side effects, or hold sensitive data), and links each threat to its mitigations, the toolkit control that implements it, and the fuzzer categories that test it. See the worked example: [`docs/threat-model/EXAMPLE-support-copilot.md`](docs/threat-model/EXAMPLE-support-copilot.md), the [method and blank template](docs/threat-model/README.md), and `agentsec threatmodel catalog`. Each threat is also mapped to the [OWASP Top 10 for Agentic Applications (2026)](https://genai.owasp.org/2025/12/09/owasp-top-10-for-agentic-applications-the-benchmark-for-agentic-security-in-the-age-of-autonomous-ai/) and to [MITRE ATLAS](https://github.com/mitre-atlas/atlas-data) techniques (content release 2026.09). `agentsec threatmodel crosswalk` prints the [framework crosswalk](docs/threat-model/frameworks.md), which lists the toolkit controls and fuzzer categories behind each entry.
 
 ## Coverage against OWASP Top 10 for LLM Applications (2025)
 
@@ -192,6 +192,8 @@ The generator selects candidate threats by component type, draws the data-flow d
 | LLM08 Vector and embedding weaknesses | Catalog entries only |
 | LLM09 Misinformation | Out of scope |
 | LLM10 Unbounded consumption | Per-session call limits, subprocess timeouts and output caps |
+
+The catalog also covers all ten OWASP agentic risks; the [crosswalk](docs/threat-model/frameworks.md) shows which toolkit controls back each one. A mapping means a threat is an instance of, or contributes to, that entry, not that the entry is mitigated. NIST AI RMF and ISO/IEC 42001 are not mapped.
 
 ## Honest limitations
 

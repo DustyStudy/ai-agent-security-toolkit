@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -46,8 +47,21 @@ class Threat:
     example: str
     owasp_llm: list[str]
     mitigations: list[str]
+    owasp_agentic: list[str] = field(default_factory=list)
+    mitre_atlas: list[str] = field(default_factory=list)
     toolkit: list[str] = field(default_factory=list)
     fuzz: list[str] = field(default_factory=list)
+
+
+@lru_cache(maxsize=1)
+def load_frameworks() -> dict[str, Any]:
+    """Names and sources for the external framework ids used by the catalog."""
+    text = (
+        resources.files("agentsec.threatmodel")
+        .joinpath("data/frameworks.yaml")
+        .read_text(encoding="utf-8")
+    )
+    return yaml.safe_load(text)
 
 
 def load_catalog(path: str | Path | None = None) -> list[Threat]:
@@ -67,6 +81,11 @@ def load_catalog(path: str | Path | None = None) -> list[Threat]:
         bad = [c for c in t.applies_to if c not in COMPONENT_TYPES]
         if bad:
             raise SystemSpecError(f"{t.id}: unknown component type(s) {bad}")
+        frameworks = load_frameworks()
+        for key, ids in (("owasp_agentic", t.owasp_agentic), ("mitre_atlas", t.mitre_atlas)):
+            unknown = [i for i in ids if i not in frameworks[key]["items"]]
+            if unknown:
+                raise SystemSpecError(f"{t.id}: unknown {key} id(s) {unknown}")
     return threats
 
 
@@ -102,6 +121,20 @@ def validate_system(spec: Any) -> dict[str, Any]:
             if flow.get(end) not in ids:
                 raise SystemSpecError(f"data flow references unknown component {flow.get(end)!r}")
     return spec
+
+
+def _framework_lines(t: Threat) -> list[str]:
+    """Optional lines naming the OWASP Agentic and MITRE ATLAS entries a threat maps to."""
+    items = load_frameworks()
+    lines: list[str] = []
+    for label, key, ids in (
+        ("OWASP Agentic Applications Top 10 (2026)", "owasp_agentic", t.owasp_agentic),
+        ("MITRE ATLAS", "mitre_atlas", t.mitre_atlas),
+    ):
+        if ids:
+            named = "; ".join(f"{i} {items[key]['items'][i]}" for i in ids)
+            lines += [f"*{label}: {_esc(named)}*", ""]
+    return lines
 
 
 def _priority(comp: dict[str, Any], threat: Threat) -> str:
@@ -241,6 +274,7 @@ def render_markdown(spec: dict[str, Any], catalog: list[Threat] | None = None) -
             "",
             f"*{t.stride}. OWASP LLM Top 10 (2025): {', '.join(t.owasp_llm) or 'n/a'}*",
             "",
+            *_framework_lines(t),
             t.description.strip(),
             "",
             f"**Example:** {t.example.strip()}",

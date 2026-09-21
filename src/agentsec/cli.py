@@ -16,6 +16,7 @@ from agentsec.sandbox import Policy, PolicyError, ToolGuard
 from agentsec.threatmodel import (
     SYSTEM_TEMPLATE,
     SystemSpecError,
+    crosswalk_markdown,
     load_catalog,
     load_system,
     render_markdown,
@@ -122,6 +123,9 @@ def cmd_threatmodel(args: argparse.Namespace) -> int:
         else:
             print(SYSTEM_TEMPLATE, end="")
         return 0
+    if args.action == "crosswalk":
+        print(crosswalk_markdown(), end="")
+        return 0
     if args.action == "catalog":
         for t in load_catalog():
             print(f"{t.id}  {t.stride:<24} {t.title}")
@@ -198,6 +202,9 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("system", help="system description YAML")
     tr.add_argument("-o", "--output")
     tm_sub.add_parser("catalog", help="List the threat catalog.")
+    tm_sub.add_parser(
+        "crosswalk", help="Map the catalog to OWASP Agentic Top 10 and MITRE ATLAS (Markdown)."
+    )
     tm.set_defaults(func=cmd_threatmodel)
     return p
 

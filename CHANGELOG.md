@@ -5,6 +5,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ## [Unreleased]
 
 ### Added
+- `docs/TOUR.md` (a five-minute tour with real CLI output), `docs/PRODUCTION.md` (rollout order, policy and audit guidance, an operating checklist), and `scripts/bench_overhead.py`, which measures the per-call overhead the toolkit adds (a table of results is in the production guide).
 - `format_cef` and `CefSink`: audit records as ArcSight Common Event Format for SIEM ingestion, with CEF-compliant escaping and bounding of attacker-influenceable values and severities that rank denials and findings above routine activity. `TeeSink` writes to several sinks with the first as the source of truth, so a SIEM outage cannot break the hash chain.
 - `agentsec.integrations.langchain`: `guard_tool` / `guard_tools` wrap LangChain and LangGraph tools so every call passes through the guard (sync and async), with refusals returned to the model as readable text and the run configuration passed through. `langchain` optional extra; tested against real `langchain-core` and LangGraph in CI.
 - `agentsec.integrations.mcp`: `GuardedMCPClient` puts the tool guard in front of an MCP client, with `ToolPins` (rug-pull detection by definition fingerprint), `scan_tool_definitions` (tool-poisoning tripwire over descriptions and parameter schemas), guarded and audited calls, and taint of results. Duck-typed on both MCP SDK 1.x and 2.x spellings; `mcp` optional extra and a CI job that runs it against the real SDK 2.x.

@@ -119,6 +119,31 @@ jobs:
               assert needed in names, f"missing from wheel: {needed}"
           PY
 
+  integrations:
+    # Runs the tests that need optional third-party SDKs (skipped in the main matrix).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install with the MCP SDK
+        run: python -m pip install -e ".[dev,mcp]"
+
+      - name: MCP integration tests (real SDK, in-memory transport)
+        run: pytest tests/test_integration_mcp.py -v --no-cov
+
   toolkit-self-checks:
     # Dogfooding: the toolkit's own CLI validates its example assets and proves the
     # containment layers still hold against the reference simulator.

@@ -141,8 +141,8 @@ def test_hostile_target_output_cannot_break_junit():
 def test_clean_bounds_and_strips():
     assert clean("a\x00b\nc") == "a b c"
     # bidi-override and zero-width characters could visually spoof text in a report viewer
-    assert clean("safe‮evil​!") == "safe evil !"
-    assert clean("tab\there") == "tab here" and clean("a b") == "a b"
+    assert clean("safe\u202eevil\u200b!") == "safe evil !"
+    assert clean("tab\there") == "tab here" and clean("a\u2028b") == "a b"
     assert clean("keep ünïcödé and 日本語") == "keep ünïcödé and 日本語"
     assert len(clean("z" * 1000)) == 300 and clean("z" * 1000).endswith("…")
 

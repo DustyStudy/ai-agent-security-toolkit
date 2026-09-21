@@ -143,6 +143,30 @@ out = await runner.arun("git", ["status"])                    # SafeCommandRunne
 
 Complete loop: [`examples/async_agent_loop.py`](examples/async_agent_loop.py).
 
+### MCP servers
+
+MCP servers describe their own tools and return content your model then reads, so both are attacker-influenceable: **tool poisoning** hides instructions in a description or parameter schema, and a **rug pull** swaps a reviewed description later. `GuardedMCPClient` wraps an MCP client (the SDK's `Client` or `ClientSession`) so the guard sits in front of it:
+
+```python
+from agentsec.integrations.mcp import GuardedMCPClient, ToolPins, result_text
+
+pins = ToolPins.load("mcp-pins.json")           # reviewed fingerprints; ToolPins() to start fresh
+client = GuardedMCPClient(mcp_client, guard, session, pins=pins)
+
+tools = await client.list_tools()               # hides tools outside the policy, changed or suspicious ones
+result = await client.call_tool("lookup", {"customer": "acme"})   # allowlist, argument checks, audit
+text = result_text(result)                      # untrusted: pass through middleware.screen_input
+pins.save("mcp-pins.json")
+```
+
+- `list_tools` shows the model only tools the policy allows, drops tools whose definition changed since it was pinned, and drops tools whose name, description or parameter schema looks like an injection (`scan_tool_definitions`). A dropped tool cannot be called through the wrapper. Findings are collected in `client.findings` and written to the audit log; `on_finding="raise"` raises `ToolManifestError` instead.
+- `call_tool` goes through `ToolGuard.aexecute`, and the session is tainted afterward because MCP results are third-party content (`taint_results=False` to opt out). A call the guard refuses never reaches the server and does not taint.
+- Pins are trust-on-first-use by default (`pin_new=False` treats unpinned tools as findings). Save them where the agent cannot write, and review a tool before pinning it. A tool that fails the scan is never pinned.
+- Attributes other than `list_tools` and `call_tool` are deliberately **not** forwarded, so the wrapper cannot be used to reach an unguarded call.
+- To guard tools you *serve*, wrap them: `server.tool()(guard.awrap("lookup", lookup))` (the signature is preserved for the schema).
+
+The adapter imports nothing from `mcp`. It uses only `list_tools()` and `call_tool()` and reads both the 1.x (`inputSchema`, `isError`) and 2.x (`input_schema`, `is_error`) spellings. It is tested against fakes of both shapes and, in CI, against the real SDK 2.x over its in-memory transport (`pip install "ai-agent-security-toolkit[mcp]"`). It has not been run against a remote MCP server. The scan is a heuristic tripwire, so pinning and human review of tool descriptions still matter.
+
 `SafeCommandRunner` runs external commands with no shell, an executable/argument allowlist, a scrubbed environment, a pinned working directory, a timeout, and an output cap. It is **not** an OS sandbox. Put it inside a container or microVM for untrusted code.
 
 ## 3. Validate output and keep an audit trail

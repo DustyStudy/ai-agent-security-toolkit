@@ -46,7 +46,7 @@ threats:
       - Pin and hash tool/server manifests; alert on change.
       - Mutually authenticate agents (mTLS / signed requests); do not trust a peer because it is on the same network.
       - Allow only reviewed tool descriptions; render descriptions to a human on first use and on change.
-    toolkit: [agentsec.sandbox.Policy]
+    toolkit: [agentsec.sandbox.Policy, agentsec.integrations.mcp.ToolPins, agentsec.integrations.mcp.GuardedMCPClient]
     fuzz: [hidden_instruction]
 
   - id: AG-S-03

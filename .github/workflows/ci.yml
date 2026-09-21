@@ -138,11 +138,11 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install with the MCP SDK
-        run: python -m pip install -e ".[dev,mcp]"
+      - name: Install with the optional SDKs
+        run: python -m pip install -e ".[dev,mcp,langchain]" langgraph
 
-      - name: MCP integration tests (real SDK, in-memory transport)
-        run: pytest tests/test_integration_mcp.py -v --no-cov
+      - name: Integration tests (real MCP SDK, LangChain and LangGraph)
+        run: pytest tests/test_integration_mcp.py tests/test_integration_langchain.py -v --no-cov
 
   toolkit-self-checks:
     # Dogfooding: the toolkit's own CLI validates its example assets and proves the

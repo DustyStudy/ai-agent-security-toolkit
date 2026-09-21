@@ -5,6 +5,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ## [Unreleased]
 
 ### Added
+- `agentsec.integrations.langchain`: `guard_tool` / `guard_tools` wrap LangChain and LangGraph tools so every call passes through the guard (sync and async), with refusals returned to the model as readable text and the run configuration passed through. `langchain` optional extra; tested against real `langchain-core` and LangGraph in CI.
 - `agentsec.integrations.mcp`: `GuardedMCPClient` puts the tool guard in front of an MCP client, with `ToolPins` (rug-pull detection by definition fingerprint), `scan_tool_definitions` (tool-poisoning tripwire over descriptions and parameter schemas), guarded and audited calls, and taint of results. Duck-typed on both MCP SDK 1.x and 2.x spellings; `mcp` optional extra and a CI job that runs it against the real SDK 2.x.
 - A repository hygiene test that rejects literal zero-width and bidirectional-control characters in source files.
 - Threat catalog mapped to the OWASP Top 10 for Agentic Applications (2026) and MITRE ATLAS (content 2026.09). Rendered threat models name the entries, and `agentsec threatmodel crosswalk` (also committed as `docs/threat-model/frameworks.md`) lists the toolkit controls and fuzzer categories behind each one, flagging entries with no catalog threat as gaps. Unknown ids are rejected when a catalog loads.

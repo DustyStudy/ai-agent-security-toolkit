@@ -33,6 +33,7 @@ dependencies = [
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
 mcp = ["mcp>=2"]
+langchain = ["langchain-core>=0.3"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

@@ -208,6 +208,16 @@ agentsec audit verify audit.jsonl           # exit 1 if any record was edited or
 
 The audit log chains records with SHA-256. Editing or deleting a record in the middle breaks verification from that point. It does **not** stop someone with write access from truncating the tail or replacing the whole file; ship records to append-only storage (S3 Object Lock, CloudWatch Logs with a restrictive resource policy) and anchor `AuditLogger.checkpoint()` somewhere the agent host cannot write. Secrets and PII are redacted before hashing, and `log_content=False` stores only hashes and lengths of long fields.
 
+**SIEM feed (CEF).** Keep the hash-chained file as the evidence of record and stream a copy to your SIEM in ArcSight Common Event Format, which Splunk, Microsoft Sentinel, QRadar, Elastic and most syslog pipelines ingest:
+
+```python
+from agentsec.middleware import AuditLogger, CefSink, FileSink, TeeSink
+
+audit = AuditLogger(TeeSink(FileSink("audit.jsonl"), CefSink(send_to_syslog)))   # or format_cef(record) yourself
+```
+
+Denials, approval refusals and MCP tool findings get higher CEF severities than routine activity. Audit records carry attacker-influenceable text (tool names and arguments, model output), so every value is escaped per the CEF rules and bounded: a value cannot end its field, forge a `key=value` pair or start a new event. Each line includes the record's hash and its predecessor's, so a receiver can check the chain. `TeeSink` treats the first sink as the source of truth; a failing secondary sink (the SIEM is down) is logged to the `agentsec.audit` logger and does not interrupt the agent or break the chain. The CEF output is tested with a reference parser built from the CEF escaping rules; it has not been ingested by a specific SIEM product.
+
 ## 4. Threat model an agent (STRIDE-for-agents)
 
 ```bash

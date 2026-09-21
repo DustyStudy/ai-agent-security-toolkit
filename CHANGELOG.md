@@ -4,6 +4,15 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- Async API for `asyncio` applications: `ToolGuard.aauthorize`, `aexecute` and `awrap` (async or sync approvers; async or sync tools, with sync tools run in a worker thread), `arun_anthropic_tool_uses`, `arun_openai_tool_calls` and `SafeCommandRunner.arun`. See `examples/async_agent_loop.py`.
+- `async def` fuzz targets: `agentsec fuzz --target module:callable`, `text_target` and the new `sync_target` accept coroutine functions and run them on a single reused event loop.
+
+### Fixed
+- Fuzzing an `async def` target used to score the text of the un-awaited coroutine object and report no attack success. It is now supported, and passing an un-awaited coroutine to the harness is an error.
+- `ToolGuard.authorize` treated an async approver's un-awaited coroutine as truthy, which approved every request. It now refuses.
+- `ToolGuard.execute` on an `async def` tool returned a coroutine object as the tool's output without running the tool. It now raises `TypeError`.
+
 ## [0.1.0] - 2026-09-21
 
 ### Added

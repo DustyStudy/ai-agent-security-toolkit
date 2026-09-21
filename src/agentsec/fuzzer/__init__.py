@@ -12,7 +12,13 @@ from agentsec.fuzzer.mock_agents import GuardedAgent, NaiveAgent, demo_policy
 from agentsec.fuzzer.mutators import MUTATORS
 from agentsec.fuzzer.payloads import CORPUS, Payload
 from agentsec.fuzzer.report import FuzzReport
-from agentsec.fuzzer.targets import AnthropicTarget, HttpTarget, load_target, text_target
+from agentsec.fuzzer.targets import (
+    AnthropicTarget,
+    HttpTarget,
+    load_target,
+    sync_target,
+    text_target,
+)
 
 __all__ = [
     "CORPUS",
@@ -31,5 +37,6 @@ __all__ = [
     "detect",
     "load_target",
     "run",
+    "sync_target",
     "text_target",
 ]

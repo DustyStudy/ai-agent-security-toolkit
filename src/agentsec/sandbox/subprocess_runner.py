@@ -10,6 +10,7 @@ Firecracker / seccomp boundary and treat this as an additional layer inside it.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import shutil
@@ -119,6 +120,12 @@ class SafeCommandRunner:
             t.join(timeout=5)
         code = -1 if timed_out else proc.returncode
         return bytes(buffers["out"]), bytes(buffers["err"]), code, timed_out, overflow.is_set()
+
+    async def arun(
+        self, alias: str, args: Sequence[str] = (), *, cwd: str | None = None
+    ) -> CommandResult:
+        """Async :meth:`run`: same validation and limits, executed in a worker thread."""
+        return await asyncio.to_thread(self.run, alias, args, cwd=cwd)
 
     def run(self, alias: str, args: Sequence[str] = (), *, cwd: str | None = None) -> CommandResult:
         if alias not in self._resolved:

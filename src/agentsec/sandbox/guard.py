@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import functools
+import inspect
 import threading
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -69,7 +71,9 @@ class Session:
             self.taint_sources.append(source)
 
 
-Approver = Callable[[ToolCall, Decision], bool]
+Approver = Callable[[ToolCall, Decision], bool | Awaitable[bool]]
+
+_ASYNC_APPROVER_REASON = "approver is async; use aauthorize()/aexecute() instead of the sync API"
 
 
 class ToolGuard:
@@ -87,6 +91,11 @@ class ToolGuard:
         self.approver = approver
         self.audit = audit
         self._resolver = resolver
+        # A DNS-resolving URL rule (or a custom resolver) does blocking I/O inside evaluate(),
+        # so the async API runs evaluation in a worker thread instead of on the event loop.
+        self._blocking_eval = resolver is not None or any(
+            arg.resolve_dns for rule in policy.tools.values() for arg in rule.args.values()
+        )
         self._lock = threading.Lock()
         self.default_session = Session()
 
@@ -142,30 +151,69 @@ class ToolGuard:
 
     # ---------------------------------------------------------- authorization
     def authorize(self, call: ToolCall, session: Session | None = None) -> Decision:
-        """Evaluate, run approval if required, record the call, and audit. Never raises."""
+        """Evaluate, run approval if required, record the call, and audit."""
         session = session or self.default_session
-        self._audit("tool_request", session, tool=call.name, arguments=call.arguments)
-        decision = self.evaluate(call, session)
-
+        decision = self._begin(call, session)
         if decision.verdict == Verdict.APPROVE:
             if self.approver is None:
-                decision = Decision(
-                    Verdict.DENY, call.name, (*decision.reasons, "no approver configured")
-                )
+                decision = self._resolve_approval(call, session, decision, None)
             else:
-                approved = bool(self.approver(call, decision))
-                self._audit("approval", session, tool=call.name, approved=approved)
-                decision = (
-                    Decision(Verdict.ALLOW, call.name, decision.reasons)
-                    if approved
-                    else Decision(Verdict.DENY, call.name, (*decision.reasons, "approval refused"))
-                )
+                answer = self.approver(call, decision)
+                if inspect.isawaitable(answer):
+                    # An un-awaited coroutine is truthy: treating it as an answer would
+                    # approve every request. Discard it and refuse.
+                    if inspect.iscoroutine(answer):
+                        answer.close()
+                    decision = Decision(
+                        Verdict.DENY, call.name, (*decision.reasons, _ASYNC_APPROVER_REASON)
+                    )
+                    self._audit("approval", session, tool=call.name, approved=False)
+                else:
+                    decision = self._resolve_approval(call, session, decision, bool(answer))
+        return self._commit(call, session, decision)
 
+    async def aauthorize(self, call: ToolCall, session: Session | None = None) -> Decision:
+        """Async :meth:`authorize`. The approver may be a plain function or a coroutine function."""
+        session = session or self.default_session
+        decision = await self._abegin(call, session)
+        if decision.verdict == Verdict.APPROVE:
+            if self.approver is None:
+                decision = self._resolve_approval(call, session, decision, None)
+            else:
+                answer = self.approver(call, decision)
+                if inspect.isawaitable(answer):
+                    answer = await answer
+                decision = self._resolve_approval(call, session, decision, bool(answer))
+        return self._commit(call, session, decision)
+
+    def _begin(self, call: ToolCall, session: Session) -> Decision:
+        self._audit("tool_request", session, tool=call.name, arguments=call.arguments)
+        return self.evaluate(call, session)
+
+    async def _abegin(self, call: ToolCall, session: Session) -> Decision:
+        self._audit("tool_request", session, tool=call.name, arguments=call.arguments)
+        if self._blocking_eval:
+            return await asyncio.to_thread(self.evaluate, call, session)
+        return self.evaluate(call, session)
+
+    def _resolve_approval(
+        self, call: ToolCall, session: Session, decision: Decision, approved: bool | None
+    ) -> Decision:
+        """Turn an approver's answer (``None`` = no approver configured) into a final decision."""
+        if approved is None:
+            return Decision(Verdict.DENY, call.name, (*decision.reasons, "no approver configured"))
+        self._audit("approval", session, tool=call.name, approved=approved)
+        if approved:
+            return Decision(Verdict.ALLOW, call.name, decision.reasons)
+        return Decision(Verdict.DENY, call.name, (*decision.reasons, "approval refused"))
+
+    def _commit(self, call: ToolCall, session: Session, decision: Decision) -> Decision:
         if decision.allowed:
             with self._lock:
                 # evaluate() ran without the lock (and an approver may have blocked for a
                 # long time), so concurrent calls could all have passed the limit check.
-                # Re-check and count atomically so a limit really is a limit.
+                # Re-check and count atomically so a limit really is a limit. This section
+                # never awaits, so it is equally atomic for asyncio tasks.
                 over = self._over_limit(call.name, session)
                 if over is not None:
                     decision = Decision(Verdict.DENY, call.name, (over,))
@@ -186,15 +234,19 @@ class ToolGuard:
     ) -> Any:
         """Authorize then run ``fn(**call.arguments)``. Raises :class:`ToolDenied`."""
         session = session or self.default_session
-        # Judge and run the SAME snapshot: the caller (or another thread) still holds the
-        # original dict and could change it between authorization and execution.
-        call = ToolCall(name=call.name, arguments=copy.deepcopy(call.arguments), id=call.id)
+        call = self._snapshot(call)
         decision = self.authorize(call, session)
         if not decision.allowed:
             raise ToolDenied(decision)
         rule = self.policy.tools[call.name]
         try:
             result = fn(**call.arguments)
+            if inspect.isawaitable(result):
+                # Calling an async tool from the sync path would hand the model a coroutine
+                # object as if it were the tool's output, and the tool would never run.
+                if inspect.iscoroutine(result):
+                    result.close()
+                raise TypeError(f"tool {call.name!r} is async; use aexecute()/awrap()")
         finally:
             # Taint even if the tool raised: it may already have fetched attacker-controlled
             # content before failing, and the model is shown the error either way.
@@ -202,6 +254,41 @@ class ToolGuard:
                 session.mark_untrusted(call.name)
         self._audit("tool_result", session, tool=call.name, result=result)
         return result
+
+    async def aexecute(
+        self, call: ToolCall, fn: Callable[..., Any], session: Session | None = None
+    ) -> Any:
+        """Async :meth:`execute`.
+
+        ``fn`` may be a coroutine function or an ordinary function. Ordinary functions run in
+        a worker thread so a blocking tool cannot stall the event loop.
+        """
+        session = session or self.default_session
+        call = self._snapshot(call)
+        decision = await self.aauthorize(call, session)
+        if not decision.allowed:
+            raise ToolDenied(decision)
+        rule = self.policy.tools[call.name]
+        try:
+            if _is_coroutine_callable(fn):
+                result = await fn(**call.arguments)
+            else:
+                result = await asyncio.to_thread(fn, **call.arguments)
+                if inspect.isawaitable(result):
+                    result = await result
+        finally:
+            # Also runs on cancellation: a worker thread cannot be interrupted, so the tool
+            # may still have read untrusted content even though this task was cancelled.
+            if rule.returns_untrusted:
+                session.mark_untrusted(call.name)
+        self._audit("tool_result", session, tool=call.name, result=result)
+        return result
+
+    @staticmethod
+    def _snapshot(call: ToolCall) -> ToolCall:
+        # Judge and run the SAME snapshot: the caller (or another thread/task) still holds the
+        # original dict and could change it between authorization and execution.
+        return ToolCall(name=call.name, arguments=copy.deepcopy(call.arguments), id=call.id)
 
     def wrap(
         self, name: str, fn: Callable[..., Any], session: Session | None = None
@@ -211,6 +298,17 @@ class ToolGuard:
         @functools.wraps(fn)
         def guarded(**kwargs: Any) -> Any:
             return self.execute(ToolCall(name=name, arguments=kwargs), fn, session)
+
+        return guarded
+
+    def awrap(
+        self, name: str, fn: Callable[..., Any], session: Session | None = None
+    ) -> Callable[..., Awaitable[Any]]:
+        """Return ``fn`` guarded as tool ``name`` for use from async code. Keyword arguments only."""
+
+        @functools.wraps(fn)
+        async def guarded(**kwargs: Any) -> Any:
+            return await self.aexecute(ToolCall(name=name, arguments=kwargs), fn, session)
 
         return guarded
 
@@ -226,3 +324,10 @@ class ToolGuard:
     def _audit(self, event: str, session: Session, **data: Any) -> None:
         if self.audit is not None:
             self.audit.log(event, tool_session=session.id, **data)
+
+
+def _is_coroutine_callable(fn: Callable[..., Any]) -> bool:
+    """True for ``async def`` functions, including partials and objects with ``async __call__``."""
+    return inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(
+        getattr(fn, "__call__", None)  # noqa: B004 - deliberate: detect an async __call__
+    )

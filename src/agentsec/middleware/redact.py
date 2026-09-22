@@ -6,6 +6,13 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+# Same rationale as agentsec.middleware.injection.DEFAULT_MAX_SCAN_CHARS: this runs over
+# attacker-influenceable text of unbounded size (audit log fields, tool output, tool-call
+# exception text) across a dozen regex rules, so it needs a cost ceiling. Findings beyond the
+# cutoff are missed and that portion of ``redact_text``'s output is returned unredacted -- bound
+# how much untrusted content reaches this in the first place where you can.
+DEFAULT_MAX_SCAN_CHARS = 200_000
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -92,13 +99,20 @@ _RULES: tuple[_Rule, ...] = (
 )
 
 
-def find_sensitive(text: str, *, include_pii: bool = True) -> list[Finding]:
-    """Return non-overlapping findings, ordered by position."""
+def find_sensitive(
+    text: str, *, include_pii: bool = True, max_scan_chars: int = DEFAULT_MAX_SCAN_CHARS
+) -> list[Finding]:
+    """Return non-overlapping findings, ordered by position.
+
+    Only the first ``max_scan_chars`` characters are scanned; pass ``max_scan_chars=len(text)``
+    (or ``math.inf``) to scan all of it regardless of size.
+    """
+    scanned = text if len(text) <= max_scan_chars else text[:max_scan_chars]
     found: list[Finding] = []
     for rule in _RULES:
         if rule.category == "pii" and not include_pii:
             continue
-        for m in rule.pattern.finditer(text):
+        for m in rule.pattern.finditer(scanned):
             if rule.check and not rule.check(m.group(rule.group)):
                 continue
             found.append(Finding(rule.kind, m.start(rule.group), m.end(rule.group), rule.category))
@@ -111,9 +125,15 @@ def find_sensitive(text: str, *, include_pii: bool = True) -> list[Finding]:
     return merged
 
 
-def redact_text(text: str, *, include_pii: bool = True) -> tuple[str, list[Finding]]:
-    """Replace sensitive spans with ``[REDACTED:<kind>]``."""
-    findings = find_sensitive(text, include_pii=include_pii)
+def redact_text(
+    text: str, *, include_pii: bool = True, max_scan_chars: int = DEFAULT_MAX_SCAN_CHARS
+) -> tuple[str, list[Finding]]:
+    """Replace sensitive spans with ``[REDACTED:<kind>]``.
+
+    Text beyond ``max_scan_chars`` is not scanned and is returned unredacted (see
+    :func:`find_sensitive`).
+    """
+    findings = find_sensitive(text, include_pii=include_pii, max_scan_chars=max_scan_chars)
     if not findings:
         return text, []
     out: list[str] = []

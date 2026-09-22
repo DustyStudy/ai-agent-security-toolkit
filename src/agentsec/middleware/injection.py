@@ -19,6 +19,14 @@ from dataclasses import dataclass, field
 _INVISIBLE = re.compile("[\u200b\u200c\u200d\u2060\ufeff\u00ad]")
 _TAG_CHARS = re.compile("[\U000e0000-\U000e007f]")
 
+# Untrusted content (a fetched page, a large tool result) has no size limit the scanner
+# controls, and scanning it costs work proportional to its length across ~10 regex passes.
+# Without a cap, a large-enough document turns "screen every tool result" into an unbounded
+# per-request cost. This bounds that cost; it is not a substitute for bounding how much
+# untrusted content your own tools return in the first place (see
+# :class:`agentsec.sandbox.SafeCommandRunner`'s ``max_output_bytes``).
+DEFAULT_MAX_SCAN_CHARS = 200_000
+
 
 @dataclass(frozen=True)
 class Signal:
@@ -79,20 +87,35 @@ class ScanResult:
     score: float
     signals: list[str] = field(default_factory=list)
     flagged: bool = False
+    # True if the input exceeded max_scan_chars and only a prefix was scanned. A signal beyond
+    # the cutoff is missed, same as any other pattern-matching bypass this scanner already has
+    # known, tested bypasses for (see the module docstring). Worth logging on its own: a
+    # legitimate tool result is rarely this large.
+    truncated: bool = False
 
 
 class InjectionScanner:
     """Weighted-signal heuristic. ``score`` is the sum of matched weights, capped at 1.0."""
 
-    def __init__(self, threshold: float = 0.5, extra_signals: tuple[Signal, ...] = ()) -> None:
+    def __init__(
+        self,
+        threshold: float = 0.5,
+        extra_signals: tuple[Signal, ...] = (),
+        *,
+        max_scan_chars: int = DEFAULT_MAX_SCAN_CHARS,
+    ) -> None:
         self.threshold = threshold
         self.signals = SIGNALS + extra_signals
+        self.max_scan_chars = max_scan_chars
 
     @staticmethod
     def normalize(text: str) -> str:
         return unicodedata.normalize("NFKC", _INVISIBLE.sub("", _TAG_CHARS.sub("", text)))
 
     def scan(self, text: str) -> ScanResult:
+        truncated = len(text) > self.max_scan_chars
+        if truncated:
+            text = text[: self.max_scan_chars]
         hits: list[str] = []
         score = 0.0
         if _TAG_CHARS.search(text) or len(_INVISIBLE.findall(text)) >= 3:
@@ -104,7 +127,9 @@ class InjectionScanner:
                 hits.append(sig.name)
                 score += sig.weight
         score = min(score, 1.0)
-        return ScanResult(score=score, signals=hits, flagged=score >= self.threshold)
+        return ScanResult(
+            score=score, signals=hits, flagged=score >= self.threshold, truncated=truncated
+        )
 
 
 def spotlight(text: str, *, source: str = "external content") -> str:

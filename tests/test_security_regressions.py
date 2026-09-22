@@ -20,9 +20,12 @@ from agentsec.fuzzer.report import FuzzReport
 from agentsec.middleware import (
     Action,
     AgentMiddleware,
+    AuditLogger,
     DangerousContentValidator,
     ExfilLinkValidator,
+    InjectionScanner,
     JsonSchemaValidator,
+    MemorySink,
     OutputGuard,
     ProtectedStringValidator,
     redact_text,
@@ -434,3 +437,17 @@ def test_http_target_caps_response_size():
             target(AttackInput(user_message="hi"))
     finally:
         server.shutdown()
+
+
+# --------------------------------------------------------------------- scan cost
+
+
+def test_oversized_untrusted_input_is_visible_in_the_audit_log_not_scanned_in_full():
+    """A huge tool result used to cost the scanner and redactor work proportional to its full
+    size on every screen, with no ceiling and nothing recording that it happened."""
+    sink = MemorySink()
+    audit = AuditLogger(sink)
+    mw = AgentMiddleware(guard=None, scanner=InjectionScanner(max_scan_chars=1000), audit=audit)
+    mw.screen_input("x" * 5000, source="web", untrusted=True)
+    findings = [r for r in sink.records if r["event"] == "injection_signal"]
+    assert findings and findings[0]["data"]["truncated"] is True

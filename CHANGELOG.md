@@ -8,6 +8,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Dependabot no longer manages the hash-pinned files in `requirements/` (it bumped transitive packages in isolation and broke the lock's consistency); refresh them with `python scripts/lock.py --upgrade`.
 - The Scorecard workflow can be run on demand (`workflow_dispatch`), and the README explains how to read the score for a solo-maintained project.
 
+### Fixed
+- `InjectionScanner.scan` and `redact_text`/`find_sensitive` had no cap on input size, unlike every other place in the toolkit that processes attacker-influenceable text (MCP tool-definition scanning, CEF values, audit-log fields, `SafeCommandRunner` output). A large enough untrusted tool result (a fetched page, a large document) cost the scanner and redactor work proportional to its full size on every screen. Both now scan at most `max_scan_chars` (default 200,000, overridable) and `ScanResult` reports `truncated` so an oversized input is itself visible in the audit log rather than silently costing more.
+
 ## [0.2.1] - 2026-09-21
 
 ### Added

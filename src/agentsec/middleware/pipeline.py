@@ -70,13 +70,16 @@ class AgentMiddleware:
                 target.mark_untrusted(source)
         self._log(ev.UNTRUSTED_INPUT if untrusted else ev.PROMPT, source=source, text=text)
         blocked = bool(scan.flagged and self.block_on_injection)
-        if scan.signals:
+        if scan.signals or scan.truncated:
+            # Logged even with no signals when truncated: an oversized input is worth seeing
+            # in the audit trail on its own, since only a prefix of it was ever screened.
             self._log(
                 ev.INJECTION_SIGNAL,
                 source=source,
                 score=round(scan.score, 2),
                 signals=scan.signals,
                 blocked=blocked,
+                truncated=scan.truncated,
             )
         out = spotlight(text, source=source) if untrusted and self.spotlight_untrusted else text
         reasons = [f"injection signals: {', '.join(scan.signals)}"] if blocked else []

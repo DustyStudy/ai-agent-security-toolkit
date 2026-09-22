@@ -70,6 +70,21 @@ def test_pii_can_be_excluded():
     assert find_sensitive("123-45-6789", include_pii=False) == []
 
 
+def test_oversized_text_is_scanned_as_a_bounded_prefix():
+    # A secret past max_scan_chars is not found (bounded cost, documented trade-off)...
+    key = fake_aws_key()
+    padded = ("x " * 100) + key
+    assert find_sensitive(padded, max_scan_chars=100) == []
+
+    # ...but redact_text still returns the full original text, just unredacted past the cutoff.
+    out, findings = redact_text(padded, max_scan_chars=100)
+    assert out == padded and findings == []
+
+    # A secret within the scanned prefix is still found and redacted as normal.
+    out2, findings2 = redact_text(key + " " + ("x " * 100), max_scan_chars=100)
+    assert key not in out2 and findings2[0].kind == "aws_access_key_id"
+
+
 def test_secret_validator_redacts_but_delivers():
     res = OutputGuard([SecretLeakValidator()]).process(f"key={fake_aws_key()}")
     assert res.allowed and res.redacted and fake_aws_key() not in res.text

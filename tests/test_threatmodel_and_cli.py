@@ -106,6 +106,7 @@ def test_invalid_system_descriptions_rejected(bad, msg):
 
 def test_cli_fuzz_gate_exit_codes(capsys, tmp_path):
     out_json, out_md = tmp_path / "r.json", tmp_path / "r.md"
+    out_sarif, out_junit = tmp_path / "r.sarif", tmp_path / "r.xml"
     assert (
         main(
             [
@@ -119,6 +120,10 @@ def test_cli_fuzz_gate_exit_codes(capsys, tmp_path):
                 str(out_json),
                 "--md",
                 str(out_md),
+                "--sarif",
+                str(out_sarif),
+                "--junit",
+                str(out_junit),
                 "--max-asr",
                 "0.5",
             ]
@@ -126,6 +131,9 @@ def test_cli_fuzz_gate_exit_codes(capsys, tmp_path):
         == 1
     )
     assert json.loads(out_json.read_text())["total"] == 20 and out_md.read_text().startswith("#")
+    # Reports are committed and diffed by CI across platforms: no platform-native CRLF.
+    for report in (out_json, out_md, out_sarif, out_junit):
+        assert b"\r" not in report.read_bytes()
     assert (
         main(
             [
@@ -233,6 +241,10 @@ def test_cli_threatmodel_flow(tmp_path, capsys):
     assert main(["threatmodel", "init", "-o", str(spec)]) == 0
     assert main(["threatmodel", "render", str(spec), "-o", str(doc)]) == 0
     assert "## 3. Threat register" in doc.read_text()
+    # Rendered docs are meant to be committed and diffed against LF originals on any
+    # platform (see docs/threat-model/EXAMPLE-support-copilot.md): no platform-native CRLF.
+    assert b"\r" not in spec.read_bytes()
+    assert b"\r" not in doc.read_bytes()
     assert main(["threatmodel", "catalog"]) == 0
     assert "AG-E-02" in capsys.readouterr().out
     spec.write_text("name: x\ncomponents: [{id: a, type: nope, name: A}]\n")

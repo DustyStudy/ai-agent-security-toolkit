@@ -142,6 +142,8 @@ def test_pins_round_trip_and_reject_malformed_files(tmp_path):
     path = tmp_path / "pins.json"
     pins.save(path)
     assert ToolPins.load(path).pins == pins.pins
+    # Written for git to diff and other platforms to read: no platform-native CRLF.
+    assert b"\r" not in path.read_bytes()
     for bad in ('{"version": 99, "tools": {}}', '{"version": 1, "tools": {"a": 5}}', "[]"):
         path.write_text(bad, encoding="utf-8")
         with pytest.raises(ValueError):

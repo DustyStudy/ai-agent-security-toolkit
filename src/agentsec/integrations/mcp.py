@@ -213,7 +213,7 @@ class ToolPins:
     def save(self, path: str | Path) -> None:
         payload = {"version": PIN_FILE_VERSION, "tools": self._pins}
         Path(path).write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
         )
 
     @classmethod

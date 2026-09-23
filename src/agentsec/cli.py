@@ -49,16 +49,17 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.json:
-        Path(args.json).write_text(report.to_json(), encoding="utf-8")
+        Path(args.json).write_text(report.to_json(), encoding="utf-8", newline="\n")
     if args.md:
-        Path(args.md).write_text(report.to_markdown(), encoding="utf-8")
+        Path(args.md).write_text(report.to_markdown(), encoding="utf-8", newline="\n")
     if args.sarif:
         Path(args.sarif).write_text(
             report.to_sarif(artifact_uri=args.sarif_artifact, target=args.target),
             encoding="utf-8",
+            newline="\n",
         )
     if args.junit:
-        Path(args.junit).write_text(report.to_junit(), encoding="utf-8")
+        Path(args.junit).write_text(report.to_junit(), encoding="utf-8", newline="\n")
     print(
         f"{report.successes}/{report.total - report.errors} attacks succeeded "
         f"(ASR {report.asr:.1%}); {report.blocked} blocked, {report.errors} errors"
@@ -118,7 +119,7 @@ def cmd_threatmodel(args: argparse.Namespace) -> int:
     if args.action == "init":
         out = Path(args.output) if args.output else None
         if out:
-            out.write_text(SYSTEM_TEMPLATE, encoding="utf-8")
+            out.write_text(SYSTEM_TEMPLATE, encoding="utf-8", newline="\n")
             print(f"wrote {out}")
         else:
             print(SYSTEM_TEMPLATE, end="")
@@ -136,7 +137,7 @@ def cmd_threatmodel(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.output:
-        Path(args.output).write_text(doc, encoding="utf-8")
+        Path(args.output).write_text(doc, encoding="utf-8", newline="\n")
         print(f"wrote {args.output}")
     else:
         print(doc)

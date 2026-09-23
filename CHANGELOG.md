@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-23
+
 ### Added
 - Dependabot no longer manages the hash-pinned files in `requirements/` (it bumped transitive packages in isolation and broke the lock's consistency); refresh them with `python scripts/lock.py --upgrade`.
 - The Scorecard workflow can be run on demand (`workflow_dispatch`), and the README explains how to read the score for a solo-maintained project.
@@ -65,7 +67,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/releases/tag/v0.1.0

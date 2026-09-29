@@ -33,3 +33,9 @@ jobs:
           fail-on-severity: high
           # Keep strong-copyleft licences out of a library others will embed.
           deny-licenses: GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later
+          # GHSA-wj6h-64fc-37mp (python-ecdsa Minerva timing attack) has no fixed
+          # release. ecdsa reaches this repo only through checkov in
+          # requirements-security-tools.txt, a CI-only scanner that never signs
+          # anything; the library does not depend on it. Remove this entry if
+          # ecdsa ever appears in the runtime or dev locks.
+          allow-ghsas: GHSA-wj6h-64fc-37mp

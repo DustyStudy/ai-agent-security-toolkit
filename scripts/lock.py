@@ -40,6 +40,7 @@ LOCKS: dict[str, list[str]] = {
     "fuzz": ["pyproject.toml", f"{REQ}fuzz.in"],
     "release-tools": [f"{REQ}release-tools.in"],
     "lock-tools": [f"{REQ}lock-tools.in"],
+    "security-tools": [f"{REQ}security-tools.in"],
 }
 
 

@@ -5,6 +5,8 @@ updates:
   # pydantic pins it exactly) and leave the lock inconsistent, so it must not manage them. Refresh
   # them with `python scripts/lock.py --upgrade`. Security alerts are unaffected by this setting.
   - package-ecosystem: "pip"
+    cooldown:
+      default-days: 7
     directory: "/"
     schedule:
       interval: "weekly"
@@ -13,6 +15,10 @@ updates:
       - dependency-name: "*"
 
   - package-ecosystem: "github-actions"
+
+    cooldown:
+
+      default-days: 7
     directory: "/"
     schedule:
       interval: "weekly"

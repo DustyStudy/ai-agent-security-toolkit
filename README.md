@@ -188,6 +188,19 @@ The adapter imports nothing from `mcp`. It uses only `list_tools()` and `call_to
 
 `SafeCommandRunner` runs external commands with no shell, an executable/argument allowlist, a scrubbed environment, a pinned working directory, a timeout, and an output cap. It is **not** an OS sandbox. Put it inside a container or microVM for untrusted code.
 
+No shell does not mean no injection. A value the agent passes as data (a git ref, a file name, a search term) that starts with `-` is read by the program as an option, so `git diff --output=/tmp/x` writes a file instead of naming a revision. That is how [CVE-2026-97662](https://aws.amazon.com/security/security-bulletins/2026-121-aws/) in AWS `security-agent-mcp-server` worked. Set `allowed_options` on every `ExecRule` that takes agent-supplied arguments:
+
+```python
+runner = SafeCommandRunner(
+    {"git": ExecRule(executable="git", allowed_subcommands=["diff"], allowed_options=["--stat", "--"])},
+    cwd_roots=["/srv/repo"],
+)
+runner.run("git", ["diff", "--stat", "--", agent_supplied_ref])   # ref is positional after "--"
+runner.run("git", ["diff", "--output=/tmp/x"])                     # CommandDenied
+```
+
+Every argument that starts with `-` must then be a listed flag, exactly or as `--flag=value`. Short options with an attached value (`-ofile`) and look-alikes (`--stats`) are refused. List `--` to let a caller end option parsing; arguments after it are not checked as options, so put `--` in your own argv before untrusted values. Leaving `allowed_options` unset keeps the old behavior (options unchecked). The check knows the POSIX `-` convention only; Windows programs that take `/flag` options need an `arg_pattern` or `deny_args` instead.
+
 ## 3. Validate output and keep an audit trail
 
 ```python

@@ -42,6 +42,7 @@ def test_the_runner_lists_every_target_and_compiles():
     assert "import atheris" in source
     assert set(TARGETS) == {
         "cef", "url", "url_private", "path", "redact", "scan", "policy", "guard", "audit",
+        "exec_options",
     }  # fmt: skip
 
 
@@ -111,3 +112,8 @@ def test_guard_target_detects_a_guard_that_allows_everything(monkeypatch):
 def test_audit_target_detects_a_verifier_that_misses_tampering(monkeypatch):
     monkeypatch.setattr(targets, "verify_records", lambda records: SimpleNamespace(ok=True))
     _fails_within("audit")
+
+
+def test_exec_options_target_detects_a_runner_that_skips_the_option_check(monkeypatch):
+    monkeypatch.setattr(targets, "check_options", lambda args, rule: None)
+    _fails_within("exec_options")

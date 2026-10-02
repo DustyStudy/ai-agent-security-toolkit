@@ -31,6 +31,7 @@ from agentsec.middleware import (
     verify_records,
 )
 from agentsec.sandbox import ArgRule, Policy, PolicyError, Session, ToolGuard, Verdict
+from agentsec.sandbox.subprocess_runner import CommandDenied, ExecRule, check_options
 from agentsec.sandbox.validators import check_url, path_within_roots
 from agentsec.types import ToolCall
 from tests.cef_reference import ALLOWED_EXTENSION_KEYS, parse_cef
@@ -403,6 +404,29 @@ def audit(data: bytes) -> None:
         assert not verify_records(mutated).ok, f"tampering (kind {kind}) went undetected"
 
 
+_OPTION_PIECES = ["-", "--", "-o", "-ofile", "--stat", "--stat=1", "--output", "--output=/tmp/x",
+                  "--outputx", "--stat\x00", "\u2013-output", "-o=x", "HEAD", "main..dev", ""]  # fmt: skip
+
+
+def exec_options(data: bytes) -> None:
+    """An accepted argv never hands the program an option the rule did not allow."""
+    r = Reader(data)
+    allowed = [o for o in ["-o", "--stat", "--"] if r.flag()]
+    subcommands = ["diff", "--version"] if r.flag() else None
+    rule = ExecRule(executable="git", allowed_subcommands=subcommands, allowed_options=allowed)
+    args = [r.choice(_OPTION_PIECES) if r.flag() else r.text(12) for _ in range(r.below(6))]
+    try:
+        check_options(args, rule)
+    except CommandDenied:
+        return
+    for a in args[1:] if subcommands is not None else args:
+        if a == "--" and "--" in allowed:
+            break  # everything after an allowed end-of-options marker is positional
+        if a.startswith("-") and a != "-":
+            flag = a.split("=", 1)[0] if a.startswith("--") else a
+            assert flag in allowed, f"option {a!r} accepted with allowed_options={allowed}"
+
+
 TARGETS: dict[str, Callable[[bytes], None]] = {
     "cef": cef,
     "url": url,
@@ -413,6 +437,7 @@ TARGETS: dict[str, Callable[[bytes], None]] = {
     "policy": policy,
     "guard": guard,
     "audit": audit,
+    "exec_options": exec_options,
 }
 
 __all__ = ["NASTY", "TARGETS", "Reader"]

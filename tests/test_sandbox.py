@@ -438,3 +438,11 @@ def test_runner_requires_resolvable_executable(tmp_path):
         )
     with pytest.raises(ValueError):
         SafeCommandRunner({}, cwd_roots=[])
+
+
+def test_runner_option_check_known_limitation_windows_style_flags(tmp_path):
+    # Known limitation: only POSIX "-" options are recognised. A Windows program that takes
+    # "/flag" options needs arg_pattern or deny_args to constrain them.
+    script = _argv_echo(tmp_path)
+    out = _py_runner(tmp_path, allowed_options=[]).run("py", [script, "/output:x"])
+    assert json.loads(out.stdout) == ["/output:x"]

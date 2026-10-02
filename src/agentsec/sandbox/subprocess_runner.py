@@ -35,6 +35,45 @@ class ExecRule:
     arg_pattern: str | None = None  # every argument must fully match this regex
     deny_args: list[str] = field(default_factory=list)  # exact-match forbidden arguments
     max_args: int = 16
+    # Option allowlist. None leaves options unchecked (the pre-0.3 behaviour). A list
+    # means every argument that starts with "-" must be one of these flags, either
+    # exactly or as "--flag=value". Include "--" to let a caller end option parsing;
+    # arguments after it are positional and are not checked as options.
+    allowed_options: list[str] | None = None
+
+
+def _is_option_like(arg: str) -> bool:
+    # A lone "-" conventionally means stdin/stdout, not an option.
+    return arg.startswith("-") and arg != "-"
+
+
+def _option_allowed(arg: str, allowed: list[str]) -> bool:
+    if arg in allowed:
+        return True
+    # "--flag=value" is accepted when "--flag" is listed. Short options with an
+    # attached value ("-ofile") are not split: list them exactly or not at all.
+    if arg.startswith("--") and "=" in arg:
+        return arg.split("=", 1)[0] in allowed
+    return False
+
+
+def check_options(args: list[str], rule: ExecRule) -> None:
+    """Refuse option-like arguments the rule does not allow.
+
+    Without this, a value the agent meant as data (a git ref, a file name, a search
+    term) that starts with "-" is parsed by the target program as an option. That is
+    argument injection: ``git diff --output=/tmp/x`` writes a file instead of naming a
+    revision (CVE-2026-97662 in AWS security-agent-mcp-server was this bug).
+    """
+    if rule.allowed_options is None:
+        return
+    # allowed_subcommands already pins the first argument to an exact value.
+    start = 1 if rule.allowed_subcommands is not None else 0
+    for a in args[start:]:
+        if a == "--" and "--" in rule.allowed_options:
+            return
+        if _is_option_like(a) and not _option_allowed(a, rule.allowed_options):
+            raise CommandDenied(f"option {a!r} is not in allowed_options")
 
 
 @dataclass
@@ -64,6 +103,14 @@ class SafeCommandRunner:
             path = shutil.which(rule.executable)
             if path is None:
                 raise ValueError(f"executable {rule.executable!r} for {alias!r} not found")
+            if rule.allowed_options is not None and not all(
+                isinstance(o, str) and _is_option_like(o) and "=" not in o
+                for o in rule.allowed_options
+            ):
+                raise ValueError(
+                    f"allowed_options for {alias!r} must be flags starting with '-' and "
+                    "without '=' (values are allowed with --flag=value automatically)"
+                )
             self._resolved[alias] = (os.path.realpath(path), rule)
         self.cwd_roots = list(cwd_roots)
         self.timeout = timeout
@@ -145,6 +192,7 @@ class SafeCommandRunner:
                 raise CommandDenied(f"argument {a!r} is denied")
             if rule.arg_pattern is not None and not re.fullmatch(rule.arg_pattern, a):
                 raise CommandDenied(f"argument {a!r} does not match allowed pattern")
+        check_options(args, rule)
 
         ok, workdir = path_within_roots(cwd or self.cwd_roots[0], self.cwd_roots)
         if not ok:

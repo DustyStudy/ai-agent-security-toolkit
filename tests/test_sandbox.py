@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -360,6 +361,74 @@ def test_runner_timeout_and_output_cap(tmp_path):
     loud.write_text("print('x' * 10000)")
     res = runner.run("py", [str(loud)])
     assert res.truncated and len(res.stdout) <= 100
+
+
+def _argv_echo(tmp_path):
+    script = tmp_path / "argv.py"
+    script.write_text("import json, sys; print(json.dumps(sys.argv[1:]))")
+    return str(script)
+
+
+def test_runner_blocks_option_injection_through_a_data_argument(tmp_path):
+    # CVE-2026-97662: a "revision" the agent passed to a diff scan was read as an option.
+    script = _argv_echo(tmp_path)
+    runner = _py_runner(tmp_path, allowed_options=["--stat"])
+    for injected in ["--output=/tmp/pwned", "--output", "-o/tmp/pwned", "--upload-pack=id", "-c"]:
+        with pytest.raises(CommandDenied, match="allowed_options"):
+            runner.run("py", [script, injected])
+    # Look-alikes of an allowed flag are not the flag.
+    for near in ["--stats", "--sta", "---stat", "-stat"]:
+        with pytest.raises(CommandDenied, match="allowed_options"):
+            runner.run("py", [script, near])
+
+
+def test_runner_allows_listed_options_values_and_plain_data(tmp_path):
+    script = _argv_echo(tmp_path)
+    runner = _py_runner(tmp_path, allowed_options=["--stat", "-n"])
+    out = runner.run("py", [script, "--stat", "--stat=10", "-n", "-", "HEAD~1", "a-b"])
+    assert json.loads(out.stdout) == ["--stat", "--stat=10", "-n", "-", "HEAD~1", "a-b"]
+
+
+def test_runner_short_options_with_attached_values_must_be_listed_exactly(tmp_path):
+    script = _argv_echo(tmp_path)
+    runner = _py_runner(tmp_path, allowed_options=["-o"])
+    with pytest.raises(CommandDenied, match="allowed_options"):
+        runner.run("py", [script, "-ofile"])
+    with pytest.raises(CommandDenied, match="allowed_options"):
+        runner.run("py", [script, "-o=file"])
+
+
+def test_runner_end_of_options_marker(tmp_path):
+    script = _argv_echo(tmp_path)
+    with pytest.raises(CommandDenied, match="'--' is not in allowed_options"):
+        _py_runner(tmp_path, allowed_options=[]).run("py", [script, "--", "x"])
+    runner = _py_runner(tmp_path, allowed_options=["--"])
+    out = runner.run("py", [script, "--", "--output=/tmp/x"])
+    assert json.loads(out.stdout) == ["--", "--output=/tmp/x"]
+    with pytest.raises(CommandDenied, match="allowed_options"):
+        runner.run("py", [script, "--output=/tmp/x", "--"])
+
+
+def test_runner_option_check_skips_an_allowlisted_subcommand(tmp_path):
+    runner = _py_runner(tmp_path, allowed_subcommands=["--version"], allowed_options=[])
+    assert runner.run("py", ["--version"]).returncode == 0
+    with pytest.raises(CommandDenied, match="allowed_options"):
+        runner.run("py", ["--version", "-c"])
+
+
+def test_runner_without_allowed_options_keeps_the_old_behaviour(tmp_path):
+    script = _argv_echo(tmp_path)
+    out = _py_runner(tmp_path).run("py", [script, "--anything=goes"])
+    assert json.loads(out.stdout) == ["--anything=goes"]
+
+
+@pytest.mark.parametrize("bad", [["stat"], ["--stat=1"], [""], ["-"], [7]])
+def test_runner_rejects_malformed_allowed_options(tmp_path, bad):
+    with pytest.raises(ValueError, match="allowed_options"):
+        SafeCommandRunner(
+            {"py": ExecRule(executable=sys.executable, allowed_options=bad)},
+            cwd_roots=[str(tmp_path)],
+        )
 
 
 def test_runner_requires_resolvable_executable(tmp_path):

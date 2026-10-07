@@ -12,7 +12,7 @@ Each step is useful on its own, and later steps build on earlier ones.
 
 1. **Threat model the agent.** Describe components, trust zones and data flows and render a threat register (`agentsec threatmodel render`). Confirm or dismiss each candidate threat with the team; the value is in that conversation. See [threat-model/README.md](threat-model/README.md).
 2. **Write a deny-by-default tool policy.** Start from [`examples/policy.yaml`](../examples/policy.yaml). List only the tools the agent needs, constrain every argument, and mark tools that read attacker-influenceable content (`returns_untrusted: true`) and tools that act on the world (`side_effects: true`). Run `agentsec policy validate --strict` in CI and add `agentsec policy check` cases as regression tests.
-3. **Put the guard in the loop.** Use `ToolGuard` (sync) or its async forms, or the adapters for [LangChain/LangGraph and MCP](../README.md#async-applications). Every tool call is then allowlisted, argument-checked, rate-limited, optionally approved by a human, and audited.
+3. **Put the guard in the loop.** Use `ToolGuard` (sync) or its async forms, or the adapters for [LangChain/LangGraph and MCP](SANDBOX.md). Every tool call is then allowlisted, argument-checked, rate-limited, optionally approved by a human, and audited.
 4. **Turn on the audit trail** (see below) before you turn on anything else in production, so you can reconstruct what the agent did.
 5. **Fuzz in CI and before release.** `agentsec fuzz --target <your agent> --categories tool_misuse,exfiltration,prompt_leak --max-asr 0` gates on containment. Upload `--sarif` to code scanning if you use it. Extend the corpus with your own payloads.
 6. **Add screening and output validation** (`AgentMiddleware`): scan and spotlight untrusted input, and validate model output for secrets, exfiltration links and dangerous markup before it reaches a user or another system.
@@ -32,6 +32,8 @@ Each step is useful on its own, and later steps build on earlier ones.
 - **Verify on a schedule:** `agentsec audit verify audit.jsonl` exits `1` if any record was edited or removed.
 - **Feed your SIEM** with `TeeSink(FileSink(...), CefSink(...))`. The file stays the evidence of record; the CEF copy is the live feed. A SIEM outage is logged and does not break the chain.
 - **Decide what to store.** Secrets and PII are redacted before hashing. Use `log_content=False` to store only hashes and lengths of long fields when prompts and outputs are sensitive. Treat fuzz reports and audit logs as sensitive either way.
+
+**CEF details.** Denials, approval refusals and MCP tool findings get higher CEF severities than routine activity. Audit records carry attacker-influenceable text (tool names and arguments, model output), so every value is escaped per the CEF rules and bounded: a value cannot end its field, forge a `key=value` pair or start a new event. Each line includes the record's hash and its predecessor's, so a receiver can check the chain. `TeeSink` treats the first sink as the source of truth; a failing secondary sink (the SIEM is down) is logged to the `agentsec.audit` logger and does not interrupt the agent or break the chain. The CEF output is tested with a reference parser built from the CEF escaping rules; it has not been ingested by a specific SIEM product.
 
 ## Performance
 

@@ -12,6 +12,7 @@ from agentsec.fuzzer import (
     GuardedAgent,
     HttpTarget,
     NaiveAgent,
+    OllamaTarget,
     build_cases,
     detect,
     load_target,
@@ -307,3 +308,79 @@ def test_http_target_against_local_server():
         assert report.successes == 3  # forbidden tool call on every case
     finally:
         server.shutdown()
+
+
+def test_ollama_target_against_local_server():
+    import http.server
+    import threading
+
+    seen = []
+    replies = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            seen.append(
+                (self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            )
+            reply = (
+                replies.pop()
+                if replies
+                else {
+                    "message": {
+                        "role": "assistant",
+                        "content": "done",
+                        "tool_calls": [
+                            {"function": {"name": "send_email", "arguments": {"to": "x"}}}
+                        ],
+                    }
+                }
+            )
+            data = json.dumps(reply).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        target = OllamaTarget("m", base_url=f"http://127.0.0.1:{server.server_port}", timeout=5)
+        resp = target(
+            AttackInput(
+                user_message="summarize",
+                untrusted_content="doc body",
+                system_secret="SECRET-1",
+                available_tools=("send_email",),
+            )
+        )
+        path, body = seen[0]
+        assert path == "/api/chat" and body["options"]["temperature"] == 0
+        assert "SECRET-1" in body["messages"][0]["content"]
+        assert "<document>" in body["messages"][1]["content"]
+        assert body["tools"][0]["function"]["name"] == "send_email"
+        assert resp.text == "done" and resp.tool_calls == [ToolCall("send_email", {"to": "x"})]
+        # The same model behind the guards: the off-policy email is stripped and flagged.
+        guarded = GuardedAgent(model=target)(
+            AttackInput(user_message="summarize", available_tools=("send_email",))
+        )
+        assert guarded.tool_calls == [] and guarded.blocked
+        # A reply without a message is an error, not a refusal.
+        replies.append({"done": True})
+        with pytest.raises(ValueError):
+            target(AttackInput(user_message="hi"))
+    finally:
+        server.shutdown()
+
+
+def test_load_target_ollama_and_guarded_specs():
+    assert isinstance(load_target("ollama:llama3.1:8b"), OllamaTarget)
+    assert load_target("ollama:llama3.1:8b").model == "llama3.1:8b"
+    wrapped = load_target("guarded:ollama:qwen3:8b")
+    assert isinstance(wrapped, GuardedAgent) and wrapped.model.model == "qwen3:8b"
+    with pytest.raises(ValueError):
+        OllamaTarget(base_url="file:///x")
+    with pytest.raises(ValueError):  # executing agents would act before the guard
+        load_target("guarded:http://localhost:9/x")

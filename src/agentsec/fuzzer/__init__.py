@@ -15,6 +15,7 @@ from agentsec.fuzzer.report import FuzzReport
 from agentsec.fuzzer.targets import (
     AnthropicTarget,
     HttpTarget,
+    OllamaTarget,
     load_target,
     sync_target,
     text_target,
@@ -31,6 +32,7 @@ __all__ = [
     "GuardedAgent",
     "HttpTarget",
     "NaiveAgent",
+    "OllamaTarget",
     "Payload",
     "build_cases",
     "demo_policy",

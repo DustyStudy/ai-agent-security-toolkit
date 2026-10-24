@@ -5,6 +5,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ## [Unreleased]
 
 ### Added
+- `OllamaTarget` and the `ollama:<model>` target spec drive a local model through Ollama's `/api/chat` with pinned decoding (temperature 0, fixed seed), so the fuzzer can measure a real model without an API key or billing.
+- The `guarded:<spec>` target spec puts any other target behind the toolkit's scanner, tool policy and output guard (the same layers as `builtin:guarded`), so the same model can be measured with and without them. `GuardedAgent` now accepts any target as its model.
 - `ExecRule.allowed_options`: an allowlist of option flags for `SafeCommandRunner`. When set, any argument that starts with `-` must be a listed flag (exactly, or as `--flag=value`), so an agent-supplied value cannot be parsed as an option by the target program (argument injection, the bug behind [CVE-2026-97662](https://aws.amazon.com/security/security-bulletins/2026-121-aws/) in AWS `security-agent-mcp-server`). Listing `--` lets a caller end option parsing. Unset keeps the previous behavior. A new `exec_options` fuzz target checks that no unlisted option is ever accepted.
 
 ## [0.2.2] - 2026-09-23

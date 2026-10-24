@@ -20,7 +20,7 @@ import codecs
 import hashlib
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from agentsec.middleware.audit import AuditLogger, MemorySink
 from agentsec.middleware.injection import InjectionScanner
@@ -28,7 +28,7 @@ from agentsec.middleware.pipeline import AgentMiddleware
 from agentsec.middleware.validators import OutputGuard
 from agentsec.sandbox.guard import Session, ToolGuard
 from agentsec.sandbox.policy import Policy
-from agentsec.types import AttackInput, TargetResponse, ToolCall
+from agentsec.types import AttackInput, Target, TargetResponse, ToolCall
 
 _INVISIBLE = re.compile("[\u200b\u200c\u200d\u2060\ufeff\u00ad]")
 _TAGS = re.compile("[\U000e0020-\U000e007e]")
@@ -177,9 +177,9 @@ def demo_policy() -> Policy:
 
 
 class GuardedAgent:
-    """:class:`NaiveAgent` behind scanner + tool policy + output guard + audit log."""
+    """A model (default: :class:`NaiveAgent`) behind scanner + tool policy + output guard + audit log."""
 
-    def __init__(self, model: NaiveAgent | None = None, *, use_scanner: bool = True) -> None:
+    def __init__(self, model: Target | None = None, *, use_scanner: bool = True) -> None:
         self.model = model or NaiveAgent()
         self.sink = MemorySink()
         self.audit = AuditLogger(self.sink)
@@ -213,7 +213,17 @@ class GuardedAgent:
                 notes=[r for s in screens for r in s.reasons],
             )
 
-        raw = self.model(inp)
+        # The model sees the screened (spotlighted) text, as it would in a real agent loop.
+        raw = self.model(
+            replace(
+                inp,
+                user_message=screens[0].text,
+                untrusted_content=screens[1].text
+                if inp.untrusted_content
+                else inp.untrusted_content,
+            )
+        )
+        notes.extend(raw.notes)
         allowed: list[ToolCall] = []
         for call in raw.tool_calls:
             decision = mw.authorize_tool(call, session)
@@ -228,6 +238,6 @@ class GuardedAgent:
         return TargetResponse(
             text=out.text,
             tool_calls=allowed,
-            blocked=not out.allowed or len(allowed) < len(raw.tool_calls),
+            blocked=raw.blocked or not out.allowed or len(allowed) < len(raw.tool_calls),
             notes=notes,
         )

@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Security
+- Refreshed every hash-pinned lock in `requirements/`. This moves certifi to 2026.10.23 (removes the emSign roots with compromised intermediate keys), GitPython to 3.2.1 (submodule path RCE) and opentelemetry-api to 1.45.1 (unbounded tracestate parsing).
+
 ## [0.3.0] - 2026-10-24
 
 ### Added

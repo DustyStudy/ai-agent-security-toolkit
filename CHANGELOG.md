@@ -4,9 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-24
+
 ### Added
 - `OllamaTarget` and the `ollama:<model>` target spec drive a local model through Ollama's `/api/chat` with pinned decoding (temperature 0, fixed seed), so the fuzzer can measure a real model without an API key or billing.
-- The `guarded:<spec>` target spec puts any other target behind the toolkit's scanner, tool policy and output guard (the same layers as `builtin:guarded`), so the same model can be measured with and without them. `GuardedAgent` now accepts any target as its model.
+- The `guarded:anthropic:<model>` and `guarded:ollama:<model>` target specs put a model behind the toolkit's scanner, tool policy and output guard (the same layers as `builtin:guarded`), so the same model can be measured with and without them. They only wrap model targets, which propose tool calls without running them. `GuardedAgent` now accepts any target as its model and passes it the screened (spotlighted) input.
+- [`docs/PROOF.md`](docs/PROOF.md): the 500-case fuzz matrix run against a real model (Llama 3.1 8B, local). Attack success fell from 34.9% for the model alone to 2.0% behind the tool policy and output guard, with no tool misuse, exfiltration or prompt leaks, and to 0.2% with the scanner added.
 - `ExecRule.allowed_options`: an allowlist of option flags for `SafeCommandRunner`. When set, any argument that starts with `-` must be a listed flag (exactly, or as `--flag=value`), so an agent-supplied value cannot be parsed as an option by the target program (argument injection, the bug behind [CVE-2026-97662](https://aws.amazon.com/security/security-bulletins/2026-121-aws/) in AWS `security-agent-mcp-server`). Listing `--` lets a caller end option parsing. Unset keeps the previous behavior. A new `exec_options` fuzz target checks that no unlisted option is ever accepted.
 
 ## [0.2.2] - 2026-09-23
@@ -72,7 +75,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.1.0...v0.2.0

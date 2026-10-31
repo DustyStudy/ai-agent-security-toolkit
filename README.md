@@ -72,7 +72,7 @@ agentsec fuzz --target mypkg.agent:respond --max-asr 0.10
 agentsec fuzz --target https://staging.example.com/agent/chat
 
 # a Claude model directly (needs ANTHROPIC_API_KEY)
-agentsec fuzz --target anthropic:claude-sonnet-5 --max-cases 100
+agentsec fuzz --target anthropic:claude-sonnet-5-5 --max-cases 100
 
 # a local model through Ollama (no API key), bare and behind the toolkit's guards
 agentsec fuzz --target ollama:llama3.1:8b

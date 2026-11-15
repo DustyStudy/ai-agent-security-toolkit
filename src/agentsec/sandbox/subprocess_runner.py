@@ -103,6 +103,16 @@ class SafeCommandRunner:
             path = shutil.which(rule.executable)
             if path is None:
                 raise ValueError(f"executable {rule.executable!r} for {alias!r} not found")
+            # Check the canonical path that is actually run: realpath turns "npm.cmd." or
+            # "npm.cmd " into "npm.cmd" on Windows.
+            path = os.path.realpath(path)
+            if os.name == "nt" and os.path.splitext(path)[1].lower() in {".bat", ".cmd"}:
+                # Windows runs batch files through cmd.exe even with shell=False, which
+                # re-parses the arguments ("BatBadBut"): `x&ver` would run `ver`.
+                raise ValueError(
+                    f"executable {rule.executable!r} for {alias!r} resolves to a batch file "
+                    f"({path}); batch files run through cmd.exe and cannot be argument-safe"
+                )
             if rule.allowed_options is not None and not all(
                 isinstance(o, str) and _is_option_like(o) and "=" not in o
                 for o in rule.allowed_options
@@ -111,7 +121,7 @@ class SafeCommandRunner:
                     f"allowed_options for {alias!r} must be flags starting with '-' and "
                     "without '=' (values are allowed with --flag=value automatically)"
                 )
-            self._resolved[alias] = (os.path.realpath(path), rule)
+            self._resolved[alias] = (path, rule)
         self.cwd_roots = list(cwd_roots)
         self.timeout = timeout
         self.max_output_bytes = max_output_bytes
@@ -194,7 +204,10 @@ class SafeCommandRunner:
                 raise CommandDenied(f"argument {a!r} does not match allowed pattern")
         check_options(args, rule)
 
-        ok, workdir = path_within_roots(cwd or self.cwd_roots[0], self.cwd_roots)
+        # A relative cwd is anchored to the first root here; safe because Popen gets the
+        # resolved workdir, not the raw string.
+        base = os.path.realpath(self.cwd_roots[0])
+        ok, workdir = path_within_roots(os.path.join(base, cwd or ""), self.cwd_roots)
         if not ok:
             raise CommandDenied("working directory escapes allowed roots")
 

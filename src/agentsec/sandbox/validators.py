@@ -26,16 +26,18 @@ def _default_resolver(host: str) -> list[str]:
 def path_within_roots(value: str, roots: Sequence[str]) -> tuple[bool, str]:
     """Resolve ``value`` (following symlinks) and require it to live under a root.
 
-    Relative paths are interpreted relative to the first root. Returns
+    Relative paths are refused: the guard only approves the call, and the tool later opens
+    the raw string against the process cwd, not against a root. Returns
     ``(ok, resolved_path)``.
     """
     if not roots:
         return False, value
-    if "\x00" in value:
+    if "\x00" in value or not os.path.isabs(value):
         return False, value
-    base = os.path.realpath(roots[0])
-    candidate = value if os.path.isabs(value) else os.path.join(base, value)
-    resolved = os.path.realpath(candidate)
+    # Windows: "\x" (no drive) resolves against the current drive, so require a drive or UNC.
+    if os.name == "nt" and not os.path.splitdrive(value)[0]:
+        return False, value
+    resolved = os.path.realpath(value)
     for root in roots:
         real_root = os.path.realpath(root)
         try:

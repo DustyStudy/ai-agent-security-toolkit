@@ -5,6 +5,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ## [Unreleased]
 
 ### Security
+- **Breaking:** `path` arguments must now be absolute. A relative path was checked as if it sat under the first root, but the tool received the raw string and opened it against the process working directory, so `"secret.txt"` passed the check and read a file outside every root. Relative paths are now refused (on Windows, a path must also name a drive or UNC share). `SafeCommandRunner` still accepts a relative `cwd`, anchored to its first root, because it runs the command in the resolved directory.
+- `SafeCommandRunner` refuses an executable that resolves to a `.bat` or `.cmd` file on Windows. Windows runs batch files through `cmd.exe` even with `shell=False`, so it re-parses their arguments, and an argument like `x&ver` ran `ver` ("BatBadBut"). The check uses the canonical path, so `npm.cmd.` (which Windows runs as `npm.cmd`) is refused too.
+- `ExfilLinkValidator` treats `\` as `/` before reading a URL's host, as browsers do. `https://attacker.example\@allowed.example/` was read as `allowed.example` but fetched from `attacker.example`, so a markdown image could exfiltrate data past the host allowlist. It also accepts any number of slashes after `http(s):` (`https:/attacker.example/`, `https:///attacker.example/`), as browsers do, and treats an http(s) URL whose host it cannot read as external instead of letting it through or crashing on a malformed `[...]` host.
 - Refreshed every hash-pinned lock in `requirements/`. This moves certifi to 2026.10.23 (removes the emSign roots with compromised intermediate keys), GitPython to 3.2.1 (submodule path RCE) and opentelemetry-api to 1.45.1 (unbounded tracestate parsing).
 
 ## [0.3.0] - 2026-10-24

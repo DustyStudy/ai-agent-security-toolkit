@@ -60,8 +60,11 @@ def test_path_traversal_and_absolute_escape_blocked(tmp_path):
     root = tmp_path / "ws"
     root.mkdir()
     (root / "ok.txt").write_text("x")
-    assert path_within_roots("ok.txt", [str(root)])[0]
+    assert path_within_roots(str(root / "ok.txt"), [str(root)])[0]
+    # Relative paths are refused: the tool would open them against the process cwd.
+    assert not path_within_roots("ok.txt", [str(root)])[0]
     assert not path_within_roots("../secret.txt", [str(root)])[0]
+    assert not path_within_roots(str(root / ".." / "secret.txt"), [str(root)])[0]
     assert not path_within_roots(str(tmp_path / "elsewhere"), [str(root)])[0]
     assert not path_within_roots("a\x00b", [str(root)])[0]
     assert not path_within_roots("ok.txt", [])[0]
@@ -77,7 +80,7 @@ def test_symlink_escape_blocked(tmp_path):
         os.symlink(outside, link, target_is_directory=True)
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not permitted on this platform")
-    assert not path_within_roots("link/file", [str(root)])[0]
+    assert not path_within_roots(str(link / "file"), [str(root)])[0]
 
 
 @pytest.mark.parametrize(
@@ -161,7 +164,8 @@ def test_argument_rules_enforced(sample_policy):
 def test_path_tool_confined_to_root(sample_policy, tmp_path):
     g = ToolGuard(sample_policy)
     (tmp_path / "workspace" / "a.txt").write_text("hi")
-    assert g.evaluate(_call("read_file", path="a.txt")).allowed
+    assert g.evaluate(_call("read_file", path=str(tmp_path / "workspace" / "a.txt"))).allowed
+    assert not g.evaluate(_call("read_file", path="a.txt")).allowed
     assert not g.evaluate(_call("read_file", path="../../etc/passwd")).allowed
 
 

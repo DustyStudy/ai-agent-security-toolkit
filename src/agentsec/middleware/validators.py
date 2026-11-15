@@ -182,28 +182,46 @@ class ExfilLinkValidator:
         bad_links = [u for u in _URL.findall(text) if u not in image_set and self._is_external(u)]
         return bad_images, bad_links
 
-    def _is_external(self, url: str) -> bool:
-        # "//host/x" (and the backslash forms browsers normalise to it) is a network-path
-        # reference: a UI resolves it against its own scheme and fetches it from ``host``.
-        # It has no scheme, so without this it looks relative and is never flagged.
-        if re.match(r"[\\/]{2}", url):
-            url = "https:" + url.replace("\\", "/")
-        parts = urlsplit(url)
-        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+    @staticmethod
+    def _fetch_host(url: str) -> tuple[bool, str | None]:
+        """``(is_http, host)`` as a browser would fetch ``url``; host None if unreadable.
+
+        urlsplit disagrees with browsers (the WHATWG URL parser) in ways that hide the
+        real host, so normalise first:
+        - tabs/newlines are dropped and "\\" is read as "/", so "https://evil\\@ok/"
+          goes to evil, not ok;
+        - "//host/x" is a network-path reference fetched from ``host`` with the page's
+          scheme;
+        - for http(s), any number of slashes after the scheme is accepted, so
+          "https:/evil/" and "https:///evil/" both go to evil.
+        """
+        url = re.sub(r"[\t\n\r]", "", url).replace("\\", "/")
+        if url.startswith("//"):
+            url = "https:" + url
+        m = re.match(r"(?i)(https?):/*", url)
+        if not m:
             # relative/data/javascript URLs are handled by DangerousContentValidator
+            return False, None
+        try:
+            return True, urlsplit(f"{m.group(1)}://{url[m.end() :]}").hostname
+        except ValueError:  # e.g. a malformed "[...]" host
+            return True, None
+
+    def _is_external(self, url: str) -> bool:
+        is_http, host = self._fetch_host(url)
+        if not is_http:
             return False
-        return not _host_allowed(parts.hostname, self.allowed_hosts)
+        # An http(s) URL whose host we cannot read is treated as external (fail closed).
+        return host is None or not _host_allowed(host, self.allowed_hosts)
 
     def check(self, text: str) -> list[Violation]:
         images, links = self._external_urls(text)
-        out = [
-            Violation(self.name, f"external image URL ({urlsplit(u).hostname})", self.action)
-            for u in images
-        ]
-        out += [
-            Violation(self.name, f"external URL ({urlsplit(u).hostname})", self.links_action)
-            for u in links
-        ]
+
+        def host(u: str) -> str:
+            return self._fetch_host(u)[1] or "unparseable host"
+
+        out = [Violation(self.name, f"external image URL ({host(u)})", self.action) for u in images]
+        out += [Violation(self.name, f"external URL ({host(u)})", self.links_action) for u in links]
         return out
 
     def sanitize(self, text: str) -> str:

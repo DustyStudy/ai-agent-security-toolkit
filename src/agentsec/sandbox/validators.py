@@ -65,8 +65,12 @@ def _host_matches(host: str, patterns: Sequence[str]) -> bool:
 def _is_nonpublic(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         ip = ip.ipv4_mapped
+    # not is_global adds shared/CGNAT space 100.64.0.0/10 (Alibaba Cloud's metadata service
+    # is 100.100.100.200), which is_private misses. The explicit checks stay because
+    # is_global differs across Python versions: 3.12 calls reserved 4000::1 global.
     return (
-        ip.is_private
+        not ip.is_global
+        or ip.is_private
         or ip.is_loopback
         or ip.is_link_local  # includes 169.254.169.254 cloud metadata
         or ip.is_reserved
@@ -139,6 +143,10 @@ def check_url(value: str, rule: ArgRule, resolver: Resolver | None = None) -> li
         if literal is not None:
             if _is_nonpublic(literal):
                 errors.append(f"host {host!r} is a non-public address")
+        elif ascii_host == "localhost" or ascii_host.endswith(".localhost"):
+            # RFC 6761: resolvers send these to loopback without asking DNS, so they are
+            # loopback even when resolve_dns is off.
+            errors.append(f"host {host!r} is a loopback name")
         elif rule.resolve_dns:
             try:
                 addrs = (resolver or _default_resolver)(ascii_host)

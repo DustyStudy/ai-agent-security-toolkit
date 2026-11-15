@@ -6,6 +6,7 @@ fixes: this file is the record that the controls actually hold.
 
 from __future__ import annotations
 
+import html
 import http.server
 import json
 import os
@@ -24,12 +25,15 @@ from agentsec.middleware import (
     AuditLogger,
     DangerousContentValidator,
     ExfilLinkValidator,
+    FileSink,
     InjectionScanner,
     JsonSchemaValidator,
     MemorySink,
     OutputGuard,
     ProtectedStringValidator,
     redact_text,
+    verify_file,
+    verify_records,
 )
 from agentsec.sandbox import (
     ExecRule,
@@ -500,6 +504,261 @@ def test_oversized_untrusted_input_is_visible_in_the_audit_log_not_scanned_in_fu
     mw.screen_input("x" * 5000, source="web", untrusted=True)
     findings = [r for r in sink.records if r["event"] == "injection_signal"]
     assert findings and findings[0]["data"]["truncated"] is True
+
+
+# ---------------------------------------------------------------- SSRF address coverage
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://100.100.100.200/latest/meta-data/",  # Alibaba Cloud metadata (CGNAT space)
+        "https://100.64.0.1/",
+        "https://localhost/",
+        "https://LOCALHOST./",
+        "https://api.localhost/",
+        "https://[::ffff:100.100.100.200]/",
+    ],
+)
+def test_ssrf_check_rejects_cgnat_and_localhost_names_without_dns(url):
+    """is_private misses 100.64.0.0/10; localhost names are loopback without any DNS lookup."""
+    assert check_url(url, ArgRule(type="url"))
+
+
+def test_ssrf_check_still_allows_public_hosts():
+    assert not check_url("https://93.184.215.14/", ArgRule(type="url"))
+    assert not check_url("https://notlocalhost.example/", ArgRule(type="url"))
+
+
+# ---------------------------------------------------------------- redaction coverage
+
+
+def _secret_body(n: int, alphabet: str = "aB3_-") -> str:
+    return (alphabet * n)[:n]
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        # Current OpenAI key formats contain "-" and "_".
+        ("key " + "sk-" + "proj-" + _secret_body(48), "sk-" + "proj-" + _secret_body(48)),
+        ("key " + "sk-" + "svcacct-" + _secret_body(40), "sk-" + "svcacct-" + _secret_body(40)),
+        # STS / boto JSON field names carry no "aws" prefix.
+        (
+            '{"SecretAccessKey": "' + "wJalrXUtnFEMI/K7MDENG/bPxRfiCY" + "EXAMPLEKE" + '/"}',
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCY" + "EXAMPLEKE" + "/",
+        ),
+        # A secret ending in "/" or "+" has no \b after it.
+        (
+            "aws_secret_access_key = " + "wJalrXUtnFEMI/K7MDENG/bPxRfiCY" + "EXAMPLEK+" + "+",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCY" + "EXAMPLEK+" + "+",
+        ),
+        ("postgres://app:" + "hunter2pass" + "@db.internal:5432/app", "hunter2pass"),
+        ("DB_PASSWORD=" + "hunter2pass", "hunter2pass"),
+        ('{"password": "' + "hunter2pass" + '"}', "hunter2pass"),
+    ],
+)
+def test_redaction_covers_modern_key_formats_and_credentials(text, secret):
+    redacted, findings = redact_text(text)
+    assert findings
+    assert secret not in redacted
+
+
+# ---------------------------------------------------------------- XSS markup coverage
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        '<svg><animate onbegin=alert(1) attributeName="x" dur="1s">',
+        "<body onpageshow=alert(1)>",
+        "<svg/onload=alert(1)>",
+        '<a href="&#106;avascript:alert(1)">x</a>',
+        '<a href="java&#x09;script:alert(1)">x</a>',
+        '<a href="&#x6A;&#x61;vascript&colon;alert(1)">x</a>',
+    ],
+)
+def test_dangerous_content_catches_any_handler_and_entity_encoded_schemes(markup):
+    validator = DangerousContentValidator()
+    assert validator.check(markup)
+    assert not validator.check(validator.sanitize(markup))
+
+
+@pytest.mark.parametrize("prose", ["one = 1", "online = True", "set the only=flag option"])
+def test_dangerous_content_ignores_on_words_outside_tags(prose):
+    assert not DangerousContentValidator().check(prose)
+
+
+# ---------------------------------------------------------------- audit chain robustness
+
+
+def test_two_loggers_on_one_file_share_a_single_chain(tmp_path):
+    """One logger per conversation on a shared file used to fork the chain."""
+    path = tmp_path / "audit.jsonl"
+    a = AuditLogger(FileSink(path), session_id="a")
+    b = AuditLogger(FileSink(path), session_id="b")
+    for i in range(3):
+        a.log("prompt", n=i)
+        b.log("prompt", n=i)
+    result = verify_file(path)
+    assert result.ok and result.records_checked == 6
+    assert a.checkpoint()["hash"] == b.checkpoint()["hash"]
+
+
+def test_torn_last_line_fails_closed_with_a_clear_error(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    AuditLogger(FileSink(path)).log("prompt", text="hi")
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write('{"seq": 1, "ha')  # crash mid-write
+    with pytest.raises(ValueError, match="torn write"):
+        AuditLogger(FileSink(path))
+
+
+@pytest.mark.parametrize("line", ["1", "[]", '"x"', "null"])
+def test_verify_reports_non_object_records_as_tampering(tmp_path, line):
+    path = tmp_path / "audit.jsonl"
+    AuditLogger(FileSink(path)).log("prompt", text="hi")
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+    result = verify_file(path)
+    assert not result.ok
+    assert not verify_records([1]).ok  # type: ignore[list-item]
+
+
+def test_verify_reports_invalid_utf8_as_tampering(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    AuditLogger(FileSink(path)).log("prompt", text="hi")
+    with path.open("ab") as fh:
+        fh.write(b'{"seq": 1, "x": "\xff"}\n')
+    assert not verify_file(path).ok
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["<a" * 100_000, "<a " + "on" * 100_000, "a." * 100_000, "password" * 25_000],
+    ids=["open-tags", "on-run", "dotted-word", "password-run"],
+)
+def test_new_markup_and_credential_patterns_stay_linear(text):
+    """Both used to retry from every '<' / '.', taking minutes on 200k characters."""
+    start = time.perf_counter()
+    DangerousContentValidator().sanitize(text)
+    redact_text(text)
+    assert time.perf_counter() - start < 2.0
+
+
+# ---------------------------------------------------------------- review follow-ups
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        '<img title=">" src=x onerror=alert(1)>',  # quoted ">" does not end the tag
+        "<img alt='>' src=x onerror=alert(1)>",
+        '<img src="x"onerror=alert(1)>',  # handler right after a closing quote
+    ],
+)
+def test_event_handler_after_a_quoted_gt_is_still_inside_the_tag(markup):
+    guard = OutputGuard.default()
+    result = guard.process(markup)
+    assert not result.allowed
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use &lt;script&gt; to describe a script element.",
+        '<span title="online=true">Status</span>',
+        "<a title='onclick=x'>ok</a>",
+    ],
+)
+def test_escaped_markup_and_handler_text_inside_attribute_values_are_not_blocked(text):
+    assert OutputGuard.default().process(text).allowed
+
+
+def test_sanitize_never_returns_decoded_markup_that_decodes_to_script_again():
+    validator = DangerousContentValidator()
+    once = validator.sanitize('<a href="&amp;#106;avascript:alert(1)">x</a>')
+    # Browsers decode once: "&amp;#106;" shows as text, so nothing here is dangerous...
+    assert not validator.check(once)
+    encoded = '<a href="&#106;avascript:alert(1)">x</a>'
+    cleaned = validator.sanitize(encoded)
+    # ...and a real encoded scheme is neutralised without decoding the document.
+    assert not validator.check(cleaned)
+    assert "javascript:" not in html.unescape(cleaned).lower()
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ('{"password":"ab cd ef"}', "ab cd ef"),
+        ("password='with \\'quote\\' inside'", "inside"),
+        ("redis://:" + "hunter2pass" + "@localhost:6379/0", "hunter2pass"),
+    ],
+)
+def test_redaction_handles_quoted_passwords_and_empty_usernames(text, secret):
+    redacted, _ = redact_text(text)
+    assert secret not in redacted
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password=" + "hunter2pass",
+        '{"password": "' + "hunter2pass" + '"}',
+        "redis://user:" + "hunter2pass" + "@localhost/0",
+    ],
+)
+def test_redaction_is_idempotent_so_the_guard_delivers_redacted_output(text):
+    once, _ = redact_text(text)
+    assert redact_text(once) == (once, [])
+    result = OutputGuard.default().process(text)
+    assert result.allowed and "hunter2pass" not in result.text
+
+
+def test_ssrf_check_rejects_reserved_ipv6_on_every_python_version():
+    assert check_url("https://[4000::1]/", ArgRule(type="url"))
+
+
+def test_file_sink_path_is_fixed_at_construction(tmp_path, monkeypatch):
+    first, second = tmp_path / "a", tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.chdir(first)
+    a = AuditLogger(FileSink("audit.jsonl"))
+    monkeypatch.chdir(second)
+    b = AuditLogger(FileSink("audit.jsonl"))
+    a.log("prompt")
+    b.log("prompt")
+    assert verify_file(first / "audit.jsonl").ok and verify_file(second / "audit.jsonl").ok
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        None,  # valid record but no trailing newline
+        '{"seq": 1, "hash": null}\n',
+        '{"seq": "1", "hash": "' + "0" * 64 + '"}\n',
+        '{"seq": 1, "hash": "' + "0" * 64 + '"}\n',  # well-formed but hash does not match
+    ],
+)
+def test_resume_refuses_a_last_record_it_cannot_safely_chain_onto(tmp_path, tail):
+    path = tmp_path / "audit.jsonl"
+    AuditLogger(FileSink(path)).log("prompt", text="hi")
+    if tail is None:
+        path.write_text(path.read_text(encoding="utf-8").rstrip("\n"), encoding="utf-8")
+    else:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(tail)
+    with pytest.raises(ValueError, match="torn write"):
+        AuditLogger(FileSink(path))
+
+
+def test_verify_rejects_raw_bytes_that_mimic_an_escaped_surrogate(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    AuditLogger(FileSink(path)).log("prompt", text="\udcff")
+    raw = path.read_bytes().replace(rb"\udcff", b"\xff")
+    path.write_bytes(raw)
+    assert not verify_file(path).ok
 
 
 # ---------------------------------------------------------------- low-severity follow-ups

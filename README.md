@@ -11,7 +11,7 @@
 | | Module | What it does |
 |---|---|---|
 | 1 | [`agentsec.fuzzer`](src/agentsec/fuzzer) | Prompt-injection test harness. 25 payloads x 10 obfuscations x 2 delivery modes = 500 cases, mechanically scored with canaries (no judge model). Emits JSON/Markdown and gates CI on attack-success rate. |
-| 2 | [`agentsec.sandbox`](src/agentsec/sandbox) | Deny-by-default tool allowlist for agent frameworks: per-argument validation, path confinement, SSRF-safe URL checks, rate limits, human approval, and **taint tracking** that blocks side-effecting tools after untrusted content is read. Plus a no-shell subprocess runner. |
+| 2 | [`agentsec.sandbox`](src/agentsec/sandbox) | Deny-by-default tool allowlist for agent frameworks: per-argument validation, path confinement, SSRF checks on URL arguments, rate limits, human approval, and **taint tracking** that blocks side-effecting tools after untrusted content is read. Plus a no-shell subprocess runner. |
 | 3 | [`agentsec.middleware`](src/agentsec/middleware) | Output validation (secrets/PII, markdown-image exfiltration, XSS markup, JSON-schema, protected strings) and a **hash-chained, tamper-evident audit log** with secret redaction. |
 | 4 | [`agentsec.threatmodel`](src/agentsec/threatmodel) | **STRIDE-for-agents** threat catalog (25 threats mapped to the OWASP LLM Top 10 2025, the OWASP Top 10 for Agentic Applications 2026 and MITRE ATLAS) and a generator that turns a YAML system description into a threat model with data-flow diagram, threat register, and verification plan. |
 

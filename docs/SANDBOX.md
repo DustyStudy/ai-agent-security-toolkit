@@ -18,7 +18,7 @@ out = await runner.arun("git", ["status"])                    # SafeCommandRunne
 ```
 
 - `aauthorize`, `aexecute` and `awrap` mirror `authorize`, `execute` and `wrap`, with the same policy, taint, limit and audit behavior.
-- Plain (non-`async`) tools run in a worker thread so a blocking tool cannot stall the loop. DNS-resolving URL rules are evaluated off the loop too.
+- Plain (non-`async`) tools and approvers run in a worker thread so a blocking tool or a human-approval prompt cannot stall the loop. DNS-resolving URL rules are evaluated off the loop too.
 - Limits stay exact under concurrent tasks (`asyncio.gather` over many calls cannot exceed `max_calls`), and the session is tainted even if an untrusted-content tool raises or its task is cancelled.
 - The sync API **fails closed** on async pieces instead of misreading them: an `async def` approver used with `authorize()` is refused, and `execute()` on an `async def` tool raises `TypeError` instead of returning a coroutine.
 - `arun_*_tool_uses` run one model turn's calls in the order given, so taint from a read applies to a later side-effecting call in the same turn. For concurrency, call `aexecute` yourself.

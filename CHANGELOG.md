@@ -9,6 +9,17 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `SafeCommandRunner` refuses an executable that resolves to a `.bat` or `.cmd` file on Windows. Windows runs batch files through `cmd.exe` even with `shell=False`, so it re-parses their arguments, and an argument like `x&ver` ran `ver` ("BatBadBut"). The check uses the canonical path, so `npm.cmd.` (which Windows runs as `npm.cmd`) is refused too.
 - `ExfilLinkValidator` treats `\` as `/` before reading a URL's host, as browsers do. `https://attacker.example\@allowed.example/` was read as `allowed.example` but fetched from `attacker.example`, so a markdown image could exfiltrate data past the host allowlist. It also accepts any number of slashes after `http(s):` (`https:/attacker.example/`, `https:///attacker.example/`), as browsers do, and treats an http(s) URL whose host it cannot read as external instead of letting it through or crashing on a malformed `[...]` host.
 - Refreshed every hash-pinned lock in `requirements/`. This moves certifi to 2026.10.23 (removes the emSign roots with compromised intermediate keys), GitPython to 3.2.1 (submodule path RCE) and opentelemetry-api to 1.45.1 (unbounded tracestate parsing).
+- `ExfilLinkValidator` treats every URL a renderer fetches without a click as an image: reference-style markdown images (`![a][1]` with `[1]: url`; labels match as in CommonMark, and every definition of a label is checked), `src`, `srcset`, `poster`, `background` and `data` attributes on any tag, `href` on `<link>` and SVG `<image>`/`<use>`, CSS `url()` and `@import`. These were classed as links, so with `links_action=WARN` they were delivered. Tags are tokenised quote-aware, so `src=` text inside another attribute's value is not a fetch; character references and surrounding whitespace in URLs are decoded before the host check (`https&#58;//...`); and extraction runs in linear time, including on unclosed `![` alt text.
+- `GuardedMCPClient` with `pins` refuses to call a tool that has not passed a pin check in a `list_tools()` listing. A tool that was never listed, or sat on a page that was not fetched, used to go straight to the server.
+- `ToolGuard` rechecks session taint when it commits an approved call. A session tainted while the approver was deciding (or while DNS was resolved off the loop) let a side-effecting call through even with `taint.action: deny`; in `approve` mode the call now needs an approval that saw the taint.
+- `GuardedMCPClient(on_finding="raise")` records which tools are blocked before raising, so catching `ToolManifestError` and then calling the changed tool is refused.
+- `run_openai_tool_calls` / `arun_openai_tool_calls` pass tool calls with malformed or non-object JSON arguments through the guard, so they are audited (as the Anthropic adapter already did) before being refused.
+
+### Fixed
+- `ToolGuard.aauthorize` runs a plain (non-`async`) approver in a worker thread. It ran on the event loop, so a blocking approver (a prompt, an HTTP round trip) stalled every task, contrary to `docs/SANDBOX.md`.
+
+### Documentation
+- The README no longer calls the URL checks "SSRF-safe", and `docs/PRODUCTION.md` says tool fetchers must not follow redirects unchecked: the guard checks the requested URL, not where a redirect leads.
 
 ## [0.3.0] - 2026-10-24
 

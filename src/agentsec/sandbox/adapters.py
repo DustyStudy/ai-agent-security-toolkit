@@ -137,20 +137,19 @@ async def arun_anthropic_tool_uses(
 def _openai_call(tc: dict[str, Any]) -> tuple[ToolCall, str | None]:
     """Parse one ``tool_calls`` entry. The second item is a refusal message, or ``None``."""
     fn = tc.get("function", {})
+    raw = fn.get("arguments") or "{}"
+    refusal = None
     try:
-        args = json.loads(fn.get("arguments") or "{}")
+        args: Any = json.loads(raw)
     except json.JSONDecodeError:
-        args = None
-    call = ToolCall(
-        name=fn.get("name", ""),
-        arguments=args if isinstance(args, dict) else {},
-        id=tc.get("id", ""),
-    )
-    if args is None:
-        return call, "Tool call refused: arguments were not valid JSON"
-    if not isinstance(args, dict):
-        return call, "Tool call refused: arguments must be a JSON object"
-    return call, None
+        args = raw
+        refusal = "Tool call refused: arguments were not valid JSON"
+    if refusal is None and not isinstance(args, dict):
+        refusal = "Tool call refused: arguments must be a JSON object"
+    # Keep a malformed value as-is (like the Anthropic path) so the guard, which denies
+    # non-object arguments, records the attempt in the audit log.
+    call = ToolCall(name=fn.get("name", ""), arguments=args, id=tc.get("id", ""))
+    return call, refusal
 
 
 def _openai_message(call: ToolCall, content: str) -> dict[str, Any]:
@@ -167,7 +166,11 @@ def run_openai_tool_calls(
     messages: list[dict[str, Any]] = []
     for tc in tool_calls:
         call, refusal = _openai_call(tc)
-        content = refusal if refusal is not None else _run(guard, session, registry, call)[0]
+        if refusal is not None:
+            guard.authorize(call, session)  # denied; called so the attempt is audited
+            content = refusal
+        else:
+            content = _run(guard, session, registry, call)[0]
         messages.append(_openai_message(call, content))
     return messages
 
@@ -183,6 +186,7 @@ async def arun_openai_tool_calls(
     for tc in tool_calls:
         call, refusal = _openai_call(tc)
         if refusal is not None:
+            await guard.aauthorize(call, session)  # denied; called so the attempt is audited
             content = refusal
         else:
             content = (await _arun(guard, session, registry, call))[0]

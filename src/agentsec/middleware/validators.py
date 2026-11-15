@@ -6,6 +6,7 @@ that markdown rendering opens up for LLM01/LLM02.)
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from collections.abc import Iterable, Sequence
@@ -136,9 +137,63 @@ class ProtectedStringValidator:
         return text
 
 
-_MD_IMAGE = re.compile(r"!\[[^\]]*\]\(\s*<?([^)\s>]+)")
-_HTML_IMG = re.compile(r"<img\b[^>]*?\bsrc\s*=\s*[\"']?([^\"'\s>]+)", re.IGNORECASE)
+# Alt text may hold one level of nested brackets; excluding "[" from the plain-character
+# class keeps every start position O(1) on "![![![...", where "[^\]]*" was quadratic.
+_ALT = r"(?:[^\[\]]|\[[^\[\]]*\])*"
+_MD_IMAGE = re.compile(r"!\[" + _ALT + r"\]\(\s*<?([^)\s>]+)")
+# Reference-style images: ![alt][label], ![label][] and ![label], resolved through a
+# "[label]: url" definition. Labels cannot contain brackets and are capped at 999 characters.
+_MD_REF_IMAGE = re.compile(r"!\[(" + _ALT + r")\](?:\[([^\[\]]{0,999})\])?")
+_MD_REF_DEF = re.compile(r"^[ ]{0,3}\[([^\[\]]{1,999})\]:[ \t]*<?([^\s>]+)", re.MULTILINE)
+# Tags are found quote-aware first, then tokenised into attributes, so a quoted value such
+# as title=' src="..."' is one attribute, not a src. One regex that finds tags and
+# attributes together retries from every "<" and is quadratic on "<img<img<img...".
+_TAG = re.compile(r"""<([a-z][^\s/>"']*)(?:[^>"']|"[^"]*"|'[^']*')*""", re.IGNORECASE)
+_ATTR = re.compile(r"""([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]*)))?""")
+_FETCH_ATTRS = {"src", "srcset", "poster", "background", "data"}
+# Elements whose href is fetched without a click: stylesheets/preloads and SVG resources.
+_FETCH_HREF_TAGS = {"link", "image", "use", "feimage"}
+_CSS_URL = re.compile(r"""url\(\s*["']?([^"')\s]+)""", re.IGNORECASE)
+_CSS_IMPORT = re.compile(r"""@import\s+["']([^"']+)""", re.IGNORECASE)
+_C0_AND_SPACE = "".join(map(chr, range(0x21)))
 _URL = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
+
+
+def _label(text: str) -> str:
+    # CommonMark matches labels case-insensitively with internal whitespace collapsed.
+    return " ".join(text.split()).casefold()
+
+
+def _fetched_urls(text: str) -> list[str]:
+    """URLs a renderer fetches with no click: images, srcset, poster, stylesheets, CSS."""
+    urls = _MD_IMAGE.findall(text)
+    # Every definition of a label counts, not only the first: one inside a code block is not
+    # a definition to a renderer, so the "first" one cannot be picked reliably here.
+    definitions: dict[str, list[str]] = {}
+    for label, url in _MD_REF_DEF.findall(text):
+        definitions.setdefault(_label(label), []).append(url)
+    if definitions:
+        # A set: each referenced label's URLs are added once, however often it is used
+        # (otherwise N references x M definitions of one label is quadratic).
+        used = {_label(label or alt) for alt, label in _MD_REF_IMAGE.findall(text)}
+        for label in used & definitions.keys():
+            urls += dict.fromkeys(definitions[label])
+    for tag in _TAG.finditer(text):
+        tag_name = tag[1].lower()
+        for m in _ATTR.finditer(tag[0], len(tag[1]) + 1):
+            name = m[1].lower()
+            value = m[2] or m[3] or m[4] or ""
+            if not value:
+                continue
+            if name == "srcset":
+                # "a.png 1x, b.png 2x": the URL is the first token of each candidate.
+                urls += [c.split()[0] for c in value.split(",") if c.strip()]
+            elif name in _FETCH_ATTRS or (
+                name in {"href", "xlink:href"} and tag_name in _FETCH_HREF_TAGS
+            ):
+                urls.append(value)
+    urls += _CSS_URL.findall(text) + _CSS_IMPORT.findall(text)
+    return urls
 
 
 def _host_allowed(host: str, allowed: Sequence[str]) -> bool:
@@ -176,7 +231,7 @@ class ExfilLinkValidator:
         self.links_action = links_action or action
 
     def _external_urls(self, text: str) -> tuple[list[str], list[str]]:
-        images = _MD_IMAGE.findall(text) + _HTML_IMG.findall(text)
+        images = _fetched_urls(text)
         image_set = set(images)
         bad_images = [u for u in images if self._is_external(u)]
         bad_links = [u for u in _URL.findall(text) if u not in image_set and self._is_external(u)]
@@ -193,8 +248,12 @@ class ExfilLinkValidator:
         - "//host/x" is a network-path reference fetched from ``host`` with the page's
           scheme;
         - for http(s), any number of slashes after the scheme is accepted, so
-          "https:/evil/" and "https:///evil/" both go to evil.
+          "https:/evil/" and "https:///evil/" both go to evil;
+        - character references are decoded (as in attribute values and markdown
+          destinations) and leading/trailing spaces and controls are stripped, so
+          "https&#58;//evil" and " https://evil" go to evil.
         """
+        url = html.unescape(url).strip(_C0_AND_SPACE)
         url = re.sub(r"[\t\n\r]", "", url).replace("\\", "/")
         if url.startswith("//"):
             url = "https:" + url

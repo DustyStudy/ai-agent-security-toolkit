@@ -274,6 +274,9 @@ class GuardedMCPClient:
         self._on_finding = on_finding
         self._taint = taint_results
         self._blocked: dict[str, str] = {}
+        # Tools whose definition passed the checks in a listing. With pins, only these may be
+        # called: a tool never listed (or listed on a page we did not fetch) was never checked.
+        self._verified: set[str] = set()
         self.findings: list[ToolFinding] = []
 
     # ------------------------------------------------------------------- listing
@@ -293,17 +296,20 @@ class GuardedMCPClient:
         for f in found:
             self.findings.append(f)
             self._audit("mcp_tool_finding", tool=f.tool, kind=f.kind, detail=f.detail)
-        if blocking and self._on_finding == "raise":
-            raise ToolManifestError(blocking)
-
         # Recompute the block list from this listing so a tool that is fixed is usable again.
+        # Done before raising: a caller that catches ToolManifestError must still be unable
+        # to call the tool that changed.
         bad = {f.tool: f"{f.kind}: {f.detail}" for f in blocking}
         for tool in tools:
             name = tool_name(tool)
             if name in bad:
                 self._blocked[name] = bad[name]
+                self._verified.discard(name)
             else:
                 self._blocked.pop(name, None)
+                self._verified.add(name)
+        if blocking and self._on_finding == "raise":
+            raise ToolManifestError(blocking)
         kept = [t for t in tools if tool_name(t) not in bad and self._allowed(tool_name(t))]
         return _with_tools(listing, kept)
 
@@ -333,6 +339,10 @@ class GuardedMCPClient:
         """Call an MCP tool through the guard. Raises :class:`ToolDenied` when refused."""
         if name in self._blocked:
             reason = f"tool definition failed a check ({self._blocked[name]})"
+            self._audit("mcp_tool_blocked", tool=name, reason=reason)
+            raise ToolDenied(Decision(Verdict.DENY, name, (reason,)))
+        if self._pins is not None and name not in self._verified:
+            reason = "tool has not passed a pin check in a listing; call list_tools() first"
             self._audit("mcp_tool_blocked", tool=name, reason=reason)
             raise ToolDenied(Decision(Verdict.DENY, name, (reason,)))
 

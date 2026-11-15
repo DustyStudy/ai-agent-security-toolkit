@@ -305,3 +305,34 @@ def test_result_helpers_read_both_sdk_spellings():
     assert result_text(V2()) == "only" and not result_is_error(V2())
     assert result_text(NoContent()) == "" and not result_is_error(NoContent())
     assert result_text({"content": [{"type": "text", "text": "dict"}, {"type": "image"}]}) == "dict"
+
+
+def test_with_pins_a_tool_that_never_passed_a_listing_cannot_be_called():
+    """call_tool used to refuse only tools a listing had flagged; an unlisted tool went through."""
+    guard, sink = _guard(search=SEARCH)
+    pins = ToolPins()
+    client, fake = _client(Listing([ToolV1("search", "Find")]), guard=guard, pins=pins)
+    with pytest.raises(ToolDenied, match="pin check"):
+        run(client.call_tool("search", {"q": "x"}))  # list_tools() never called
+    assert fake.calls == []
+    assert any(r["event"] == "mcp_tool_blocked" for r in sink.records)
+
+    run(client.list_tools())
+    assert run(client.call_tool("search", {"q": "x"})).content[0].text == "search ok"
+
+
+def test_with_pin_new_false_an_unpinned_tool_stays_uncallable():
+    guard, _ = _guard(search=SEARCH)
+    client, fake = _client(
+        Listing([ToolV1("search", "Find")]), guard=guard, pins=ToolPins(), pin_new=False
+    )
+    run(client.list_tools())  # reported as "new", so not verified
+    with pytest.raises(ToolDenied):
+        run(client.call_tool("search", {"q": "x"}))
+    assert fake.calls == []
+
+
+def test_without_pins_calls_need_no_prior_listing():
+    guard, _ = _guard(search=SEARCH)
+    client, _ = _client(Listing([ToolV1("search", "Find")]), guard=guard)
+    assert run(client.call_tool("search", {"q": "x"})).content[0].text == "search ok"

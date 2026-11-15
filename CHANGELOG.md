@@ -14,6 +14,17 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Audit loggers in one process that write to the same `FileSink` file now share one chain head. Two loggers on one file (say, one per conversation) used to fork the chain, and `verify` then reported tampering. Separate processes must still use separate files.
 - `FileSink` refuses to resume unless the last line is a complete record (newline-terminated, integer `seq`, string `hash` that matches its contents), with an error that says why, instead of crashing on a torn write or chaining onto a bad head. It resolves its path when created, so a later `chdir` does not move the file. `verify_records`/`verify_file` report a non-object JSON line or invalid UTF-8 as tampering instead of raising.
 - Refreshed every hash-pinned lock in `requirements/`. This moves certifi to 2026.10.23 (removes the emSign roots with compromised intermediate keys), GitPython to 3.2.1 (submodule path RCE) and opentelemetry-api to 1.45.1 (unbounded tracestate parsing).
+- `ExfilLinkValidator` treats every URL a renderer fetches without a click as an image: reference-style markdown images (`![a][1]` with `[1]: url`; labels match as in CommonMark, and every definition of a label is checked), `src`, `srcset`, `poster`, `background` and `data` attributes on any tag, `href` on `<link>` and SVG `<image>`/`<use>`, CSS `url()` and `@import`. These were classed as links, so with `links_action=WARN` they were delivered. Tags are tokenised quote-aware, so `src=` text inside another attribute's value is not a fetch; character references and surrounding whitespace in URLs are decoded before the host check (`https&#58;//...`); and extraction runs in linear time, including on unclosed `![` alt text.
+- `GuardedMCPClient` with `pins` refuses to call a tool that has not passed a pin check in a `list_tools()` listing. A tool that was never listed, or sat on a page that was not fetched, used to go straight to the server.
+- `ToolGuard` rechecks session taint when it commits an approved call. A session tainted while the approver was deciding (or while DNS was resolved off the loop) let a side-effecting call through even with `taint.action: deny`; in `approve` mode the call now needs an approval that saw the taint.
+- `GuardedMCPClient(on_finding="raise")` records which tools are blocked before raising, so catching `ToolManifestError` and then calling the changed tool is refused.
+- `run_openai_tool_calls` / `arun_openai_tool_calls` pass tool calls with malformed or non-object JSON arguments through the guard, so they are audited (as the Anthropic adapter already did) before being refused.
+
+### Fixed
+- `ToolGuard.aauthorize` runs a plain (non-`async`) approver in a worker thread. It ran on the event loop, so a blocking approver (a prompt, an HTTP round trip) stalled every task, contrary to `docs/SANDBOX.md`.
+
+### Documentation
+- The README no longer calls the URL checks "SSRF-safe", and `docs/PRODUCTION.md` says tool fetchers must not follow redirects unchecked: the guard checks the requested URL, not where a redirect leads.
 
 ## [0.3.0] - 2026-10-24
 

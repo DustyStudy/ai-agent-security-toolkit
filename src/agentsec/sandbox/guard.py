@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from agentsec.sandbox.policy import Policy
+from agentsec.sandbox.policy import Policy, ToolRule
 from agentsec.sandbox.validators import Resolver, check_arg
 from agentsec.types import ToolCall
 
@@ -46,6 +46,9 @@ class ToolDenied(PermissionError):
     def __init__(self, decision: Decision) -> None:
         super().__init__(f"tool {decision.tool!r} denied: {decision.message()}")
         self.decision = decision
+
+
+_TAINT_PREFIX = "session has ingested untrusted content"
 
 
 @dataclass
@@ -136,18 +139,22 @@ class ToolGuard:
         needs_approval: list[str] = []
         if rule.require_approval:
             needs_approval.append("policy requires human approval")
-        if self.policy.taint.enabled and session.tainted and rule.side_effects:
-            why = (
-                "session has ingested untrusted content ("
-                + ", ".join(session.taint_sources)
-                + ") and this tool has side effects"
-            )
+        why = self._taint_reason(rule, session)
+        if why is not None:
             if self.policy.taint.action == "deny":
                 return Decision(Verdict.DENY, call.name, (why,))
             needs_approval.append(why)
         if needs_approval:
             return Decision(Verdict.APPROVE, call.name, tuple(needs_approval))
         return Decision(Verdict.ALLOW, call.name)
+
+    def _taint_reason(self, rule: ToolRule, session: Session) -> str | None:
+        if self.policy.taint.enabled and session.tainted and rule.side_effects:
+            return (
+                f"{_TAINT_PREFIX} (" + ", ".join(session.taint_sources) + ") and this tool has "
+                "side effects"
+            )
+        return None
 
     # ---------------------------------------------------------- authorization
     def authorize(self, call: ToolCall, session: Session | None = None) -> Decision:
@@ -180,9 +187,14 @@ class ToolGuard:
             if self.approver is None:
                 decision = self._resolve_approval(call, session, decision, None)
             else:
-                answer = self.approver(call, decision)
-                if inspect.isawaitable(answer):
-                    answer = await answer
+                if inspect.iscoroutinefunction(self.approver):
+                    answer = await self.approver(call, decision)
+                else:
+                    # A plain approver usually blocks (a prompt, an HTTP round trip), so run it
+                    # in a worker thread rather than stalling every task on the event loop.
+                    answer = await asyncio.to_thread(self.approver, call, decision)
+                    if inspect.isawaitable(answer):
+                        answer = await answer
                 decision = self._resolve_approval(call, session, decision, bool(answer))
         return self._commit(call, session, decision)
 
@@ -215,6 +227,14 @@ class ToolGuard:
                 # Re-check and count atomically so a limit really is a limit. This section
                 # never awaits, so it is equally atomic for asyncio tasks.
                 over = self._over_limit(call.name, session)
+                # The session may have been tainted after evaluate() (by a call that finished
+                # while the approver waited, or while DNS was resolved off the loop). Taint
+                # only ever grows, so recheck it: deny, unless the approver was asked about it.
+                rule = self.policy.tools[call.name]
+                why = self._taint_reason(rule, session)
+                approved_tainted = any(r.startswith(_TAINT_PREFIX) for r in decision.reasons)
+                if why is not None and (self.policy.taint.action == "deny" or not approved_tainted):
+                    over = f"{why}; the session became tainted before the call was committed"
                 if over is not None:
                     decision = Decision(Verdict.DENY, call.name, (over,))
                 else:

@@ -1,8 +1,8 @@
 name: Release
 
 # Push a tag like v0.1.0 to build the package, generate an SBOM, attest build
-# provenance, and publish a GitHub Release with the artifacts attached.
-# This workflow does not upload to PyPI.
+# provenance, publish a GitHub Release with the artifacts attached, and then upload
+# the wheel and sdist to PyPI with trusted publishing (OIDC, no stored API token).
 on:
   push:
     tags: ["v*.*.*"]
@@ -123,3 +123,56 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag
+
+  pypi:
+    # Trusted publishing: PyPI exchanges this job's OIDC token for a short-lived upload
+    # token, so no PyPI credential is stored in the repository. It runs after `release`,
+    # so a version only reaches PyPI once its provenance attestation has verified, and
+    # the `pypi` environment is where a required reviewer can gate the upload.
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/ai-agent-security-toolkit/
+    permissions:
+      id-token: write # mint the PyPI upload token and sign the PEP 740 attestations
+    steps:
+      - name: Harden Runner
+        # The publish action pulls its container image from ghcr.io inside the step.
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            ghcr.io:443
+            pkg-containers.githubusercontent.com:443
+            pypi.org:443
+            upload.pypi.org:443
+            fulcio.sigstore.dev:443
+            rekor.sigstore.dev:443
+            timestamp.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Keep only the wheel and sdist
+        # The artifact also holds the SBOM, which PyPI would reject as an upload.
+        run: |
+          mkdir pypi-dist
+          mv dist/*.whl dist/*.tar.gz pypi-dist/
+          ls -l pypi-dist
+
+      - name: Publish to PyPI
+        # Known limit: the action runs ghcr.io/pypa/gh-action-pypi-publish:<this commit>, a
+        # tag rather than an image digest, so PyPA could repoint it without this pin
+        # changing. Accepted: the same maintainers control the pinned action code, and a
+        # fork pinned by digest would be more code to keep current than it protects.
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: pypi-dist/

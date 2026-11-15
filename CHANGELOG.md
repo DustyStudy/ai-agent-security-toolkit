@@ -4,7 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-14
+
+Same code as 0.4.0. This is the first release published to PyPI.
+
+### Fixed
+- The `v0.4.0` release run was refused at startup because the repository's allowed-actions list did not include `pypa/gh-action-pypi-publish`, so 0.4.0 has no GitHub Release or PyPI upload. The tag is protected and stays in place.
+
 ## [0.4.0] - 2026-11-14
+
+Tagged but never released; use 0.4.1.
 
 ### Added
 - The release workflow publishes the wheel and sdist to PyPI as `ai-agent-security-toolkit` with trusted publishing (OIDC; no stored API token) and PEP 740 attestations. It runs after the GitHub Release, in a `pypi` environment that can require a reviewer, and uploads only the distributions, not the SBOM.
@@ -102,7 +111,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.1...v0.2.2

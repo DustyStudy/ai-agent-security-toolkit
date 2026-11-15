@@ -688,7 +688,7 @@ def test_wrap_without_a_session_warns_about_the_shared_default():
         "passphrase: hunter2hunter2",
         "Authorization: Token abcdef0123456789abcd",
         "authorization: ApiKey abcdef0123456789abcd",
-        "token glpat-abcdefghij0123456789",
+        "token " + "gl" + "pat-" + "abcdefghij" * 2,
         "npm_" + "a1" * 18,
         "hf_" + "a1B2" * 9,
         "https://acct.blob.core.windows.net/c/b?sv=2022&sig=AbCdEf0123456789%2B%3D",

@@ -49,7 +49,38 @@ class _Rule:
     group: int = 0
 
 
-_PW_KEY = r"(?i)(?<![a-z])(?:password|passwd|pwd)[\"']?\s*[=:]\s*"
+_PW_KEY = r"(?i)(?<![a-z])(?:password|passwd|pwd|pass)[\"']?\s*[=:]\s*"
+# api_key=..., client_secret: ..., "access_token": "...", AccountKey=... (Azure). The key must
+# sit right before the separator, so max_tokens: 1024 or secretary=x do not match.
+_CREDENTIAL_FIELD = (
+    r"(?i)(?<![a-z])(?:api[_-]?key|client[_-]?secret|secret|(?:access|auth|refresh)?[_-]?token"
+    r"|account[_-]?key|shared[_-]?access[_-]?key)[\"']?\s*[=:]\s*"
+)
+
+
+def _assignment_rules(kind: str, key: str) -> tuple[_Rule, ...]:
+    """Unquoted, double-quoted and single-quoted values after ``key``.
+
+    Quoted values may hold spaces and escapes, so they get their own rules.
+    """
+    return (
+        _Rule(
+            kind, "secret", re.compile(key + r"(?![\"'])(?!\[REDACTED:)([^\s\"'&,;]{4,})"), group=1
+        ),
+        _Rule(
+            kind,
+            "secret",
+            re.compile(key + r"\"(?!\[REDACTED:[a-z_]+\]\")((?:[^\"\\\n]|\\.){1,200})\""),
+            group=1,
+        ),
+        _Rule(
+            kind,
+            "secret",
+            re.compile(key + r"'(?!\[REDACTED:[a-z_]+\]')((?:[^'\\\n]|\\.){1,200})'"),
+            group=1,
+        ),
+    )
+
 
 _RULES: tuple[_Rule, ...] = (
     _Rule(
@@ -81,24 +112,15 @@ _RULES: tuple[_Rule, ...] = (
         group=1,
     ),
     # password=..., DB_PASSWORD=..., PWD: ..., "password": "..." (JSON/YAML/env/connection
-    # strings). A lookbehind, not \b: "_" before PASSWORD is a word character. Quoted values
-    # may hold spaces and escapes, so they get their own rules.
+    # strings). A lookbehind, not \b: "_" before PASSWORD is a word character.
+    *_assignment_rules("password_assignment", _PW_KEY),
+    *_assignment_rules("secret_assignment", _CREDENTIAL_FIELD),
+    # Stripe secret/restricted keys use "_", which the OpenAI-style sk- rule does not cover.
+    _Rule("stripe_api_key", "secret", re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}")),
     _Rule(
-        "password_assignment",
+        "basic_auth",
         "secret",
-        re.compile(_PW_KEY + r"(?![\"'])(?!\[REDACTED:)([^\s\"'&,;]{4,})"),
-        group=1,
-    ),
-    _Rule(
-        "password_assignment",
-        "secret",
-        re.compile(_PW_KEY + r"\"(?!\[REDACTED:[a-z_]+\]\")((?:[^\"\\\n]|\\.){1,200})\""),
-        group=1,
-    ),
-    _Rule(
-        "password_assignment",
-        "secret",
-        re.compile(_PW_KEY + r"'(?!\[REDACTED:[a-z_]+\]')((?:[^'\\\n]|\\.){1,200})'"),
+        re.compile(r"(?i)\bauthorization[\"']?\s*[=:]\s*[\"']?basic\s+([A-Za-z0-9+/]{8,}={0,2})"),
         group=1,
     ),
     _Rule("github_token", "secret", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),

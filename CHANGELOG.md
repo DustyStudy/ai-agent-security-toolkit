@@ -7,6 +7,17 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Security
 - URL checks refuse hosts containing `\`, `%` or any character outside `[a-z0-9._-]` (IP literals excepted). `urlsplit` kept them in the host while WHATWG fetchers read `\` as `/` and percent-decode the host, so `http://169.254.169.254\y.allowed.com/` passed a `*.allowed.com` allowlist and `http://%31%32%37.0.0.1/` passed `block_private`.
 - `SafeCommandRunner` gives the command `stdin=DEVNULL` instead of the host's stdin (under an MCP stdio server, the JSON-RPC channel), and runs it in its own process group. Timeout, output overflow and normal exit now kill the processes it started, not just the direct child, so a background grandchild can no longer hold the pipes open past the timeout. On Windows the tree is killed with `taskkill /T`, which misses grandchildren orphaned after their parent exited; on POSIX a descendant that calls `setsid()` leaves the group and escapes. It is still not an OS sandbox.
+- Redaction (audit log, `SecretLeakValidator`, `OutputGuard.default()`) covers generic `api_key` / `secret` / `client_secret` / `*_token` / `AccountKey` / `pass` assignments, Stripe `sk_live_` / `rk_live_` keys and `Authorization: Basic` headers. A key name that merely contains one of these words (`max_tokens`, `secretary`) is left alone; prose like `the secret: x` is redacted.
+- The audit log redacts dict keys as well as values.
+- `deny_args` matches other spellings of a denied option: `--output` also denies `--output=x` and GNU abbreviations such as `--outp`, and a short option `-c` denies an attached `-cvalue`.
+
+### Fixed
+- `resolve_dns: true` with a hostname label over 63 characters raised `UnicodeError` out of `evaluate()`, crashing the LangChain and MCP wrappers. It is now a denial.
+- A `tool_use` block with no name, or an OpenAI tool call with a non-string name, non-string arguments or a non-object `function`, raised and crashed the agent loop. Each is now refused and audited.
+
+### Changed
+- The release and CI builds run `python -m build --no-isolation` with `setuptools` and `wheel` installed from the hash-pinned release-tools lock, so the build backend is no longer fetched unpinned at release time.
+- `project.license` is the SPDX string `"MIT"` (the table form stops building on 2027-02-18), and Python 3.13 is listed in the classifiers.
 - `scan_tool_definitions` reports an `oversized` finding (so the tool is blocked and never pinned) when a definition's text exceeds the scanned limit, instead of scanning only the prefix that padding could push an injection past.
 - `InjectionScanner` strips every Unicode format (`Cf`) character plus invisible combining marks, Hangul fillers and variation selectors before matching. Characters such as U+2062 or U+180E inside a word previously hid it from every signal.
 

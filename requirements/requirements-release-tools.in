@@ -1,3 +1,6 @@
 build
 twine
 cyclonedx-bom
+# Build backend, installed with hashes so `build --no-isolation` does not fetch it unpinned.
+setuptools
+wheel

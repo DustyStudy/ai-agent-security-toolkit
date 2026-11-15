@@ -47,7 +47,7 @@ A prompt-injection filter will be bypassed; that is a property of the problem, n
 | `builtin:guarded-noscanner` (policy + output guard only) | **60%** | 0% | 0% | 0% | 100% |
 | `builtin:guarded` (+ heuristic scanner) | **34%** | 0% | 0% | 0% | 57% |
 
-Read it this way: tool policy and output validation reduce the *dangerous* outcomes (side effects, exfiltration, secret leaks) to zero **even when the model is fully compromised**. Merely getting the model to say something (canary echo) cannot be stopped by those layers, and the pattern-matching scanner only catches part of it. Base64, ROT13, homoglyphs, leetspeak and non-English variants slip past it, while zero-width and Unicode-tag smuggling are caught. [Full sample report](docs/sample-fuzz-report.md).
+Read it this way: tool policy and output validation reduce the *dangerous* outcomes (side effects, exfiltration, secret leaks) to zero **even when the model is fully compromised**, on this corpus. That is a measurement of these 500 cases, not a guarantee: a bypass of a policy check or a secret format the redactor does not know would get through. Merely getting the model to say something (canary echo) cannot be stopped by those layers, and the pattern-matching scanner only catches part of it. Base64, ROT13, homoglyphs, leetspeak and non-English variants slip past it, while zero-width and Unicode-tag smuggling are caught. [Full sample report](docs/sample-fuzz-report.md).
 
 **Against a real model:** the same matrix run against Llama 3.1 8B on a local GPU took the attack-success rate from 34.9% for the model alone to 0.2% behind the full stack, with no forbidden tool call, leak or exfiltration getting through. Method, scope and every number are in [docs/PROOF.md](docs/PROOF.md).
 

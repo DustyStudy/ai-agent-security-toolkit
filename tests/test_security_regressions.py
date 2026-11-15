@@ -36,6 +36,7 @@ from agentsec.middleware import (
     verify_records,
 )
 from agentsec.sandbox import (
+    CommandDenied,
     ExecRule,
     Policy,
     SafeCommandRunner,
@@ -1045,3 +1046,88 @@ def test_mcp_oversized_check_uses_a_smaller_scanner_limit():
     }
     found = scan_tool_definitions([tool], InjectionScanner(max_scan_chars=100))
     assert any(f.kind == "oversized" for f in found)
+
+
+# ------------------------------------------------- second review: lower-severity gaps
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ("api_key=" + _secret_body(20), _secret_body(20)),
+        ("secret=" + "hunter2" + "hunter2", "hunter2" + "hunter2"),
+        ('{"client_secret": "' + "Zx8Q~" + _secret_body(16) + '"}', "Zx8Q~" + _secret_body(16)),
+        ('{"access_token": "' + _secret_body(24) + '"}', _secret_body(24)),
+        ("key " + "sk_" + "live_" + "51Habcdefghijklmnop", "sk_" + "live_" + "51Habcdefghijklmnop"),
+        ("Authorization: Basic " + "dXNlcjpo" + "dW50ZXIy", "dXNlcjpo" + "dW50ZXIy"),
+        (
+            "AccountName=x;AccountKey=" + "abcdEFGH1234" + "abcd==;Suffix=y",
+            "abcdEFGH1234" + "abcd==",
+        ),
+        ("pass=" + "hunter2" + "xyz", "hunter2" + "xyz"),
+    ],
+)
+def test_redaction_covers_generic_secret_assignments(text, secret):
+    redacted, findings = redact_text(text)
+    assert findings
+    assert secret not in redacted
+
+
+@pytest.mark.parametrize(
+    "text", ["max_tokens: 1024", "secretary=Bob", "Basic authentication is weak", "bypass=1234"]
+)
+def test_generic_secret_rules_leave_look_alike_keys_alone(text):
+    assert redact_text(text)[0] == text
+
+
+def test_overlong_dns_label_is_a_denial_not_a_crash():
+    """getaddrinfo raises UnicodeError, not OSError, for a label over 63 characters."""
+
+    def idna_resolver(host):
+        return [a[4][0] for a in __import__("socket").getaddrinfo(host, None)]
+
+    rule = ArgRule(type="url", resolve_dns=True)
+    errors = check_url("https://" + "a" * 64 + ".com/", rule, resolver=idna_resolver)
+    assert any("did not resolve" in e for e in errors)
+
+
+@pytest.mark.parametrize("arg", ["--output", "--output=/tmp/x", "--outp", "-cprint(1)", "-c"])
+def test_deny_args_catches_other_spellings_of_a_denied_option(tmp_path, arg):
+    runner = SafeCommandRunner(
+        {"py": ExecRule(executable=sys.executable, deny_args=["--output", "-c"])},
+        cwd_roots=[str(tmp_path)],
+    )
+    with pytest.raises(CommandDenied):
+        runner.run("py", [arg])
+
+
+def test_deny_args_does_not_catch_unrelated_options(tmp_path):
+    runner = SafeCommandRunner(
+        {"py": ExecRule(executable=sys.executable, deny_args=["--output", "-c"])},
+        cwd_roots=[str(tmp_path)],
+        timeout=10,
+    )
+    assert runner.run("py", ["--version"]).returncode == 0
+
+
+def test_audit_log_redacts_secrets_used_as_dict_keys():
+    sink = MemorySink()
+    key = "sk-" + "ant-" + _secret_body(40)
+    AuditLogger(sink).log("tool_request", arguments={key: 1})
+    assert key not in json.dumps(sink.records)
+
+
+def test_tool_calls_with_missing_or_non_string_names_are_refused_not_a_crash():
+    from agentsec.sandbox import run_openai_tool_calls
+
+    guard = ToolGuard(Policy.from_dict({"tools": {"search": {}}}))
+    registry = {"search": lambda **_: "ok"}
+    blocks = [{"type": "tool_use", "id": "1", "input": {}}]
+    assert run_anthropic_tool_uses(guard, Session(), blocks, registry)[0]["is_error"]
+    calls = [
+        {"id": "1", "function": {"name": ["search"], "arguments": "{}"}},
+        {"id": "2", "function": {"name": "search", "arguments": {"q": 1}}},
+        {"id": "3", "function": "search"},
+    ]
+    out = run_openai_tool_calls(guard, Session(), calls, registry)
+    assert all("refused" in m["content"] for m in out)

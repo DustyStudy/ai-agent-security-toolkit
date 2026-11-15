@@ -160,7 +160,7 @@ def check_url(value: str, rule: ArgRule, resolver: Resolver | None = None) -> li
         elif rule.resolve_dns:
             try:
                 addrs = (resolver or _default_resolver)(ascii_host)
-            except OSError:
+            except (OSError, UnicodeError):  # a label over 63 chars raises UnicodeError
                 errors.append(f"host {host!r} did not resolve")
                 addrs = []
             for addr in addrs:

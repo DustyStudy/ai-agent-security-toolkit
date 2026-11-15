@@ -294,12 +294,17 @@ class AuditLogger:
         if isinstance(value, str):
             return self._clean_str(value)
         if isinstance(value, dict):
-            return {str(k): self._clean(v) for k, v in value.items()}
+            # Keys are redacted too: an agent can put a secret in a key as easily as a value.
+            return {self._clean_key(k): self._clean(v) for k, v in value.items()}
         if isinstance(value, list | tuple | set | frozenset):
             return [self._clean(v) for v in value]
         if isinstance(value, int | float | bool) or value is None:
             return value
         return self._clean_str(repr(value))
+
+    def _clean_key(self, key: Any) -> str:
+        text = str(key)
+        return redact_text(text)[0] if self._redact else text
 
     def _clean_str(self, text: str) -> Any:
         if self._redact:

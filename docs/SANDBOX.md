@@ -62,7 +62,8 @@ pins.save("mcp-pins.json")
 - `call_tool` goes through `ToolGuard.aexecute`, and the session is tainted afterward because MCP results are third-party content (`taint_results=False` to opt out). A call the guard refuses never reaches the server and does not taint.
 - Pins are trust-on-first-use by default (`pin_new=False` treats unpinned tools as findings). Save them where the agent cannot write, and review a tool before pinning it. A tool that fails the scan is never pinned.
 - Attributes other than `list_tools` and `call_tool` are deliberately **not** forwarded, so the wrapper cannot be used to reach an unguarded call.
-- To guard tools you *serve*, wrap them: `server.tool()(guard.awrap("lookup", lookup))` (the signature is preserved for the schema).
+- A tool can only be called after it passed the checks in a `list_tools()` listing, with or without pins: otherwise its definition was never scanned.
+- To guard tools you *serve*, wrap them: `server.tool()(guard.awrap("lookup", lookup, session))` (the signature is preserved for the schema). Without a session the wrapper uses the guard's process-wide `default_session` and warns: every client then shares one taint flag and one set of call counts.
 
 The adapter imports nothing from `mcp`. It uses only `list_tools()` and `call_tool()` and reads both the 1.x (`inputSchema`, `isError`) and 2.x (`input_schema`, `is_error`) spellings. It is tested against fakes of both shapes and, in CI, against the real SDK 2.x over its in-memory transport (`pip install "ai-agent-security-toolkit[mcp]"`). It has not been run against a remote MCP server. The scan is a heuristic tripwire, so pinning and human review of tool descriptions still matter.
 
@@ -81,4 +82,14 @@ runner.run("git", ["diff", "--stat", "--", agent_supplied_ref])   # ref is posit
 runner.run("git", ["diff", "--output=/tmp/x"])                     # CommandDenied
 ```
 
-Every argument that starts with `-` must then be a listed flag, exactly or as `--flag=value`. Short options with an attached value (`-ofile`) and look-alikes (`--stats`) are refused. List `--` to let a caller end option parsing; arguments after it are not checked as options, so put `--` in your own argv before untrusted values. Leaving `allowed_options` unset keeps the old behavior (options unchecked). The check knows the POSIX `-` convention only; Windows programs that take `/flag` options need an `arg_pattern` or `deny_args` instead.
+Every argument that starts with `-` must then be a listed flag, exactly or as `--flag=value`. Short options with an attached value (`-ofile`) and look-alikes (`--stats`) are refused. List `--` to let a caller end option parsing; arguments after it are not checked as options, so put `--` in your own argv before untrusted values. Leaving `allowed_options` unset keeps the old behavior (options unchecked). The check knows the POSIX `-` convention only; Windows programs that take `/flag` options need an `arg_pattern` or `deny_args` instead. `deny_args` is only a backstop: it also catches a denied short flag inside a cluster (`-Ic` for `-c`), but a list of what is forbidden cannot anticipate every spelling a program accepts.
+
+The child gets an empty environment unless you pass `env`. Tools that need a few host variables (git on Windows needs `PATH` and `SystemRoot`) can name them: `SafeCommandRunner(..., inherit_env=["PATH", "SystemRoot"])`. Nothing is inherited by default, so secrets in the agent's environment never reach the command.
+
+## Path arguments
+
+A `path` argument is resolved (symlinks and `..` included) and must sit under one of its `roots`. `execute`, `aexecute` and everything built on them pass the tool that resolved path, re-checked just before the call, not the raw string. A symlink retargeted after authorization therefore cannot redirect the tool.
+
+A race remains: someone who can write inside a root can still replace a directory on the resolved path with a symlink between that last check and the tool's `open()`. Closing it needs `openat`-style, no-follow opens in the tool itself. If the agent shares a writable directory with an attacker, keep that directory out of the roots or isolate the tool at the OS level.
+
+`deny_patterns` on a path match case-insensitively, because Windows and macOS file systems ignore case.

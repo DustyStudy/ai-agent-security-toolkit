@@ -36,7 +36,8 @@ class ExecRule:
     allowed_subcommands: list[str] | None = None  # first argument must be one of these
     arg_pattern: str | None = None  # every argument must fully match this regex
     # Forbidden arguments. An option also matches its other spellings: "--output" denies
-    # "--output=x" and GNU abbreviations like "--outp"; "-c" denies an attached "-cvalue".
+    # "--output=x" and GNU abbreviations like "--outp"; "-c" denies an attached "-cvalue"
+    # and a cluster such as "-Ic". This is a backstop; allowed_options is the real control.
     deny_args: list[str] = field(default_factory=list)
     max_args: int = 16
     # Option allowlist. None leaves options unchecked (the pre-0.3 behaviour). A list
@@ -78,7 +79,14 @@ def _denied_spelling(arg: str, denied: str) -> bool:
         # getopt_long accepts any unambiguous prefix, so "--outp" means "--output".
         return len(name) > 2 and denied.startswith(name)
     if len(denied) == 2 and denied[0] == "-" and denied[1] != "-":
-        return arg.startswith(denied) and not arg.startswith("--")  # "-cprint(1)"
+        if not arg.startswith("-") or arg.startswith("--"):
+            return False
+        if arg.startswith(denied):  # "-cprint(1)"
+            return True
+        # getopt clusters short flags ("-Ic" is "-I -c") and any character can be an option
+        # letter ("-?c"). Searching the whole argument over-matches when an earlier flag takes
+        # an attached value ("-ofile.c" for a denied "-c"); that fails closed.
+        return denied[1] in arg[1:]
     return False
 
 
@@ -135,7 +143,12 @@ class SafeCommandRunner:
         timeout: float = 10.0,
         max_output_bytes: int = 64_000,
         env: Mapping[str, str] | None = None,
+        inherit_env: Sequence[str] = (),
     ) -> None:
+        """``env`` is the child's whole environment (empty by default). ``inherit_env`` names
+        variables to copy from this process, e.g. ``("PATH", "SystemRoot")`` for tools such as
+        git on Windows that fail without them. Names are explicit: nothing is inherited by
+        default, so secrets in this process's environment never reach the command."""
         if not cwd_roots:
             raise ValueError("cwd_roots must not be empty")
         self._resolved: dict[str, tuple[str, ExecRule]] = {}
@@ -165,7 +178,10 @@ class SafeCommandRunner:
         self.cwd_roots = list(cwd_roots)
         self.timeout = timeout
         self.max_output_bytes = max_output_bytes
-        self._env = dict(env or {})
+        if isinstance(inherit_env, str):
+            raise TypeError("inherit_env must be a sequence of names, not a string")
+        self._env = {k: os.environ[k] for k in inherit_env if k in os.environ}
+        self._env.update(env or {})
 
     def _run_bounded(self, argv: list[str], workdir: str) -> tuple[bytes, bytes, int, bool, bool]:
         """Run ``argv`` and read its output incrementally, stopping the process at the cap.

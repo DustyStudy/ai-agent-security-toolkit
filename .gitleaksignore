@@ -1,0 +1,2 @@
+# Fake GitLab token in a redaction test, since split as "gl" + "pat-" like the other fixtures.
+b2e2ebb925a160b3868f9dc93da1c15d22841878:tests/test_security_regressions.py:gitlab-pat:691

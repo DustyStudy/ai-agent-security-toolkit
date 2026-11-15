@@ -284,8 +284,8 @@ class GuardedMCPClient:
         self._on_finding = on_finding
         self._taint = taint_results
         self._blocked: dict[str, str] = {}
-        # Tools whose definition passed the checks in a listing. With pins, only these may be
-        # called: a tool never listed (or listed on a page we did not fetch) was never checked.
+        # Tools whose definition passed the checks in a listing. Only these may be called: a
+        # tool never listed (or listed on a page we did not fetch) was never checked.
         self._verified: set[str] = set()
         self.findings: list[ToolFinding] = []
 
@@ -351,10 +351,16 @@ class GuardedMCPClient:
             reason = f"tool definition failed a check ({self._blocked[name]})"
             self._audit("mcp_tool_blocked", tool=name, reason=reason)
             raise ToolDenied(Decision(Verdict.DENY, name, (reason,)))
-        if self._pins is not None and name not in self._verified:
-            reason = "tool has not passed a pin check in a listing; call list_tools() first"
+        if name not in self._verified:
+            # Without this, a tool never listed (or on a page not fetched) runs with a
+            # definition that was never scanned or pinned.
+            reason = "tool has not passed the checks in a listing; call list_tools() first"
             self._audit("mcp_tool_blocked", tool=name, reason=reason)
             raise ToolDenied(Decision(Verdict.DENY, name, (reason,)))
+        if kwargs:
+            # Options such as meta also reach the server. Record which were sent, not their
+            # values: redaction cannot see a {"password": ...} pair as one assignment.
+            self._audit("mcp_call_options", tool=name, options=sorted(kwargs))
 
         reached_server = False
 

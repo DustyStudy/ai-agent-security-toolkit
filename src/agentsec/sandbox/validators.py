@@ -13,7 +13,7 @@ from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
-from agentsec.sandbox.policy import ArgRule
+from agentsec.sandbox.policy import ArgRule, dns_check_enabled
 
 Resolver = Callable[[str], list[str]]
 
@@ -157,7 +157,7 @@ def check_url(value: str, rule: ArgRule, resolver: Resolver | None = None) -> li
             # RFC 6761: resolvers send these to loopback without asking DNS, so they are
             # loopback even when resolve_dns is off.
             errors.append(f"host {host!r} is a loopback name")
-        elif rule.resolve_dns:
+        elif dns_check_enabled(rule):
             try:
                 addrs = (resolver or _default_resolver)(ascii_host)
             except (OSError, UnicodeError):  # a label over 63 chars raises UnicodeError
@@ -202,8 +202,11 @@ def check_arg(value: Any, rule: ArgRule, *, resolver: Resolver | None = None) ->
             errors.append(f"longer than {rule.max_length} characters")
         if rule.pattern is not None and not re.fullmatch(rule.pattern, value):
             errors.append("does not match required pattern")
+        # Windows and macOS file systems ignore case, so "\.env$" must also stop ".ENV". On
+        # Linux this over-blocks a ".ENV" file, which fails closed.
+        flags = re.IGNORECASE if t == "path" else 0
         for pat in rule.deny_patterns:
-            if re.search(pat, value):
+            if re.search(pat, value, flags):
                 errors.append(f"matches denied pattern {pat!r}")
         if t == "path":
             ok, resolved = path_within_roots(value, rule.roots)
@@ -212,7 +215,7 @@ def check_arg(value: Any, rule: ArgRule, *, resolver: Resolver | None = None) ->
             else:
                 normalized = PurePosixPath(resolved.replace("\\", "/")).as_posix()
                 for pat in rule.deny_patterns:
-                    if re.search(pat, normalized):
+                    if re.search(pat, normalized, flags):
                         errors.append(f"resolved path matches denied pattern {pat!r}")
         elif t == "url":
             errors.extend(check_url(value, rule, resolver))

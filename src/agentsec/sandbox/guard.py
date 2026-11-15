@@ -8,14 +8,15 @@ import functools
 import inspect
 import threading
 import uuid
+import warnings
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from agentsec.sandbox.policy import Policy, ToolRule
-from agentsec.sandbox.validators import Resolver, check_arg
+from agentsec.sandbox.policy import Policy, ToolRule, dns_check_enabled
+from agentsec.sandbox.validators import Resolver, check_arg, path_within_roots
 from agentsec.types import ToolCall
 
 if TYPE_CHECKING:
@@ -97,7 +98,9 @@ class ToolGuard:
         # A DNS-resolving URL rule (or a custom resolver) does blocking I/O inside evaluate(),
         # so the async API runs evaluation in a worker thread instead of on the event loop.
         self._blocking_eval = resolver is not None or any(
-            arg.resolve_dns for rule in policy.tools.values() for arg in rule.args.values()
+            arg.type == "url" and dns_check_enabled(arg)
+            for rule in policy.tools.values()
+            for arg in rule.args.values()
         )
         self._lock = threading.Lock()
         self.default_session = Session()
@@ -259,6 +262,7 @@ class ToolGuard:
         if not decision.allowed:
             raise ToolDenied(decision)
         rule = self.policy.tools[call.name]
+        call = self._pin_paths(call, rule, session)
         try:
             result = fn(**call.arguments)
             if inspect.isawaitable(result):
@@ -289,6 +293,7 @@ class ToolGuard:
         if not decision.allowed:
             raise ToolDenied(decision)
         rule = self.policy.tools[call.name]
+        call = self._pin_paths(call, rule, session)
         try:
             if _is_coroutine_callable(fn):
                 result = await fn(**call.arguments)
@@ -304,6 +309,38 @@ class ToolGuard:
         self._audit("tool_result", session, tool=call.name, result=result)
         return result
 
+    def _pin_paths(self, call: ToolCall, rule: ToolRule, session: Session) -> ToolCall:
+        """Hand the tool the symlink-free path the guard checked, re-checked just before the call.
+
+        The tool would otherwise resolve the raw string again later, so a symlink retargeted
+        after authorization (say, while an approver waited) could escape the roots or reach a
+        denied file. A race on the components of the resolved path itself remains; see
+        docs/SANDBOX.md. The call stays counted against its limits when this refuses it.
+        """
+        args = dict(call.arguments)
+        for name, arg_rule in rule.args.items():
+            value = args.get(name)
+            if arg_rule.type != "path" or not isinstance(value, str):
+                continue
+            errors = check_arg(value, arg_rule, resolver=self._resolver)
+            ok, resolved = path_within_roots(value, arg_rule.roots)
+            if errors or not ok:
+                reasons = tuple(
+                    f"argument {name!r} changed after authorization: {e}"
+                    for e in (errors or ["path escapes allowed roots"])
+                )
+                decision = Decision(Verdict.DENY, call.name, reasons)
+                self._audit(
+                    "tool_decision",
+                    session,
+                    tool=call.name,
+                    verdict=decision.verdict.value,
+                    reasons=list(reasons),
+                )
+                raise ToolDenied(decision)
+            args[name] = resolved
+        return ToolCall(name=call.name, arguments=args, id=call.id)
+
     @staticmethod
     def _snapshot(call: ToolCall) -> ToolCall:
         # Judge and run the SAME snapshot: the caller (or another thread/task) still holds the
@@ -314,6 +351,7 @@ class ToolGuard:
         self, name: str, fn: Callable[..., Any], session: Session | None = None
     ) -> Callable[..., Any]:
         """Return ``fn`` guarded as tool ``name``. Keyword arguments only."""
+        _warn_if_shared(session)
 
         @functools.wraps(fn)
         def guarded(**kwargs: Any) -> Any:
@@ -325,6 +363,7 @@ class ToolGuard:
         self, name: str, fn: Callable[..., Any], session: Session | None = None
     ) -> Callable[..., Awaitable[Any]]:
         """Return ``fn`` guarded as tool ``name`` for use from async code. Keyword arguments only."""
+        _warn_if_shared(session)
 
         @functools.wraps(fn)
         async def guarded(**kwargs: Any) -> Any:
@@ -344,6 +383,18 @@ class ToolGuard:
     def _audit(self, event: str, session: Session, **data: Any) -> None:
         if self.audit is not None:
             self.audit.log(event, tool_session=session.id, **data)
+
+
+def _warn_if_shared(session: Session | None) -> None:
+    if session is None:
+        # A wrapped tool usually outlives one request; without a session every caller shares
+        # default_session, so one user's taint and call counts apply to all of them.
+        warnings.warn(
+            "wrapping a tool without a Session binds it to the guard's process-wide "
+            "default_session; pass a Session per conversation in multi-user applications",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 def _is_coroutine_callable(fn: Callable[..., Any]) -> bool:

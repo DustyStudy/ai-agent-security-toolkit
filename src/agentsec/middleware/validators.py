@@ -6,6 +6,7 @@ that markdown rendering opens up for LLM01/LLM02.)
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from collections.abc import Iterable, Sequence
@@ -241,21 +242,53 @@ def _scheme(word: str) -> re.Pattern[str]:
     return re.compile(gap.join(word) + gap + ":", re.IGNORECASE)
 
 
+class _InTagEventHandler:
+    """Any on* attribute inside a tag, with the ``search``/``sub`` shape of a pattern.
+
+    A deny-list of handler names always misses some (onbegin, onpageshow, ...), and
+    requiring a tag keeps prose and code like "one = 1" from matching. Tags are found
+    quote-aware, as browsers do (``<img title=">" onerror=...>`` is one tag), and quoted
+    attribute values are masked so ``title="online=true"`` is not a handler. One regex
+    doing all of it retries from every "<" and is quadratic; finding tags first
+    (non-overlapping) and then attributes inside each keeps it linear.
+    """
+
+    _TAG = re.compile(r"""<[a-z](?:[^>"']|"[^"]*"|'[^']*')*""", re.IGNORECASE)
+    _QUOTED = re.compile(r""""[^"]*"|'[^']*'""")
+    # Attributes follow whitespace, "/" or a closing quote. {1,30} bounds the backtracking.
+    _ATTR = re.compile(r"(?<=[\s/\"'])on[a-z]{1,30}\s*=", re.IGNORECASE)
+
+    @classmethod
+    def _spans(cls, tag: str) -> list[tuple[int, int]]:
+        # Same-length mask keeps match positions valid in the original tag.
+        masked = cls._QUOTED.sub(lambda m: m[0][0] + "_" * (len(m[0]) - 2) + m[0][-1], tag)
+        return [m.span() for m in cls._ATTR.finditer(masked)]
+
+    def search(self, text: str) -> bool:
+        return any(self._spans(m[0]) for m in self._TAG.finditer(text))
+
+    def sub(self, repl: str, text: str) -> str:
+        def clean(m: re.Match[str]) -> str:
+            tag = m[0]
+            for start, end in reversed(self._spans(tag)):
+                tag = tag[:start] + repl + tag[end:]
+            return tag
+
+        return self._TAG.sub(clean, text)
+
+
+# (pattern, label, also check after decoding character references)
 _DANGEROUS = (
-    (re.compile(r"<\s*script\b", re.IGNORECASE), "script tag"),
-    (_scheme("javascript"), "javascript: URL"),
-    (_scheme("vbscript"), "vbscript: URL"),
-    (
-        re.compile(
-            r"\bon(?:error|load|click|mouseover|mouseenter|focus|focusin|toggle|"
-            r"animationstart|pointerover)\s*=",
-            re.IGNORECASE,
-        ),
-        "inline event handler",
-    ),
-    (re.compile(r"data\s*:\s*text/html", re.IGNORECASE), "data:text/html URL"),
-    (re.compile(r"<\s*(?:iframe|object|embed)\b", re.IGNORECASE), "embedded frame/object"),
+    (re.compile(r"<\s*script\b", re.IGNORECASE), "script tag", False),
+    (_scheme("javascript"), "javascript: URL", True),
+    (_scheme("vbscript"), "vbscript: URL", True),
+    (_InTagEventHandler(), "inline event handler", False),
+    (re.compile(r"data\s*:\s*text/html", re.IGNORECASE), "data:text/html URL", True),
+    (re.compile(r"<\s*(?:iframe|object|embed)\b", re.IGNORECASE), "embedded frame/object", False),
 )
+
+# "&" that starts a character reference (named, decimal or hex, ";" optional).
+_CHAR_REF = re.compile(r"&(?=#?[A-Za-z0-9])")
 
 
 class DangerousContentValidator:
@@ -266,16 +299,26 @@ class DangerousContentValidator:
     def __init__(self, action: Action = Action.BLOCK) -> None:
         self.action = action
 
+    # Browsers (and CommonMark link destinations) decode character references in URLs,
+    # so href="&#106;avascript:..." runs script: URL schemes are also checked decoded.
+    # Tags are not: "&lt;script&gt;" is displayed as text, never parsed as a tag.
     def check(self, text: str) -> list[Violation]:
+        decoded = html.unescape(text)
         return [
             Violation(self.name, f"{label} in output", self.action)
-            for pattern, label in _DANGEROUS
-            if pattern.search(text)
+            for pattern, label, check_decoded in _DANGEROUS
+            if pattern.search(text) or (check_decoded and pattern.search(decoded))
         ]
 
     def sanitize(self, text: str) -> str:
-        for pattern, _ in _DANGEROUS:
+        for pattern, _, _ in _DANGEROUS:
             text = pattern.sub("[removed]", text)
+        decoded = html.unescape(text)
+        if any(check and pattern.search(decoded) for pattern, _, check in _DANGEROUS):
+            # A scheme hidden in character references: escape every reference's "&" so a
+            # renderer shows it literally instead of decoding it. Never return decoded text:
+            # "&amp;#106;" would become "&#106;", which decodes to script on the next pass.
+            text = _CHAR_REF.sub("&amp;", text)
         return text
 
 

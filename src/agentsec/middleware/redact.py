@@ -49,6 +49,8 @@ class _Rule:
     group: int = 0
 
 
+_PW_KEY = r"(?i)(?<![a-z])(?:password|passwd|pwd)[\"']?\s*[=:]\s*"
+
 _RULES: tuple[_Rule, ...] = (
     _Rule(
         "aws_access_key_id",
@@ -58,14 +60,57 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(
         "aws_secret_access_key",
         "secret",
-        re.compile(r"(?i)aws.{0,30}?(?:secret|sk).{0,20}?[\"'=:\s]+([A-Za-z0-9/+=]{40})\b"),
+        # Also keyed on the STS/boto field names, which have no "aws" before them. The end
+        # is a lookahead, not \b: a key ending in "/" or "+" has no word boundary after it.
+        re.compile(
+            r"(?i)(?:aws.{0,30}?(?:secret|sk)|secret_?access_?key).{0,20}?[\"'=:\s]+"
+            r"([A-Za-z0-9/+=]{40})(?![A-Za-z0-9/+=])"
+        ),
+        group=1,
+    ),
+    _Rule(
+        "url_credentials",
+        "secret",
+        # postgres://user:PASSWORD@host and redis://:PASSWORD@host - redact the password,
+        # keep the rest for context. The scheme is bounded: unbounded, "a.a.a.a..." retries
+        # from every "." (quadratic). Skipping our own placeholder keeps redaction idempotent,
+        # so OutputGuard's recheck does not mistake a redacted value for a leftover secret.
+        re.compile(
+            r"\b[a-z][a-z0-9+.-]{0,31}://[^\s:/@]*:(?!\[REDACTED:)([^\s/@]+)@", re.IGNORECASE
+        ),
+        group=1,
+    ),
+    # password=..., DB_PASSWORD=..., PWD: ..., "password": "..." (JSON/YAML/env/connection
+    # strings). A lookbehind, not \b: "_" before PASSWORD is a word character. Quoted values
+    # may hold spaces and escapes, so they get their own rules.
+    _Rule(
+        "password_assignment",
+        "secret",
+        re.compile(_PW_KEY + r"(?![\"'])(?!\[REDACTED:)([^\s\"'&,;]{4,})"),
+        group=1,
+    ),
+    _Rule(
+        "password_assignment",
+        "secret",
+        re.compile(_PW_KEY + r"\"(?!\[REDACTED:[a-z_]+\]\")((?:[^\"\\\n]|\\.){1,200})\""),
+        group=1,
+    ),
+    _Rule(
+        "password_assignment",
+        "secret",
+        re.compile(_PW_KEY + r"'(?!\[REDACTED:[a-z_]+\]')((?:[^'\\\n]|\\.){1,200})'"),
         group=1,
     ),
     _Rule("github_token", "secret", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
     _Rule("github_fine_grained_pat", "secret", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}\b")),
     _Rule("slack_token", "secret", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
     _Rule("anthropic_api_key", "secret", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")),
-    _Rule("openai_style_api_key", "secret", re.compile(r"\bsk-[A-Za-z0-9]{32,}\b")),
+    # Current OpenAI keys are sk-proj-/sk-svcacct-/sk-admin- with "-" and "_" in the body.
+    _Rule(
+        "openai_style_api_key",
+        "secret",
+        re.compile(r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}"),
+    ),
     _Rule("google_api_key", "secret", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
     _Rule(
         "private_key_block",

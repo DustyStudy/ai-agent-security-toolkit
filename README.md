@@ -124,7 +124,7 @@ What the guard enforces:
 - **Default deny.** Tools and arguments not in the policy are refused; extra arguments are refused.
 - **Argument constraints.** Type, enum, regex (`pattern`, `deny_patterns`), length, numeric bounds.
 - **Paths** are resolved (symlinks and `..` included) and must sit under an allowed root.
-- **URLs** must match scheme and host allowlists, reject embedded credentials, and reject private, loopback and link-local targets including `169.254.169.254` and decimal/hex/octal/IPv4-mapped IP forms. `resolve_dns: true` also rejects hostnames that resolve to private ranges. (This narrows DNS-rebinding exposure but does not eliminate it; pin the resolved address at connect time for a full fix.)
+- **URLs** must match scheme and host allowlists, reject embedded credentials, and reject every non-global address (private, loopback, link-local, carrier-grade NAT) including the `169.254.169.254` and `100.100.100.200` metadata services and decimal/hex/octal/IPv4-mapped IP forms, plus `localhost` and `*.localhost` names. Any other hostname is only checked if `resolve_dns: true` is set, which rejects hostnames that resolve to non-public ranges. (This narrows DNS-rebinding exposure but does not eliminate it; pin the resolved address at connect time for a full fix.)
 - **Taint tracking.** Tools marked `returns_untrusted` taint the session; tools marked `side_effects` are then denied (or routed to approval) for the rest of that session. This breaks the "private data + untrusted content + outbound channel" combination without needing to detect the injection.
 - **Human approval** hook, per-tool and per-session call limits, and an audit trail of every request and decision.
 

@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Security
+- URL checks refuse hosts containing `\`, `%` or any character outside `[a-z0-9._-]` (IP literals excepted). `urlsplit` kept them in the host while WHATWG fetchers read `\` as `/` and percent-decode the host, so `http://169.254.169.254\y.allowed.com/` passed a `*.allowed.com` allowlist and `http://%31%32%37.0.0.1/` passed `block_private`.
+- `SafeCommandRunner` gives the command `stdin=DEVNULL` instead of the host's stdin (under an MCP stdio server, the JSON-RPC channel), and runs it in its own process group. Timeout, output overflow and normal exit now kill the processes it started, not just the direct child, so a background grandchild can no longer hold the pipes open past the timeout. On Windows the tree is killed with `taskkill /T`, which misses grandchildren orphaned after their parent exited; on POSIX a descendant that calls `setsid()` leaves the group and escapes. It is still not an OS sandbox.
+- `scan_tool_definitions` reports an `oversized` finding (so the tool is blocked and never pinned) when a definition's text exceeds the scanned limit, instead of scanning only the prefix that padding could push an injection past.
+- `InjectionScanner` strips every Unicode format (`Cf`) character plus invisible combining marks, Hangul fillers and variation selectors before matching. Characters such as U+2062 or U+180E inside a word previously hid it from every signal.
+
 ## [0.4.1] - 2026-11-14
 
 Same code as 0.4.0. This is the first release published to PyPI.

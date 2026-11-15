@@ -18,6 +18,9 @@ from dataclasses import dataclass, field
 
 _INVISIBLE = re.compile("[\u200b\u200c\u200d\u2060\ufeff\u00ad]")
 _TAG_CHARS = re.compile("[\U000e0000-\U000e007f]")
+# Invisible characters outside category Cf: combining grapheme joiner, Hangul fillers and
+# variation selectors render as nothing but are Mn/Lo, so a category check alone misses them.
+_INVISIBLE_NON_CF = re.compile("[\u034f\u115f\u1160\u3164\uffa0\ufe00-\ufe0f\U000e0100-\U000e01ef]")
 
 # Untrusted content (a fetched page, a large tool result) has no size limit the scanner
 # controls, and scanning it costs work proportional to its length across ~10 regex passes.
@@ -110,7 +113,14 @@ class InjectionScanner:
 
     @staticmethod
     def normalize(text: str) -> str:
-        return unicodedata.normalize("NFKC", _INVISIBLE.sub("", _TAG_CHARS.sub("", text)))
+        # Every format (Cf) character is invisible: zero-width, bidi, invisible operators, tags.
+        # Stripping only a fixed list let U+2062 or U+180E inside a word hide it from the signals.
+        visible = "".join(
+            ch
+            for ch in text
+            if unicodedata.category(ch) != "Cf" and not _INVISIBLE_NON_CF.match(ch)
+        )
+        return unicodedata.normalize("NFKC", visible)
 
     def scan(self, text: str) -> ScanResult:
         truncated = len(text) > self.max_scan_chars

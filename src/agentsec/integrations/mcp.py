@@ -144,7 +144,17 @@ def scan_tool_definitions(
     for tool in tools:
         name = tool_name(tool)
         definition = _definition(tool)
-        text = "\n".join(_strings(definition))[:MAX_SCANNED_CHARS]
+        text = "\n".join(_strings(definition))
+        # The scanner truncates too, so a caller's smaller scanner limit is the real one.
+        limit = min(MAX_SCANNED_CHARS, scanner.max_scan_chars)
+        if len(text) > limit:
+            # Padding could push an injection past the scanned prefix, so refuse the whole tool.
+            findings.append(
+                ToolFinding(
+                    name, "oversized", f"definition text is {len(text)} chars (max {limit})"
+                )
+            )
+            text = text[:limit]
         result = scanner.scan(text)
         if result.flagged:
             findings.append(

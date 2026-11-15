@@ -54,11 +54,12 @@ Read it this way: tool policy and output validation reduce the *dangerous* outco
 ## Install
 
 ```bash
-pip install -e ".[dev]"          # from a clone
-pip install -e ".[anthropic]"    # optional: fuzz Claude models directly
+pip install ai-agent-security-toolkit                # from PyPI
+pip install "ai-agent-security-toolkit[anthropic]"   # optional: fuzz Claude models directly
+pip install -e ".[dev]"                              # from a clone, for development
 ```
 
-Python 3.11+. Runtime dependencies: `PyYAML`, `jsonschema`.
+Python 3.11+. Runtime dependencies: `PyYAML`, `jsonschema`. The import name is `agentsec`.
 
 ## 1. Fuzz an agent
 

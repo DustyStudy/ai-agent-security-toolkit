@@ -247,7 +247,10 @@ def test_pagination_does_not_report_unseen_pinned_tools_as_removed():
 def test_call_goes_through_the_guard_and_taints_the_session():
     guard, _ = _guard(search=SEARCH, send=SEND)
     session = Session()
-    client, fake = _client(Listing([]), guard=guard, session=session)
+    client, fake = _client(
+        Listing([ToolV1("search", "Find"), ToolV1("send", "Send")]), guard=guard, session=session
+    )
+    run(client.list_tools())
 
     result = run(client.call_tool("search", {"q": "Q3"}, read_timeout_seconds=5))
     assert result_text(result) == "search ok"
@@ -274,7 +277,10 @@ def test_guard_denials_do_not_reach_the_server_or_taint():
 def test_taint_can_be_disabled():
     guard, _ = _guard(search=SEARCH)
     session = Session()
-    client, _ = _client(Listing([]), guard=guard, session=session, taint_results=False)
+    client, _ = _client(
+        Listing([ToolV1("search", "Find")]), guard=guard, session=session, taint_results=False
+    )
+    run(client.list_tools())
     run(client.call_tool("search", {"q": "x"}))
     assert not session.tainted
 
@@ -312,7 +318,7 @@ def test_with_pins_a_tool_that_never_passed_a_listing_cannot_be_called():
     guard, sink = _guard(search=SEARCH)
     pins = ToolPins()
     client, fake = _client(Listing([ToolV1("search", "Find")]), guard=guard, pins=pins)
-    with pytest.raises(ToolDenied, match="pin check"):
+    with pytest.raises(ToolDenied, match="passed the checks in a listing"):
         run(client.call_tool("search", {"q": "x"}))  # list_tools() never called
     assert fake.calls == []
     assert any(r["event"] == "mcp_tool_blocked" for r in sink.records)
@@ -332,7 +338,22 @@ def test_with_pin_new_false_an_unpinned_tool_stays_uncallable():
     assert fake.calls == []
 
 
-def test_without_pins_calls_need_no_prior_listing():
+def test_without_pins_a_tool_still_needs_a_listing_before_it_can_be_called():
+    """Without pins, call_tool used to run a tool whose definition was never scanned."""
     guard, _ = _guard(search=SEARCH)
-    client, _ = _client(Listing([ToolV1("search", "Find")]), guard=guard)
+    client, fake = _client(Listing([ToolV1("search", "Find")]), guard=guard)
+    with pytest.raises(ToolDenied, match="call list_tools"):
+        run(client.call_tool("search", {"q": "x"}))
+    assert fake.calls == []
+    run(client.list_tools())
     assert run(client.call_tool("search", {"q": "x"})).content[0].text == "search ok"
+
+
+def test_call_options_such_as_meta_are_audited():
+    guard, sink = _guard(search=SEARCH)
+    client, _ = _client(Listing([ToolV1("search", "Find")]), guard=guard)
+    run(client.list_tools())
+    run(client.call_tool("search", {"q": "x"}, meta={"password": "hunter2hunter2"}))
+    rec = next(r for r in sink.records if r["event"] == "mcp_call_options")
+    assert rec["data"]["options"] == ["meta"]
+    assert "hunter2" not in str(sink.records)

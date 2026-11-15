@@ -24,7 +24,7 @@ Each step is useful on its own, and later steps build on earlier ones.
 - **Approvals need context.** Show the approver the exact recipient, URL or command and the reason the guard asked. In your approver, cap how many approvals can be outstanding per session so a flood of harmless requests cannot bury the real one; the toolkit does not do this for you.
 - **One `Session` per conversation.** Never share a `Session` across users. Counters and taint are per session, and sharing would let one user's untrusted content affect another's calls or exhaust their limits.
 - **Set limits** (`max_calls`, `max_total_calls`) to cap runaway loops and cost. They stay exact under threads and async tasks.
-- **Resolve DNS for URL rules** (`resolve_dns: true`) to catch hostnames that point at private ranges. This narrows DNS-rebinding exposure but does not eliminate it; pin the resolved address at connect time for a full fix.
+- **Resolve DNS for URL rules** to catch hostnames that point at private ranges. This is automatic for a URL argument with `block_private` and no `hosts` allowlist; set `resolve_dns: true` to also check allowlisted hosts. This narrows DNS-rebinding exposure but does not eliminate it; pin the resolved address at connect time for a full fix.
 - **Do not let tool fetchers follow redirects blindly.** The guard checks the URL the model asked for, not where the server sends you next: an allowed host can answer with a redirect to `169.254.169.254`. Turn redirects off in the HTTP client (`follow_redirects=False` in httpx, `allow_redirects=False` in requests), or run `agentsec.sandbox.validators.check_url` on every `Location` before following it.
 
 ## Audit trail

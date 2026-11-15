@@ -49,12 +49,17 @@ class _Rule:
     group: int = 0
 
 
-_PW_KEY = r"(?i)(?<![a-z])(?:password|passwd|pwd|pass)[\"']?\s*[=:]\s*"
+# PGPASSWORD / SSHPASS / MYSQL_PWD: the tool-specific prefix is part of the word, so the
+# lookbehind alone would skip them.
+_PW_KEY = (
+    r"(?i)(?<![a-z])(?:pg|ssh|mysql_?)?(?:password|passphrase|passwd|pwd|pass|pw)"
+    r"[\"']?\s*[=:]\s*"
+)
 # api_key=..., client_secret: ..., "access_token": "...", AccountKey=... (Azure). The key must
 # sit right before the separator, so max_tokens: 1024 or secretary=x do not match.
 _CREDENTIAL_FIELD = (
     r"(?i)(?<![a-z])(?:api[_-]?key|client[_-]?secret|secret|(?:access|auth|refresh)?[_-]?token"
-    r"|account[_-]?key|shared[_-]?access[_-]?key)[\"']?\s*[=:]\s*"
+    r"|account[_-]?key|shared[_-]?access[_-]?key|sig)[\"']?\s*[=:]\s*"  # sig=: Azure SAS
 )
 
 
@@ -123,7 +128,20 @@ _RULES: tuple[_Rule, ...] = (
         re.compile(r"(?i)\bauthorization[\"']?\s*[=:]\s*[\"']?basic\s+([A-Za-z0-9+/]{8,}={0,2})"),
         group=1,
     ),
+    _Rule(
+        "authorization_header",
+        "secret",
+        # Any other scheme ("Token", "ApiKey", custom) and a bare credential with no scheme.
+        re.compile(
+            r"(?i)\bauthorization[\"']?\s*[=:]\s*[\"']?(?:[a-z][a-z0-9-]*\s+)?"
+            r"(?!\[REDACTED:)([A-Za-z0-9._~+/=:-]{12,})"
+        ),
+        group=1,
+    ),
     _Rule("github_token", "secret", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
+    _Rule("gitlab_token", "secret", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}")),
+    _Rule("npm_token", "secret", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b")),
+    _Rule("huggingface_token", "secret", re.compile(r"\bhf_[A-Za-z0-9]{30,}\b")),
     _Rule("github_fine_grained_pat", "secret", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}\b")),
     _Rule("slack_token", "secret", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
     _Rule("anthropic_api_key", "secret", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")),

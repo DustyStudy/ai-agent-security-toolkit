@@ -45,7 +45,7 @@ from agentsec.sandbox import (
     ToolGuard,
     run_anthropic_tool_uses,
 )
-from agentsec.sandbox.policy import ArgRule
+from agentsec.sandbox.policy import ArgRule, PolicyError
 from agentsec.sandbox.validators import check_arg, check_url
 from agentsec.threatmodel import render_markdown, validate_system
 from agentsec.types import AttackInput, ToolCall
@@ -527,8 +527,176 @@ def test_ssrf_check_rejects_cgnat_and_localhost_names_without_dns(url):
 
 
 def test_ssrf_check_still_allows_public_hosts():
+    public = lambda host: ["93.184.215.14"]  # noqa: E731
     assert not check_url("https://93.184.215.14/", ArgRule(type="url"))
-    assert not check_url("https://notlocalhost.example/", ArgRule(type="url"))
+    assert not check_url("https://notlocalhost.example/", ArgRule(type="url"), public)
+
+
+# ------------------------------------------------- second review: sandbox and redaction gaps
+
+
+@pytest.mark.parametrize("arg", ["-Ic", "-Bc", "-IBc", "-c", "-cprint(1)", "-Em", "-?c"])
+def test_deny_args_catches_short_flags_inside_a_cluster(arg):
+    """deny_args ["-c", "-m"] let python -Ic "code" run: only a leading "-c" was checked."""
+    from agentsec.sandbox.subprocess_runner import _denied_spelling
+
+    assert any(_denied_spelling(arg, d) for d in ["-c", "-m"])
+
+
+@pytest.mark.parametrize("arg", ["-I", "-B", "--check", "file.c", "-"])
+def test_deny_args_cluster_check_leaves_other_arguments_alone(arg):
+    from agentsec.sandbox.subprocess_runner import _denied_spelling
+
+    assert not _denied_spelling(arg, "-c")
+
+
+def test_deny_args_cluster_bypass_is_refused_by_the_runner(tmp_path):
+    runner = SafeCommandRunner(
+        {"py": ExecRule(executable=sys.executable, deny_args=["-c", "-m"])},
+        cwd_roots=[str(tmp_path)],
+    )
+    with pytest.raises(CommandDenied, match="denied"):
+        runner.run("py", ["-Ic", "print('BYPASS')"])
+
+
+def test_runner_inherits_only_named_environment_variables(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTSEC_KEEP", "yes")
+    monkeypatch.setenv("AGENTSEC_SECRET", "no")
+    runner = SafeCommandRunner(
+        {"py": ExecRule(executable=sys.executable)},
+        cwd_roots=[str(tmp_path)],
+        inherit_env=["AGENTSEC_KEEP", "AGENTSEC_MISSING"],
+        env={"EXTRA": "1"},
+    )
+    assert runner._env == {"AGENTSEC_KEEP": "yes", "EXTRA": "1"}
+    with pytest.raises(TypeError):
+        SafeCommandRunner({}, cwd_roots=[str(tmp_path)], inherit_env="PATH")
+
+
+def test_path_deny_patterns_ignore_case(tmp_path):
+    """On Windows and macOS ".Env" opens ".ENV", so "\.env$" must refuse it."""
+    rule = ArgRule(type="path", roots=[str(tmp_path)], deny_patterns=[r"(^|/)\.env$"])
+    for name in (".env", ".Env", ".ENV"):
+        assert check_arg(str(tmp_path / name), rule), name
+    assert not check_arg(str(tmp_path / "notes.txt"), rule)
+
+
+def test_dns_check_is_on_by_default_without_a_host_allowlist():
+    """block_private with no hosts used to allow 127.0.0.1.nip.io: DNS was never consulted."""
+    loopback = lambda host: ["127.0.0.1"]  # noqa: E731
+    errors = check_url("http://127.0.0.1.nip.io/", ArgRule(type="url", schemes=["http"]), loopback)
+    assert any("non-public" in e for e in errors)
+    # An explicit opt-out and an allowlisted host are not resolved.
+    assert not check_url("https://x.example/", ArgRule(type="url", resolve_dns=False), loopback)
+    assert not check_url("https://x.example/", ArgRule(type="url", hosts=["x.example"]), loopback)
+
+
+def test_policy_accepts_unset_resolve_dns_and_lints_risky_settings():
+    policy = Policy.from_dict(
+        {
+            "tools": {
+                "fetch": {
+                    "allow_extra_args": True,
+                    "args": {
+                        "url": {"type": "url", "resolve_dns": False},
+                        "blob": {"type": "any"},
+                        "link": {"type": "url", "hosts": ["a.example"], "block_private": False},
+                    },
+                }
+            }
+        }
+    )
+    notes = "\n".join(policy.lint())
+    for needle in ("allow_extra_args", "type 'any'", "resolve_dns is off", "block_private is off"):
+        assert needle in notes
+    with pytest.raises(PolicyError):
+        Policy.from_dict({"tools": {"f": {"args": {"u": {"type": "url", "resolve_dns": "no"}}}}})
+
+
+def test_deny_args_catches_punctuation_option_letters():
+    from agentsec.sandbox.subprocess_runner import _denied_spelling
+
+    assert _denied_spelling("-v?", "-?")
+
+
+def test_path_retargeted_after_authorization_is_rechecked_in_full(tmp_path, monkeypatch):
+    """The pre-call recheck covered the roots only, so an alias swapped to .env got through."""
+    import agentsec.sandbox.guard as guard_mod
+
+    root = tmp_path / "root"
+    root.mkdir()
+    sink = MemorySink()
+    policy = Policy.from_dict(
+        {
+            "tools": {
+                "read": {
+                    "max_calls": 1,
+                    "args": {
+                        "p": {"type": "path", "roots": [str(root)], "deny_patterns": [r"\.env$"]}
+                    },
+                }
+            }
+        }
+    )
+    guard = ToolGuard(policy, audit=AuditLogger(sink))
+    # authorize() sees a safe file; by the recheck before the call the alias points at .env.
+    calls = []
+
+    def flipping_check(value, rule, **kw):
+        calls.append(value)
+        return [] if len(calls) == 1 else ["resolved path matches denied pattern"]
+
+    monkeypatch.setattr(guard_mod, "check_arg", flipping_check)
+    ran = []
+    with pytest.raises(ToolDenied, match="changed after authorization"):
+        guard.execute(ToolCall("read", {"p": str(root / "alias.txt")}), ran.append, Session())
+    assert ran == []
+    decisions = [r["data"]["verdict"] for r in sink.records if r["event"] == "tool_decision"]
+    assert decisions == ["allow", "deny"]
+
+
+def test_guard_hands_the_tool_the_resolved_path(tmp_path):
+    """The tool used to re-resolve the raw string, so a symlink swapped after the check escaped."""
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    (root / "a.txt").write_text("x")
+    policy = Policy.from_dict(
+        {"tools": {"read": {"args": {"p": {"type": "path", "roots": [str(root)]}}}}}
+    )
+    seen = []
+    ToolGuard(policy).execute(
+        ToolCall("read", {"p": str(root / "sub" / ".." / "a.txt")}),
+        lambda p: seen.append(p),
+        Session(),
+    )
+    assert seen == [os.path.realpath(root / "a.txt")]
+
+
+def test_wrap_without_a_session_warns_about_the_shared_default():
+    guard = ToolGuard(Policy.from_dict({"tools": {"t": {}}}))
+    with pytest.warns(UserWarning, match="default_session"):
+        guard.wrap("t", lambda: None)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "PGPASSWORD=hunter2hunter2",
+        "SSHPASS=hunter2hunter2",
+        "MYSQL_PWD=hunter2hunter2",
+        "pw=hunter2hunter2",
+        "passphrase: hunter2hunter2",
+        "Authorization: Token abcdef0123456789abcd",
+        "authorization: ApiKey abcdef0123456789abcd",
+        "token glpat-abcdefghij0123456789",
+        "npm_" + "a1" * 18,
+        "hf_" + "a1B2" * 9,
+        "https://acct.blob.core.windows.net/c/b?sv=2022&sig=AbCdEf0123456789%2B%3D",
+    ],
+)
+def test_redaction_covers_more_secret_formats(text):
+    redacted, _ = redact_text(text)
+    assert "[REDACTED:" in redacted and "hunter2" not in redacted
 
 
 # ---------------------------------------------------------------- redaction coverage

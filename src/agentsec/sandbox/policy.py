@@ -41,7 +41,9 @@ class ArgRule:
     schemes: list[str] = field(default_factory=lambda: ["https"])
     hosts: list[str] = field(default_factory=list)
     block_private: bool = True
-    resolve_dns: bool = False
+    # None = automatic: resolve when block_private is on and there is no host allowlist, since
+    # then any name (e.g. 127.0.0.1.nip.io) could point at a private address.
+    resolve_dns: bool | None = None
 
 
 @dataclass
@@ -111,14 +113,32 @@ class Policy:
                 notes.append(f"{name}: side-effecting tool with no argument constraints")
             if rule.side_effects and not rule.require_approval and not self.taint.enabled:
                 notes.append(f"{name}: side-effecting, no approval, and taint tracking is off")
+            if rule.allow_extra_args:
+                notes.append(f"{name}: allow_extra_args passes unchecked arguments to the tool")
             for arg_name, arg in rule.args.items():
+                if arg.type == "any":
+                    notes.append(f"{name}.{arg_name}: type 'any' is not validated")
                 if arg.type == "url" and not arg.hosts:
                     notes.append(f"{name}.{arg_name}: url argument without a host allowlist")
+                    if arg.resolve_dns is False and arg.block_private:
+                        notes.append(
+                            f"{name}.{arg_name}: resolve_dns is off, so hostnames that resolve "
+                            "to private addresses are allowed"
+                        )
+                if arg.type == "url" and not arg.block_private:
+                    notes.append(f"{name}.{arg_name}: block_private is off (SSRF exposure)")
                 if arg.type == "path" and not arg.roots:
                     notes.append(f"{name}.{arg_name}: path argument without roots")
                 if arg.type == "string" and arg.max_length is None and arg.pattern is None:
                     notes.append(f"{name}.{arg_name}: unbounded string argument")
         return notes
+
+
+def dns_check_enabled(rule: ArgRule) -> bool:
+    """Whether a URL rule resolves hostnames to check for private addresses."""
+    if rule.resolve_dns is not None:
+        return rule.resolve_dns
+    return rule.block_private and not rule.hosts
 
 
 def _reject_unknown(data: dict[str, Any], allowed: set[str], where: str) -> None:
@@ -135,6 +155,7 @@ def _is_int(value: Any) -> bool:
 # flag such as `allow: "false"` would otherwise *enable* a tool; reject it instead.
 _KINDS: dict[str, tuple[Callable[[Any], bool], str]] = {
     "bool": (lambda v: isinstance(v, bool), "true or false"),
+    "bool?": (lambda v: v is None or isinstance(v, bool), "true or false"),
     "str": (lambda v: isinstance(v, str), "a string"),
     "str?": (lambda v: v is None or isinstance(v, str), "a string"),
     "int?": (lambda v: v is None or (_is_int(v) and v >= 0), "a non-negative integer"),
@@ -176,7 +197,7 @@ _FIELD_KINDS: dict[str, dict[str, str]] = {
         "schemes": "strs",
         "hosts": "strs",
         "block_private": "bool",
-        "resolve_dns": "bool",
+        "resolve_dns": "bool?",
     },
 }
 

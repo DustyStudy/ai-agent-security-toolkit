@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- The release workflow publishes the wheel and sdist to PyPI as `ai-agent-security-toolkit` with trusted publishing (OIDC; no stored API token) and PEP 740 attestations. It runs after the GitHub Release, in a `pypi` environment that can require a reviewer, and uploads only the distributions, not the SBOM.
+
 ### Security
 - **Breaking:** `path` arguments must now be absolute. A relative path was checked as if it sat under the first root, but the tool received the raw string and opened it against the process working directory, so `"secret.txt"` passed the check and read a file outside every root. Relative paths are now refused (on Windows, a path must also name a drive or UNC share). `SafeCommandRunner` still accepts a relative `cwd`, anchored to its first root, because it runs the command in the resolved directory.
 - `SafeCommandRunner` refuses an executable that resolves to a `.bat` or `.cmd` file on Windows. Windows runs batch files through `cmd.exe` even with `shell=False`, so it re-parses their arguments, and an argument like `x&ver` ran `ver` ("BatBadBut"). The check uses the canonical path, so `npm.cmd.` (which Windows runs as `npm.cmd`) is refused too.

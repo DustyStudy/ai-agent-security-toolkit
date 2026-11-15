@@ -35,7 +35,9 @@ class ExecRule:
     executable: str  # resolved with PATH lookup at construction time
     allowed_subcommands: list[str] | None = None  # first argument must be one of these
     arg_pattern: str | None = None  # every argument must fully match this regex
-    deny_args: list[str] = field(default_factory=list)  # exact-match forbidden arguments
+    # Forbidden arguments. An option also matches its other spellings: "--output" denies
+    # "--output=x" and GNU abbreviations like "--outp"; "-c" denies an attached "-cvalue".
+    deny_args: list[str] = field(default_factory=list)
     max_args: int = 16
     # Option allowlist. None leaves options unchecked (the pre-0.3 behaviour). A list
     # means every argument that starts with "-" must be one of these flags, either
@@ -65,6 +67,19 @@ def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
             pass  # group already gone
     if proc.poll() is None:
         proc.kill()
+
+
+def _denied_spelling(arg: str, denied: str) -> bool:
+    """True if ``arg`` is ``denied`` or a spelling a program would parse as that option."""
+    if arg == denied:
+        return True
+    if denied.startswith("--") and arg.startswith("--"):
+        name = arg.split("=", 1)[0]
+        # getopt_long accepts any unambiguous prefix, so "--outp" means "--output".
+        return len(name) > 2 and denied.startswith(name)
+    if len(denied) == 2 and denied[0] == "-" and denied[1] != "-":
+        return arg.startswith(denied) and not arg.startswith("--")  # "-cprint(1)"
+    return False
 
 
 def _is_option_like(arg: str) -> bool:
@@ -230,7 +245,7 @@ class SafeCommandRunner:
         ):
             raise CommandDenied(f"subcommand must be one of {rule.allowed_subcommands}")
         for a in args:
-            if a in rule.deny_args:
+            if any(_denied_spelling(a, d) for d in rule.deny_args):
                 raise CommandDenied(f"argument {a!r} is denied")
             if rule.arg_pattern is not None and not re.fullmatch(rule.arg_pattern, a):
                 raise CommandDenied(f"argument {a!r} does not match allowed pattern")

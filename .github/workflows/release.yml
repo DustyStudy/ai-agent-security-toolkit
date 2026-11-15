@@ -51,7 +51,7 @@ jobs:
       - name: Build sdist and wheel, check metadata
         run: |
           python -m pip install --require-hashes -r requirements/requirements-release-tools.txt
-          python -m build
+          python -m build --no-isolation  # backend comes from the hashed lock above
           python -m twine check --strict dist/*
 
       - name: Generate CycloneDX SBOM of the installed wheel

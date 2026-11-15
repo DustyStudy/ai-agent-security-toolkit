@@ -111,7 +111,7 @@ jobs:
       - name: Build sdist and wheel, check metadata
         run: |
           python -m pip install --require-hashes -r requirements/requirements-release-tools.txt
-          python -m build
+          python -m build --no-isolation  # same as release: backend from the hashed lock
           python -m twine check --strict dist/*
 
       - name: Wheel contains the bundled threat catalog and py.typed

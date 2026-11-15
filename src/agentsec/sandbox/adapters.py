@@ -43,6 +43,12 @@ def _unregistered(decision: Decision) -> tuple[str, bool]:
     return f"Tool call refused: {reason}", True
 
 
+def _tool_name(value: Any) -> str:
+    # A missing or non-string name (a JSON list, say) would raise in registry lookup and crash
+    # the agent loop. "" is never a policy tool, so the guard denies and audits the call.
+    return value if isinstance(value, str) else ""
+
+
 def _run(
     guard: ToolGuard,
     session: Session,
@@ -92,7 +98,7 @@ def _anthropic_calls(content_blocks: list[dict[str, Any]]) -> Iterator[ToolCall]
         # Pass it through instead: the guard denies non-object arguments and audits the attempt.
         arguments: Any = dict(raw_input) if isinstance(raw_input, dict) else raw_input
         yield ToolCall(
-            name=block["name"],
+            name=_tool_name(block.get("name")),
             arguments={} if arguments is None else arguments,
             id=block.get("id", ""),
         )
@@ -136,19 +142,21 @@ async def arun_anthropic_tool_uses(
 
 def _openai_call(tc: dict[str, Any]) -> tuple[ToolCall, str | None]:
     """Parse one ``tool_calls`` entry. The second item is a refusal message, or ``None``."""
-    fn = tc.get("function", {})
+    fn = tc.get("function")
+    if not isinstance(fn, dict):
+        fn = {}
     raw = fn.get("arguments") or "{}"
     refusal = None
     try:
         args: Any = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):  # TypeError: arguments was not a string
         args = raw
         refusal = "Tool call refused: arguments were not valid JSON"
     if refusal is None and not isinstance(args, dict):
         refusal = "Tool call refused: arguments must be a JSON object"
     # Keep a malformed value as-is (like the Anthropic path) so the guard, which denies
     # non-object arguments, records the attempt in the audit log.
-    call = ToolCall(name=fn.get("name", ""), arguments=args, id=tc.get("id", ""))
+    call = ToolCall(name=_tool_name(fn.get("name")), arguments=args, id=tc.get("id", ""))
     return call, refusal
 
 

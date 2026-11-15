@@ -14,7 +14,9 @@ import asyncio
 import os
 import re
 import shutil
+import signal
 import subprocess  # noqa: S404 - the point of this module is to constrain subprocess use
+import sys
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -40,6 +42,29 @@ class ExecRule:
     # exactly or as "--flag=value". Include "--" to let a caller end option parsing;
     # arguments after it are positional and are not checked as options.
     allowed_options: list[str] | None = None
+
+
+def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
+    """Kill ``proc`` and the processes it started, not just the direct child."""
+    if sys.platform == "win32":
+        # shortcut: taskkill /T walks the tree from the parent's PID, so grandchildren orphaned
+        # after the parent exited survive; use a Job Object if that matters on Windows.
+        if proc.poll() is None:
+            # Full path: a bare "taskkill" would be looked up on PATH and the cwd.
+            taskkill = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+            subprocess.run(  # noqa: S603 - fixed argv, system binary
+                [os.path.join(taskkill, "taskkill.exe"), "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # the child leads its own session/group
+        except (ProcessLookupError, PermissionError):
+            pass  # group already gone
+    if proc.poll() is None:
+        proc.kill()
 
 
 def _is_option_like(arg: str) -> bool:
@@ -139,9 +164,14 @@ class SafeCommandRunner:
             argv,
             cwd=workdir,
             env=self._env,
+            # Never hand the child our stdin: under an MCP stdio server it is the JSON-RPC
+            # channel, and a command that reads stdin would steal protocol frames.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             shell=False,
+            # Own process group, so a timeout or overflow can kill what the command spawned.
+            start_new_session=sys.platform != "win32",
         )
         buffers = {"out": bytearray(), "err": bytearray()}
         overflow = threading.Event()
@@ -158,7 +188,7 @@ class SafeCommandRunner:
                     buf.extend(chunk[:room])
                 if len(buf) > limit:
                     overflow.set()
-                    proc.kill()  # stop the producer; keep draining until the pipe closes
+                    _kill_tree(proc)  # stop the producers; keep draining until the pipe closes
 
         threads = [
             threading.Thread(target=pump, args=(proc.stdout, "out"), daemon=True),
@@ -171,8 +201,10 @@ class SafeCommandRunner:
             proc.wait(timeout=self.timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            proc.kill()
-            proc.wait()
+        # Also after a normal exit: background children it left behind must not outlive the
+        # call or hold the output pipes open past the timeout.
+        _kill_tree(proc)
+        proc.wait()
         for t in threads:
             t.join(timeout=5)
         code = -1 if timed_out else proc.returncode

@@ -79,6 +79,9 @@ def _is_nonpublic(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
+_HOSTNAME_CHARS = re.compile(r"[a-z0-9._-]+")
+
+
 def _ascii_host(host: str) -> str | None:
     """The host as a normalising fetcher would see it, or None if it is not a valid name.
 
@@ -100,6 +103,13 @@ def _ascii_host(host: str) -> str | None:
     ascii_form = ascii_form.removesuffix(".").lower()
     if any(label == "" for label in ascii_form.split(".")):
         return None
+    # urlsplit keeps "\" and "%XX" in the host, but WHATWG fetchers read "\" as "/" and
+    # percent-decode the host, so they would connect somewhere other than what we checked.
+    if not _HOSTNAME_CHARS.fullmatch(ascii_form):
+        try:
+            ipaddress.ip_address(ascii_form)  # IPv6 literal, possibly with a %zone
+        except ValueError:
+            return None
     return ascii_form
 
 

@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-14
+
 ### Added
 - The release workflow publishes the wheel and sdist to PyPI as `ai-agent-security-toolkit` with trusted publishing (OIDC; no stored API token) and PEP 740 attestations. It runs after the GitHub Release, in a `pypi` environment that can require a reviewer, and uploads only the distributions, not the SBOM.
 
@@ -18,7 +20,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `FileSink` refuses to resume unless the last line is a complete record (newline-terminated, integer `seq`, string `hash` that matches its contents), with an error that says why, instead of crashing on a torn write or chaining onto a bad head. It resolves its path when created, so a later `chdir` does not move the file. `verify_records`/`verify_file` report a non-object JSON line or invalid UTF-8 as tampering instead of raising.
 - Refreshed every hash-pinned lock in `requirements/`. This moves certifi to 2026.10.23 (removes the emSign roots with compromised intermediate keys), GitPython to 3.2.1 (submodule path RCE) and opentelemetry-api to 1.45.1 (unbounded tracestate parsing).
 - `ExfilLinkValidator` treats every URL a renderer fetches without a click as an image: reference-style markdown images (`![a][1]` with `[1]: url`; labels match as in CommonMark, and every definition of a label is checked), `src`, `srcset`, `poster`, `background` and `data` attributes on any tag, `href` on `<link>` and SVG `<image>`/`<use>`, CSS `url()` and `@import`. These were classed as links, so with `links_action=WARN` they were delivered. Tags are tokenised quote-aware, so `src=` text inside another attribute's value is not a fetch; character references and surrounding whitespace in URLs are decoded before the host check (`https&#58;//...`); and extraction runs in linear time, including on unclosed `![` alt text.
-- `GuardedMCPClient` with `pins` refuses to call a tool that has not passed a pin check in a `list_tools()` listing. A tool that was never listed, or sat on a page that was not fetched, used to go straight to the server.
+- **Breaking:** `GuardedMCPClient` with `pins` refuses to call a tool that has not passed a pin check in a `list_tools()` listing. A tool that was never listed, or sat on a page that was not fetched, used to go straight to the server.
 - `ToolGuard` rechecks session taint when it commits an approved call. A session tainted while the approver was deciding (or while DNS was resolved off the loop) let a side-effecting call through even with `taint.action: deny`; in `approve` mode the call now needs an approval that saw the taint.
 - `GuardedMCPClient(on_finding="raise")` records which tools are blocked before raising, so catching `ToolManifestError` and then calling the changed tool is refused.
 - `run_openai_tool_calls` / `arun_openai_tool_calls` pass tool calls with malformed or non-object JSON arguments through the guard, so they are audited (as the Anthropic adapter already did) before being refused.
@@ -100,7 +102,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.0...v0.2.1

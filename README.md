@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/DustyStudy/ai-agent-security-toolkit/badge)](https://scorecard.dev/viewer/?uri=github.com/DustyStudy/ai-agent-security-toolkit)
 [![Release](https://img.shields.io/github/v/release/DustyStudy/ai-agent-security-toolkit)](https://github.com/DustyStudy/ai-agent-security-toolkit/releases)
+[![PyPI](https://img.shields.io/pypi/v/ai-agent-security-toolkit)](https://pypi.org/project/ai-agent-security-toolkit/)
 
 **Fuzz, contain, validate, and audit LLM agents.** Four pieces that fit together:
 
@@ -53,11 +54,12 @@ Read it this way: tool policy and output validation reduce the *dangerous* outco
 ## Install
 
 ```bash
-pip install -e ".[dev]"          # from a clone
-pip install -e ".[anthropic]"    # optional: fuzz Claude models directly
+pip install ai-agent-security-toolkit                # from PyPI
+pip install "ai-agent-security-toolkit[anthropic]"   # optional: fuzz Claude models directly
+pip install -e ".[dev]"                              # from a clone, for development
 ```
 
-Python 3.11+. Runtime dependencies: `PyYAML`, `jsonschema`.
+Python 3.11+. Runtime dependencies: `PyYAML`, `jsonschema`. The import name is `agentsec`.
 
 ## 1. Fuzz an agent
 

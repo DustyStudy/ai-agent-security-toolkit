@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/DustyStudy/ai-agent-security-toolkit/badge)](https://scorecard.dev/viewer/?uri=github.com/DustyStudy/ai-agent-security-toolkit)
 [![Release](https://img.shields.io/github/v/release/DustyStudy/ai-agent-security-toolkit)](https://github.com/DustyStudy/ai-agent-security-toolkit/releases)
+[![PyPI](https://img.shields.io/pypi/v/ai-agent-security-toolkit)](https://pypi.org/project/ai-agent-security-toolkit/)
 
 **Fuzz, contain, validate, and audit LLM agents.** Four pieces that fit together:
 

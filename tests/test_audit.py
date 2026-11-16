@@ -57,6 +57,18 @@ def test_log_content_false_stores_hash_only():
     assert set(field) == {"sha256", "length"} and field["length"] == 500
 
 
+def test_keep_fields_stay_readable_but_redacted_and_truncated():
+    sink = MemorySink()
+    log = AuditLogger(sink, log_content=False, keep_fields=["reasons"], max_field_chars=200)
+    secret = "AKIA" + "ABCDEFGHIJKLMNOP"
+    log.log("deny", reasons=["r" * 100 + " " + secret, "z" * 300], text="x" * 500)
+    data = sink.records[0]["data"]
+    assert data["reasons"][0].startswith("r" * 100) and secret not in data["reasons"][0]
+    assert data["reasons"][1]["length"] == 300 and "truncated" in data["reasons"][1]
+    assert set(data["text"]) == {"sha256", "length"}  # other fields are still hashed
+    assert verify_records(sink.records).ok
+
+
 def test_long_fields_truncated_with_full_hash():
     sink = MemorySink()
     AuditLogger(sink, max_field_chars=10).log("prompt", text="y" * 50)

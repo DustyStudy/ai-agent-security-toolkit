@@ -53,6 +53,11 @@ _ROLES = {"system", "developer", "user", "assistant", "tool"}
 _FINISH = {"stop", "length", "tool_calls", "content_filter"}
 WITHHELD_NOTICE = "A tool call was withheld by policy."
 _LOG = logging.getLogger("agentsec.gateway")
+# Decision metadata stays readable with log_content off; prompts and answers are still hashed.
+# These hold policy reasons, names and error kinds, never message text.
+AUDIT_KEEP_FIELDS = frozenset(
+    {"reasons", "reason", "error", "tools", "validators", "signals", "policy_rev", "groups"}
+)
 
 
 class HttpError(Exception):
@@ -193,7 +198,9 @@ class Gateway:
                 cef = open(config.cef_file, "a", encoding="utf-8")  # noqa: SIM115 - lives with the app
                 sink = TeeSink(sink, CefSink(cef))
         # The chain head is read once here; bind() gives each request a logger on that chain.
-        self._audit = AuditLogger(sink, actor="gateway", log_content=config.log_content)
+        self._audit = AuditLogger(
+            sink, actor="gateway", log_content=config.log_content, keep_fields=AUDIT_KEEP_FIELDS
+        )
         self._output_guard = OutputGuard.default(
             allowed_hosts=config.allowed_hosts, protected=config.protected
         )

@@ -95,6 +95,17 @@ def test_tokens_expire(tmp_path):
     assert "expired" in events(sink, "gateway_auth_failed")[-1]["data"]["reason"]
 
 
+def test_dead_tokens_are_pruned_a_week_later(tmp_path):
+    app, _, clock = gateway(tmp_path)
+    revoked = issue(app, {"name": "old", "ttl_days": 10})[1]["id"]
+    call(app, f"/tokens/{revoked}", method="DELETE", headers=USER)
+    issue(app, {"name": "expires", "ttl_days": 1})
+    clock.now += 8 * 86400 + 1  # one revoked 8 days ago, one expired 7 days ago
+    kept = issue(app, {"name": "new"})[1]["id"]
+    listed = call(app, "/tokens", method="GET", headers=USER)[1]["data"]
+    assert [t["id"] for t in listed] == [kept]
+
+
 def test_a_user_cannot_revoke_someone_elses_token(tmp_path):
     app, _, _ = gateway(tmp_path)
     issued = issue(app)[1]

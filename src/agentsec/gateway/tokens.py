@@ -23,6 +23,7 @@ from typing import Any
 PREFIX = "agt_"
 _TOKEN_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 TOUCH_INTERVAL_S = 60.0  # last_used is written at most this often per token
+PRUNE_AFTER_S = 7 * 86400.0  # expired and revoked rows are deleted this long afterwards
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tokens (
@@ -117,6 +118,11 @@ class TokenStore:
             # process, this covers every process sharing the file (a second gateway, the CLI).
             self._db.execute("BEGIN IMMEDIATE")
             try:
+                # Without this, issue-and-revoke in a loop grows the table and every listing.
+                self._db.execute(
+                    "DELETE FROM tokens WHERE MIN(expires, COALESCE(revoked, expires)) < ?",
+                    (now - PRUNE_AFTER_S,),
+                )
                 live = self._db.execute(
                     "SELECT COUNT(*) FROM tokens WHERE user = ? AND revoked IS NULL "
                     "AND expires > ?",

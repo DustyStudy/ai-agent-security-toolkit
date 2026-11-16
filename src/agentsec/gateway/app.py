@@ -224,11 +224,18 @@ class _Limiter:
         self._recent: defaultdict[str, deque[float]] = defaultdict(deque)
         self._active: defaultdict[str, int] = defaultdict(int)
         self._lock = threading.Lock()
+        self._swept = clock()
 
     @contextmanager
     def slot(self, user: str) -> Iterator[None]:
         with self._lock:
-            now, recent = self._clock(), self._recent[user]
+            now = self._clock()
+            if now - self._swept >= 60:
+                # Forget users idle for a whole window, or every user ever seen stays in memory.
+                self._swept = now
+                for idle in [u for u, d in self._recent.items() if not d or now - d[-1] >= 60]:
+                    del self._recent[idle]
+            recent = self._recent[user]
             while recent and now - recent[0] >= 60:
                 recent.popleft()
             if len(recent) >= self._per_min or self._active[user] >= self._concurrent:
@@ -240,6 +247,8 @@ class _Limiter:
         finally:
             with self._lock:
                 self._active[user] -= 1
+                if not self._active[user]:
+                    del self._active[user]
 
 
 def _texts(content: Any) -> list[str]:
@@ -1108,6 +1117,13 @@ class Gateway:
             if untrusted:
                 # Taint whatever the content: an image or an empty list is still a tool result.
                 session.mark_untrusted(f"tool[{i}]")
+            for part in m["content"] if isinstance(m.get("content"), list) else []:
+                ref = part.get("image_url") if isinstance(part, dict) else None
+                url = ref.get("url") if isinstance(ref, dict) else ref
+                if ref is not None and not (isinstance(url, str) and url.startswith("data:")):
+                    # The model server would fetch it from its own network position (SSRF).
+                    # shortcut: inline data: images only; add a host allowlist if remote ones are needed.
+                    reasons.append(f"{m['role']}[{i}]: remote image URL")
             texts = _texts(m.get("content"))
             if not texts:
                 continue

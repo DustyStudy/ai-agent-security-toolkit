@@ -318,6 +318,9 @@ class GuardedMCPClient:
             else:
                 self._blocked.pop(name, None)
                 self._verified.add(name)
+        if not paged:
+            # A whole listing: a tool the server no longer lists is no longer checked.
+            self._verified &= {tool_name(t) for t in tools}
         if blocking and self._on_finding == "raise":
             raise ToolManifestError(blocking)
         kept = [t for t in tools if tool_name(t) not in bad and self._allowed(tool_name(t))]

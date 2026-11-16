@@ -14,6 +14,7 @@ Logs with a restricted resource policy) and periodically anchor
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
 import json
 import logging
@@ -22,13 +23,13 @@ import sys
 import threading
 import uuid
 import weakref
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Protocol
 
-from agentsec.middleware.redact import redact_text
+from agentsec.middleware.redact import find_sensitive, redact_text
 
 _LOG = logging.getLogger("agentsec.audit")
 
@@ -317,12 +318,21 @@ class AuditLogger:
             return self._clean_str(value, keep)
         if isinstance(value, dict):
             # Keys are redacted too: an agent can put a secret in a key as easily as a value.
-            return {self._clean_key(k): self._clean(v, keep) for k, v in value.items()}
+            return {self._clean_key(k): self._clean_item(k, v, keep) for k, v in value.items()}
         if isinstance(value, list | tuple | set | frozenset):
             return [self._clean(v, keep) for v in value]
         if isinstance(value, int | float | bool) or value is None:
             return value
         return self._clean_str(repr(value), keep)
+
+    def _clean_item(self, key: Any, value: Any, keep: bool) -> Any:
+        if self._redact and isinstance(value, str) and value:
+            kind = _credential_key(str(key))
+            if kind is not None:
+                # {"password": "x"} is the assignment password=x: the whole value goes,
+                # whatever it looks like (short, spaced, or starting like something else).
+                return f"[REDACTED:{kind}]"
+        return self._clean(value, keep)
 
     def _clean_key(self, key: Any) -> str:
         text = str(key)
@@ -340,6 +350,16 @@ class AuditLogger:
                 "length": len(text),
             }
         return text
+
+
+@functools.lru_cache(maxsize=1024)
+def _credential_key(key: str) -> str | None:
+    """The redaction kind if ``key=<value>`` reads as a credential assignment, else None."""
+    prefix = f"{key[:200]}="
+    for f in find_sensitive(prefix + "x" * 8):
+        if f.category == "secret" and f.start == len(prefix):
+            return f.kind
+    return None
 
 
 @dataclass
@@ -374,20 +394,26 @@ def verify_records(records: Iterable[dict[str, Any]]) -> VerifyResult:
 
 def verify_file(path: str | Path) -> VerifyResult:
     """Verify a JSONL audit file. Malformed lines are reported as tampering."""
-    records: list[dict[str, Any]] = []
-    lineno = 0
-    try:
-        with Path(path).open(encoding="utf-8") as fh:
-            for lineno, line in enumerate(fh, start=1):  # noqa: B007 - read in the except
-                if not line.strip():
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    return VerifyResult(
-                        False, len(records), None, f"line {lineno} is not valid JSON"
-                    )
-    except UnicodeDecodeError:
-        # The logger only writes ASCII-escaped JSON, so invalid UTF-8 was put there by hand.
-        return VerifyResult(False, len(records), None, f"line {lineno + 1} is not valid UTF-8")
-    return verify_records(records)
+    bad: list[str] = []
+
+    def records() -> Iterator[dict[str, Any]]:
+        # One record in memory at a time: a production log can be larger than RAM.
+        lineno = 0
+        try:
+            with Path(path).open(encoding="utf-8") as fh:
+                for lineno, line in enumerate(fh, start=1):  # noqa: B007 - read in the except
+                    if not line.strip():
+                        continue
+                    try:
+                        yield json.loads(line)
+                    except json.JSONDecodeError:
+                        bad.append(f"line {lineno} is not valid JSON")
+                        return
+        except UnicodeDecodeError:
+            # The logger only writes ASCII-escaped JSON, so invalid UTF-8 was put there by hand.
+            bad.append(f"line {lineno + 1} is not valid UTF-8")
+
+    result = verify_records(records())
+    if result.ok and bad:
+        return VerifyResult(False, result.records_checked, None, bad[0])
+    return result

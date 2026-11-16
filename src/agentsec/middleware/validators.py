@@ -62,11 +62,11 @@ class SecretLeakValidator:
         self.action = action
 
     def check(self, text: str) -> list[Violation]:
-        _, findings = redact_text(text, include_pii=False)
+        _, findings = redact_text(text, include_pii=False, max_scan_chars=len(text))
         return [Violation(self.name, f"{f.kind} detected in output", self.action) for f in findings]
 
     def sanitize(self, text: str) -> str:
-        return redact_text(text, include_pii=False)[0]
+        return redact_text(text, include_pii=False, max_scan_chars=len(text))[0]
 
 
 class PIIValidator:
@@ -78,7 +78,7 @@ class PIIValidator:
         self.action = action
 
     def check(self, text: str) -> list[Violation]:
-        _, findings = redact_text(text)
+        _, findings = redact_text(text, max_scan_chars=len(text))
         return [
             Violation(self.name, f"{f.kind} detected in output", self.action)
             for f in findings
@@ -88,7 +88,7 @@ class PIIValidator:
     def sanitize(self, text: str) -> str:
         # Redact only PII here; secrets are handled by SecretLeakValidator.
         out: list[str] = []
-        _, findings = redact_text(text)
+        _, findings = redact_text(text, max_scan_chars=len(text))
         cursor = 0
         for f in findings:
             if f.category != "pii":
@@ -418,6 +418,10 @@ class BlockedPatternValidator:
         return text
 
 
+def _not_json(constant: str) -> Any:
+    raise ValueError(f"{constant} is not a JSON value")
+
+
 class JsonSchemaValidator:
     """For agents whose output feeds a parser: require valid JSON matching a schema."""
 
@@ -430,9 +434,11 @@ class JsonSchemaValidator:
 
     def check(self, text: str) -> list[Violation]:
         try:
-            doc = json.loads(text)
-        except json.JSONDecodeError as exc:
-            return [Violation(self.name, f"output is not valid JSON: {exc.msg}", self.action)]
+            # NaN and Infinity are not JSON, and NaN passes every minimum and maximum.
+            doc = json.loads(text, parse_constant=_not_json)
+        except ValueError as exc:
+            reason = getattr(exc, "msg", exc)
+            return [Violation(self.name, f"output is not valid JSON: {reason}", self.action)]
         return [
             Violation(
                 self.name,

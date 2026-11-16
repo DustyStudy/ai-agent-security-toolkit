@@ -2,7 +2,7 @@
 
 `agentsec serve` is an OpenAI-compatible `/v1/chat/completions` proxy that sits in front of local model servers (Ollama, vLLM, LM Studio) and applies agentsec's controls to every call. Apps change one setting, their `base_url`, and the security team gets one place to set policy and one audit trail.
 
-This is phase 1 of [the design](design/GATEWAY.md). Read its "hard limit" section first: **the gateway controls what reaches and leaves the model, not what the client runs.** Agents that execute tools should still use `ToolGuard` themselves.
+It implements phases 1 to 3 of [the design](design/GATEWAY.md), including an MCP endpoint (below). Read its "hard limit" section first: **the gateway controls what reaches and leaves the model, not what the client runs.** Agents that execute tools should still use `ToolGuard` themselves.
 
 ## Quick start
 
@@ -61,6 +61,27 @@ bundle:
 - **Expiry.** `expires` is required. Once it passes, the gateway answers 503 until a newer bundle loads.
 - **Keys.** Generate a key pair with `openssl genpkey -algorithm ed25519 -out bundle-signing.pem` and `openssl pkey -in bundle-signing.pem -pubout -out bundle-signing.pub`. Keep the private key away from the gateway host and out of the repository; `bundle sign --key` takes `env:NAME` or `file:/path`, never the key itself. KMS or HSM signing is a design open question.
 
+## MCP gateway
+
+With `mcp_upstreams` set, the gateway also serves one MCP endpoint, `/mcp` (streamable HTTP), in front of approved upstream MCP servers. Here the gateway makes the tool call itself, so its policy really is enforced, as long as the upstream servers accept connections only from the gateway.
+
+```yaml
+# gateway.yaml (needs pip install "ai-agent-security-toolkit[gateway,mcp]")
+mcp_upstreams:
+  jira: {url: https://mcp-jira.internal/mcp, auth: file:/run/secrets/jira-mcp-token}
+  docs: {url: http://mcp-docs.internal:8080/mcp, pins: pins/docs.json}
+```
+
+- **Names.** Each upstream's tools appear as `<upstream>__<tool>` (`jira__search_issues`), and tool policy keys use that name. A tool that is not in the caller's policy is not listed and cannot be called.
+- **Who reaches what.** With one `policy:` file, every user may reach every upstream, gated by the policy keys. In a bundle, each group lists the upstreams it may reach (`mcp: [jira]`); the default is none.
+- **Checks.** Every `tools/list` and `tools/call` runs under the identity and group of the request that carried it. Tool definitions are scanned for injections, and pinned when pins are configured: with pins, a tool whose definition is new or changed since it was pinned is dropped (a rug pull). A tool must pass a listing before it can be called. Arguments are checked against the policy before the upstream sees them.
+- **Taint.** Results from MCP tools are untrusted. After any call, side-effecting tools are denied (or sent for approval) according to the policy's taint rules, across all upstreams: a Jira result cannot drive an email through another server. Taint and listing state are kept per user, shared by all of that user's sessions: the client is what the policy guards against, and it could always open a new session to drop per-session taint. A session id still works only for the user who opened it.
+- **Pins.** Write them with `ToolPins` from a reviewed listing (names already namespaced). Set `mcp_upstreams.<name>.pins` with a single policy file; in a bundle, list them in the manifest (`mcp_pins: {docs: pins/docs.json}`) so they are signed with the policies.
+- **Limits.** Each upstream answer is capped at `limits.max_response_bytes` as it arrives; compressed answers are refused, because a small gzip body can expand far past the cap. An upstream may list at most 1000 tools, counted before any are filtered out.
+- **Failure.** An upstream that is down only hides its own tools; calls to it return an MCP error, and the audit log records the error type, never the upstream's error text. A denied call returns an MCP error result naming the reason.
+- **Identity.** The same modes as the model endpoint (auth-proxy headers or an OIDC bearer token). IDE tools that only accept a fixed header need an auth proxy in front of the gateway for now; gateway-issued access tokens are planned.
+- Only tools are proxied: no resources, prompts or sampling, and no server-initiated streams (`GET /mcp` is 405). `mode: monitor` does not apply here: MCP calls are always enforced, because the gateway would be the one running a call the policy refuses.
+
 ## Testing the gateway with the fuzzer
 
 `agentsec fuzz` can attack the gateway like any OpenAI-compatible endpoint, so you can compare the attack-success rate with and without it:
@@ -114,7 +135,8 @@ Labels are event names and status codes only, never users or request content. To
 
 ## Limits in this version
 
-- The MCP gateway is a later phase of the design.
+- No gateway-issued access tokens yet, so IDE MCP clients need an auth proxy or an OIDC token.
+- MCP taint is per user and lasts until the user has been idle for `limits.mcp_session_idle_s` (default 1 hour): one tainted session taints that user's other MCP sessions too.
 - Holdback cannot take back text it released: a secret or protected string longer than `holdback_chars`, or a rule that needs the whole answer, is only caught by the final check, which then cuts the stream short.
 - `/readyz` does not probe the upstreams or the audit file; a failed audit write shows as 503 responses and stops the event counters.
 - Without `bundle.state_file`, rollback protection across restarts relies on `min_revision` and `expires`.

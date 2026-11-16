@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- Gateway MCP endpoint (`mcp_upstreams`, needs the `gateway` and `mcp` extras): one streamable-HTTP `/mcp` in front of approved upstream MCP servers, the third phase of [docs/design/GATEWAY.md](docs/design/GATEWAY.md). The MCP SDK speaks the protocol (2025 sessions and the 2026 stateless revision); every `tools/list` and `tools/call` runs under the caller's identity and group. Tools are namespaced `<upstream>__<tool>`; `GuardedMCPClient` scans and pins definitions, applies the tool policy and refuses unlisted tools; taint is shared across upstreams and sessions per user, so a new session cannot drop it; a session id works only for its opener; upstream answers are size-capped. Bundles gain per-group `mcp: [upstreams]` and signed `mcp_pins`.
+
 ## [0.6.0] - 2026-11-16
 
 The gateway (`agentsec serve`, the `gateway` extra) is new and in preview: its config format may still change. Nothing in the library API is removed or made stricter.

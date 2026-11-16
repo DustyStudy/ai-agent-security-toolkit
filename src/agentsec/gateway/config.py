@@ -6,7 +6,8 @@ import hashlib
 import ipaddress
 import math
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -32,6 +33,16 @@ class Upstream:
     def api_key(self) -> str | None:
         """Resolved on every call, so a rotated secret file is picked up without a restart."""
         return resolve_secret(self.api_key_ref) if self.api_key_ref else None
+
+
+@dataclass(frozen=True)
+class McpUpstream:
+    name: str  # tools appear to clients as "<name>__<tool>"
+    url: str  # the upstream's streamable HTTP endpoint, e.g. https://mcp-jira.internal/mcp
+    auth_ref: str | None = None  # "env:NAME" or "file:/path": sent as a bearer token
+
+    def auth(self) -> str | None:
+        return resolve_secret(self.auth_ref) if self.auth_ref else None
 
 
 @dataclass(frozen=True)
@@ -70,6 +81,8 @@ class GatewayConfig:
     requests_per_min: int = 60
     concurrent_requests: int = 4
     body_timeout_s: float = 30.0
+    mcp_upstreams: dict[str, McpUpstream] = field(default_factory=dict)
+    mcp_session_idle_s: float = 3600.0
 
 
 def resolve_secret(ref: str) -> str:
@@ -95,6 +108,7 @@ _TOP = {
     "input",
     "limits",
     "upstreams",
+    "mcp_upstreams",
     "audit",
 }
 _SECTIONS: dict[str, set[str]] = {
@@ -129,9 +143,11 @@ _SECTIONS: dict[str, set[str]] = {
         "requests_per_min",
         "concurrent_requests",
         "body_timeout_s",
+        "mcp_session_idle_s",
     },
     "audit": {"file", "log_content", "cef_file"},
     "upstream": {"url", "model", "api_key"},
+    "mcp_upstream": {"url", "auth", "pins"},
     "bundle": {"dir", "public_key_file", "min_revision", "reload_interval_s", "state_file"},
 }
 
@@ -211,7 +227,53 @@ def _oidc(section: dict[str, Any]) -> OidcSettings:
     )
 
 
-def _single_policy(data: dict[str, Any], base: Path) -> PolicySet:
+MCP_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # no "_": "__" separates upstream and tool
+NAMESPACE = "__"
+
+
+def _mcp_upstreams(data: dict[str, Any], base: Path) -> tuple[dict[str, McpUpstream], dict]:
+    """``mcp_upstreams`` and, for single-policy configs, each upstream's pin file."""
+    raw = data.get("mcp_upstreams") or {}
+    if not isinstance(raw, dict):
+        raise ConfigError("mcp_upstreams must be a mapping")
+    upstreams, pins = {}, {}
+    for name in raw:
+        if not isinstance(name, str) or not MCP_NAME.fullmatch(name):
+            raise ConfigError(f"mcp_upstreams name {name!r} must be lowercase letters, digits, '-'")
+        u = _section(raw, name, "mcp_upstream")
+        url = _typed(u.get("url"), str, f"mcp_upstreams.{name}.url")
+        parts = urlsplit(url)
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            raise ConfigError(f"mcp_upstreams.{name}.url must be an http(s) URL")
+        if parts.username or parts.password or parts.query or parts.fragment:
+            raise ConfigError(
+                f"mcp_upstreams.{name}.url must not hold credentials, query or fragment"
+            )
+        auth = u.get("auth")
+        if auth is not None and (
+            not isinstance(auth, str) or not auth.startswith(("env:", "file:"))
+        ):
+            raise ConfigError(f"mcp_upstreams.{name}.auth must be 'env:NAME' or 'file:/path'")
+        if "pins" in u:
+            if "bundle" in data:
+                raise ConfigError(f"with bundle, mcp_upstreams.{name}.pins goes in the bundle")
+            pins[name] = _pin_file(base / _typed(u["pins"], str, f"mcp_upstreams.{name}.pins"))
+        upstreams[name] = McpUpstream(name=name, url=url, auth_ref=auth)
+    return upstreams, pins
+
+
+def _pin_file(path: Path) -> dict[str, str]:
+    from agentsec.integrations.mcp import ToolPins  # no mcp SDK needed for pins
+
+    try:
+        return ToolPins.load(path).pins
+    except (OSError, ValueError) as e:
+        raise ConfigError(f"{path.name}: {e}") from None
+
+
+def _single_policy(
+    data: dict[str, Any], base: Path, mcp_pins: dict[str, dict[str, str]] | None = None
+) -> PolicySet:
     """One policy for every authenticated user, from ``policy``, ``mode``, ``output``, ``input``."""
     policy_section = data.get("policy")
     if not isinstance(policy_section, str):
@@ -238,15 +300,18 @@ def _single_policy(data: dict[str, Any], base: Path) -> PolicySet:
         ),
         stream_mode=stream_mode,
         holdback_chars=holdback_chars,
+        mcp=None,  # one policy for everyone: every configured MCP upstream, gated by its keys
     )
     # First 128 bits of the file's sha256: under the 64 characters log_content=False hashes.
     return PolicySet(
-        revision="sha256:" + hashlib.sha256(raw_policy).hexdigest()[:32], groups=(entry,)
+        revision="sha256:" + hashlib.sha256(raw_policy).hexdigest()[:32],
+        groups=(entry,),
+        mcp_pins=mcp_pins or {},
     )
 
 
 def _bundle(
-    section: dict[str, Any], base: Path, upstreams: set[str]
+    section: dict[str, Any], base: Path, upstreams: set[str], mcp_upstreams: set[str]
 ) -> tuple[BundleSettings, PolicySet]:
     from agentsec.gateway.bundle import (
         BundleError,
@@ -269,7 +334,7 @@ def _bundle(
         key = load_public_key((base / key_file).read_bytes())
         settings = BundleSettings(str(base / root), key, min_revision, float(interval), state_file)
         # No valid bundle, no gateway: never start without a verified policy.
-        policies = load_bundle(settings.dir, key, upstreams=upstreams)
+        policies = load_bundle(settings.dir, key, upstreams=upstreams, mcp_upstreams=mcp_upstreams)
         if policies.numeric_revision is not None and policies.numeric_revision < min_revision:
             raise BundleError(f"bundle revision is below bundle.min_revision ({min_revision})")
         if state_file is not None:
@@ -363,15 +428,18 @@ def load_config(path: str | Path) -> GatewayConfig:
             api_key_ref=api_key,
         )
 
+    mcp_upstreams, mcp_pins = _mcp_upstreams(data, base)
     limits = _section(data, "limits")
     bundle = None
     if "bundle" in data:
         if any(k in data for k in ("policy", "mode", "output", "input")):
             # With a bundle every group carries its own; a second source would be ambiguous.
             raise ConfigError("with bundle, put policy, mode, output and input in the bundle")
-        bundle, policies = _bundle(_section(data, "bundle"), base, set(upstreams))
+        bundle, policies = _bundle(
+            _section(data, "bundle"), base, set(upstreams), set(mcp_upstreams)
+        )
     else:
-        policies = _single_policy(data, base)
+        policies = _single_policy(data, base, mcp_pins)
     audit = _section(data, "audit")
     audit_file = _typed(audit.get("file"), str, "audit.file")
     cef_file = audit.get("cef_file")
@@ -406,4 +474,6 @@ def load_config(path: str | Path) -> GatewayConfig:
         requests_per_min=_positive(limits, "requests_per_min", 60),
         concurrent_requests=_positive(limits, "concurrent_requests", 4),
         body_timeout_s=_positive(limits, "body_timeout_s", 30.0, float),
+        mcp_upstreams=mcp_upstreams,
+        mcp_session_idle_s=_positive(limits, "mcp_session_idle_s", 3600.0, float),
     )

@@ -33,7 +33,7 @@ dependencies = [
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
 mcp = ["mcp>=2"]
-gateway = ["uvicorn>=0.30"]
+gateway = ["uvicorn>=0.30", "pyjwt[crypto]>=2.8"]
 langchain = ["langchain-core>=0.3"]
 dev = [
     "pytest>=8.0",

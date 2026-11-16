@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from agentsec.gateway.oidc import SUPPORTED_ALGORITHMS, OidcSettings
-from agentsec.gateway.policyset import ANY_GROUP, PolicySet, group_policy
+from agentsec.gateway.policyset import ANY_GROUP, PolicySet, group_policy, stream_settings
 from agentsec.sandbox.policy import Policy
 
 
@@ -119,7 +119,7 @@ _SECTIONS: dict[str, set[str]] = {
         "jwks_cache_s",
         "leeway_s",
     },
-    "output": {"allowed_hosts", "protected"},
+    "output": {"allowed_hosts", "protected", "stream_mode", "holdback_chars"},
     "input": {"block_on_injection", "spotlight_tool_results"},
     "limits": {
         "max_body_bytes",
@@ -222,6 +222,10 @@ def _single_policy(data: dict[str, Any], base: Path) -> PolicySet:
     if mode not in {"enforce", "monitor"}:
         raise ConfigError("mode must be 'enforce' or 'monitor'")
     output, inp = _section(data, "output"), _section(data, "input")
+    try:
+        stream_mode, holdback_chars = stream_settings(output, "output")
+    except ValueError as e:
+        raise ConfigError(str(e)) from None
     entry = group_policy(
         ANY_GROUP,
         policy,
@@ -232,6 +236,8 @@ def _single_policy(data: dict[str, Any], base: Path) -> PolicySet:
         spotlight_tool_results=_typed(
             inp.get("spotlight_tool_results", False), bool, "spotlight_tool_results"
         ),
+        stream_mode=stream_mode,
+        holdback_chars=holdback_chars,
     )
     # First 128 bits of the file's sha256: under the 64 characters log_content=False hashes.
     return PolicySet(

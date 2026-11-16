@@ -24,7 +24,7 @@ from typing import Any
 
 import yaml
 
-from agentsec.gateway.policyset import ANY_GROUP, PolicySet, group_policy
+from agentsec.gateway.policyset import ANY_GROUP, PolicySet, group_policy, stream_settings
 from agentsec.sandbox.policy import Policy, PolicyError
 
 MANIFEST = "manifest.yaml"
@@ -33,6 +33,7 @@ FORMAT = "agentsec-bundle-v1"
 MAX_FILE_BYTES = 1024 * 1024
 
 _ENTRY_KEYS = {"group", "tools", "mode", "models", "output", "input"}
+_OUTPUT_KEYS = {"allowed_hosts", "protected", "stream_mode", "holdback_chars"}
 _MANIFEST_KEYS = {"revision", "created", "expires", "group_policies"}
 
 
@@ -257,8 +258,12 @@ def load_bundle(
                 f"{where}.models names unknown upstreams: {sorted(set(models) - upstreams)}"
             )
         output, inp = e.get("output") or {}, e.get("input") or {}
-        if not isinstance(output, dict) or set(output) - {"allowed_hosts", "protected"}:
-            raise BundleError(f"{where}.output takes allowed_hosts and protected")
+        if not isinstance(output, dict) or set(output) - _OUTPUT_KEYS:
+            raise BundleError(f"{where}.output takes {', '.join(sorted(_OUTPUT_KEYS))}")
+        try:
+            stream_mode, holdback_chars = stream_settings(output, f"{where}.output")
+        except ValueError as err:
+            raise BundleError(str(err)) from None
         if not isinstance(inp, dict) or set(inp) - {"block_on_injection", "spotlight_tool_results"}:
             raise BundleError(f"{where}.input takes block_on_injection and spotlight_tool_results")
         flags = {
@@ -277,6 +282,8 @@ def load_bundle(
                     output.get("allowed_hosts", []), f"{where}.output.allowed_hosts"
                 ),
                 protected=_strs(output.get("protected", []), f"{where}.output.protected"),
+                stream_mode=stream_mode,
+                holdback_chars=holdback_chars,
                 **flags,
             )
         )

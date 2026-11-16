@@ -42,6 +42,8 @@ input:
 output:
   allowed_hosts: [corp.example]     # links and images to other hosts are stripped from answers
   protected: []                     # strings that must never appear in output (system-prompt canaries)
+  stream_mode: buffer               # holdback: stream text once checked and holdback_chars behind
+  # holdback_chars: 256             # 32-8192; secrets shorter than this are caught before release
 
 limits:
   max_body_bytes: 1048576

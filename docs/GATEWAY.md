@@ -31,7 +31,10 @@ client.chat.completions.create(model="llama3.1-8b", messages=[{"role": "user", "
 3. **Filter tools.** Tools the policy does not allow, and tool definitions that look poisoned, are removed before the model sees them. A `tool_choice` naming a removed tool gets a 400.
 4. **Screen input.** Every message is scanned for prompt injection. `role: tool` messages count as untrusted and taint the request, whatever their content, so the policy's taint rules (deny side-effecting tools after reading untrusted content) apply to the answer. A flagged message blocks the request.
 5. **Check the answer.** Each `tool_calls` entry goes through `ToolGuard.authorize` (allowlist, argument rules, per-request limits, taint). Denied calls are removed. Allowed ones are re-serialized from the arguments that were checked and get a gateway-issued id; a call whose arguments contain a secret or a protected string is withheld too. Text goes through `OutputGuard` (secrets, PII, exfiltration links, dangerous markup). Unknown response fields are dropped.
-6. **Streaming** (`stream: true`) is served from the checked answer: the gateway calls the model without streaming, checks the whole answer, then sends it as SSE chunks. Time to first token is the full generation time.
+6. **Streaming** (`stream: true`) has two modes, set per group in `output.stream_mode`:
+   - `buffer` (default): the gateway calls the model without streaming, checks the whole answer, then sends it as SSE chunks. Time to first token is the full generation time.
+   - `holdback`: the gateway streams from the model and releases text once it is more than `output.holdback_chars` (default 256) non-whitespace characters behind the newest text and the output checks find nothing in the window around it. Text after an unclosed `[`, `![`, `<` (quoted attribute values included) or code fence is held until it closes, so a link is checked whole. A reference-style image (`![a]`, `![a][b]`) can use a URL defined anywhere in the answer, so everything from it on is held for the final check. A model stream that ends without `[DONE]` is an upstream error, never a finished answer. Tool calls are always held until the answer ends, then checked as in buffer mode. If the window ever holds something to redact or block, or the held text grows past 8 times the window, the rest of that answer is buffered.
+   - Either way, the full text is checked again at the end. In holdback mode, if that check changes text that was already sent (a secret longer than the window, say), the gateway ends the stream with an `output_violation` error event and no `[DONE]`, and writes a `gateway_output_violation_after_delivery` audit record with `severity: high`. Clients should treat a stream without `[DONE]` as failed.
 7. **Audit.** Every request, decision and change goes to a hash-chained JSONL log, with the user as `actor`, the request id as `session_id`, and the group list and policy revision on the request record. `cef_file` adds a CEF copy for a SIEM forwarder.
 
 `mode: monitor` computes and logs every decision but delivers requests and answers unchanged. Identity, body and rate limits apply in both modes.
@@ -96,7 +99,8 @@ Labels are event names and status codes only, never users or request content. To
 
 ## Limits in this version
 
-- Holdback streaming and the MCP gateway are later phases of the design.
+- The MCP gateway is a later phase of the design.
+- Holdback cannot take back text it released: a secret or protected string longer than `holdback_chars`, or a rule that needs the whole answer, is only caught by the final check, which then cuts the stream short.
 - `/readyz` does not probe the upstreams or the audit file; a failed audit write shows as 503 responses and stops the event counters.
 - Without `bundle.state_file`, rollback protection across restarts relies on `min_revision` and `expires`.
 - IDE tools that only take a static API key cannot get an OIDC token; see the design's open questions.
@@ -105,4 +109,4 @@ Labels are event names and status codes only, never users or request content. To
 - Models that write tool calls as JSON text instead of `tool_calls` are not recognised as tool calls.
 - The whole history is rescanned and re-audited on every turn.
 - With `log_content: false`, prompt and answer strings over 64 characters are stored as a hash and length; shorter ones, such as a short prompt, are stored in full after redaction. Decision fields (`reasons`, `error`, `tools`, `validators`, `signals`, `policy_rev`, `groups`) stay readable. Denial reasons can name a URL's host.
-- A client disconnect does not cancel the upstream call.
+- A client disconnect does not cancel the upstream call in buffer mode. In holdback mode the upstream connection is closed at the next chunk, if the server reports the disconnect as a failed send.

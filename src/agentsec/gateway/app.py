@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Generator, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,6 +34,7 @@ from agentsec.gateway.bundle import (
     write_state,
 )
 from agentsec.gateway.config import GatewayConfig, Upstream
+from agentsec.gateway.holdback import Holdback
 from agentsec.gateway.metrics import CountingSink, Metrics
 from agentsec.gateway.oidc import OidcVerifier, TokenRejected, fetch_jwks
 from agentsec.gateway.policyset import GroupPolicy, PolicySet
@@ -51,6 +52,7 @@ Receive = Callable[[], Awaitable[dict[str, Any]]]
 Send = Callable[[dict[str, Any]], Awaitable[None]]
 # (upstream, JSON body, timeout seconds, max response bytes) -> parsed JSON response
 Transport = Callable[[Upstream, bytes, float, int], Any]
+StreamTransport = Callable[[Upstream, bytes, float, int], Generator[dict[str, Any], None, None]]
 
 _REQUEST_FIELDS = {
     "model", "messages", "tools", "tool_choice", "parallel_tool_calls", "temperature",
@@ -62,6 +64,7 @@ _ROLES = {"system", "developer", "user", "assistant", "tool"}
 _FINISH = {"stop", "length", "tool_calls", "content_filter"}
 WITHHELD_NOTICE = "A tool call was withheld by policy."
 MAX_CONCURRENT_AUTH = 8  # token verifications in flight, across all clients
+MAX_STREAM_TOOL_CALLS = 64  # tool-call indexes accepted in one streamed answer
 _LOG = logging.getLogger("agentsec.gateway")
 # Decision metadata stays readable with log_content off; prompts and answers are still hashed.
 # These hold policy reasons, names and error kinds, never message text.
@@ -132,6 +135,66 @@ def http_transport(upstream: Upstream, body: bytes, timeout: float, max_bytes: i
         raise UpstreamError("upstream response is not JSON") from None
 
 
+def http_stream_transport(
+    upstream: Upstream, body: bytes, timeout: float, max_bytes: int
+) -> Generator[dict[str, Any], None, None]:
+    """Yield the upstream's SSE ``data:`` events as JSON. The same deadline and size cap."""
+    headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+    key = upstream.api_key()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    req = urllib.request.Request(  # noqa: S310 - URL is from config and checked as http(s)
+        upstream.url + "/chat/completions", data=body, headers=headers, method="POST"
+    )
+    deadline = time.monotonic() + timeout
+    try:
+        # Closing this generator (client gone) closes the connection: the upstream stops.
+        with _OPENER.open(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                raise UpstreamError(f"upstream returned HTTP {resp.status}")
+            total, buf, data = 0, b"", []
+            while True:
+                if time.monotonic() > deadline:
+                    raise TimeoutError
+                chunk = resp.read1(65536)
+                total += len(chunk)
+                if total > max_bytes:
+                    raise UpstreamError("upstream response too large")
+                if not chunk:
+                    if not buf.endswith(b"\r"):
+                        # A cut connection must not pass for a finished answer.
+                        raise UpstreamError("upstream stream ended without [DONE]")
+                    chunk = b"\n"  # the CR kept below ended the last line (not counted)
+                buf += chunk
+                # SSE lines end in CRLF, CR or LF. A final CR may be half a CRLF: keep it.
+                keep = b"\r" if buf.endswith(b"\r") else b""
+                head = buf[:-1] if keep else buf
+                *lines, rest = head.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+                buf = rest + keep
+                for line in lines:
+                    if line.startswith(b"data:"):
+                        value = line[5:]
+                        data.append(value[1:] if value.startswith(b" ") else value)
+                        continue
+                    if line or not data:
+                        continue  # comments, other fields, or a blank line with no event
+                    event, data = b"\n".join(data), []  # a blank line ends the event
+                    if event.strip() == b"[DONE]":
+                        return
+                    try:
+                        yield json.loads(event)
+                    except ValueError:
+                        raise UpstreamError("upstream stream event is not JSON") from None
+    except urllib.error.HTTPError as e:
+        raise UpstreamError(f"upstream returned HTTP {e.code}") from None
+    except urllib.error.URLError as e:
+        raise UpstreamError(f"upstream unreachable: {type(e).__name__}") from None
+    except TimeoutError:
+        raise
+    except OSError as e:
+        raise UpstreamError(f"upstream unreachable: {type(e).__name__}") from None
+
+
 class _Limiter:
     """Per-user request rate and concurrency, in memory: limits are per gateway process."""
 
@@ -196,12 +259,14 @@ class Gateway:
         config: GatewayConfig,
         *,
         transport: Transport = http_transport,
+        stream_transport: StreamTransport = http_stream_transport,
         sink: AuditSink | None = None,
         clock: Callable[[], float] = time.monotonic,
         jwks_fetch: Callable[[str], dict[str, Any]] = fetch_jwks,
     ) -> None:
         self.config = config
         self._transport = transport
+        self._stream_transport = stream_transport
         if sink is None:
             sink = FileSink(config.audit_file)
             if config.cef_file:
@@ -231,6 +296,10 @@ class Gateway:
             "gateway_start",
             policy_rev=config.policies.revision,
             groups=[g.group for g in config.policies.groups],
+            # Holdback can deliver text the final check later objects to: say who opted in.
+            holdback_groups=[
+                g.group for g in config.policies.groups if g.stream_mode == "holdback"
+            ],
         )
 
     # ------------------------------------------------------------------ ASGI
@@ -271,6 +340,9 @@ class Gateway:
                 status, payload, stream = await asyncio.to_thread(
                     self._complete, body, user, groups, request_id, policies, gp
                 )
+                if not isinstance(payload, dict):  # holdback: released as it is checked
+                    await self._stream_events(send, payload, request_id)
+                    return
         except HttpError as e:
             if not e.audited:
                 self._log_rejection(e, request_id)
@@ -500,7 +572,7 @@ class Gateway:
         request_id: str,
         policies: PolicySet,
         gp: GroupPolicy,
-    ) -> tuple[int, dict[str, Any], bool]:
+    ) -> tuple[int, dict[str, Any] | Generator[dict[str, Any], None, None], bool]:
         cfg = self.config
         log = self._audit.bind(actor=user, session_id=request_id)
         enforce = gp.mode == "enforce"
@@ -515,6 +587,7 @@ class Gateway:
             mode=gp.mode,
             model=req["model"],
             stream=stream,
+            stream_mode=gp.stream_mode if stream else None,
         )
         upstream = cfg.upstreams[req["model"]]
         guard = ToolGuard(gp.policy, audit=log)
@@ -535,6 +608,15 @@ class Gateway:
             if enforce:
                 raise HttpError(400, "request blocked by input policy", "input_blocked")
 
+        if stream and gp.stream_mode == "holdback":
+            req["model"], req["stream"] = upstream.model, True
+            if include_usage:
+                req["stream_options"] = {"include_usage": True}
+            events = self._holdback_events(
+                upstream, json.dumps(req).encode(), mw, session, enforce, log, gp,
+                request_id, include_usage, removed_tools,
+            )  # fmt: skip
+            return 200, events, True
         req["model"], req["stream"] = upstream.model, False
         payload = json.dumps(req).encode()
         try:
@@ -559,6 +641,172 @@ class Gateway:
             finish_reason=result["choices"][0]["finish_reason"],
         )
         return 200, result, stream
+
+    def _holdback_events(
+        self,
+        upstream: Upstream,
+        payload: bytes,
+        mw: AgentMiddleware,
+        session: Session,
+        enforce: bool,
+        log: AuditLogger,
+        gp: GroupPolicy,
+        request_id: str,
+        include_usage: bool,
+        removed_tools: list[str],
+    ) -> Generator[dict[str, Any], None, None]:
+        """Chunks to send. Text is released through Holdback; tool calls only at the end."""
+        cfg = self.config
+        base = {
+            "id": f"chatcmpl-{request_id}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": upstream.name,
+        }
+
+        def chunk(delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
+            return base | {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+
+        held = Holdback(gp.output_guard, gp.holdback_chars)
+        calls: dict[int, dict[str, Any]] = {}
+        finish: Any = None
+        usage: Any = None
+        first = True
+        upstream_events = self._stream_transport(
+            upstream, payload, cfg.upstream_timeout_s, cfg.max_response_bytes
+        )
+        try:
+            for event in upstream_events:
+                if not isinstance(event, dict):
+                    raise UpstreamError("upstream stream event is not an object")
+                if isinstance(event.get("usage"), dict):
+                    usage = event["usage"]
+                choices = event.get("choices")
+                if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                    continue
+                if choices[0].get("finish_reason") is not None:
+                    finish = choices[0]["finish_reason"]
+                delta = choices[0].get("delta")
+                delta = delta if isinstance(delta, dict) else {}
+                tool_deltas = delta.get("tool_calls") or []
+                if not isinstance(tool_deltas, list):
+                    raise UpstreamError("malformed streamed tool call")
+                for tc in tool_deltas:
+                    _merge_tool_call(calls, tc)
+                text = delta.get("content")
+                if text is not None and not isinstance(text, str):
+                    raise UpstreamError("stream content is not a string")
+                out = held.feed(text) if text else ""
+                if out:
+                    yield chunk(
+                        {"role": "assistant", "content": out} if first else {"content": out}
+                    )
+                    first = False
+        except UpstreamError as e:
+            log.log("gateway_upstream_error", upstream=upstream.name, error=str(e))
+            raise HttpError(502, "upstream error", "upstream_error", audited=True) from None
+        except TimeoutError:
+            log.log("gateway_upstream_error", upstream=upstream.name, error="timeout")
+            raise HttpError(504, "upstream timeout", "upstream_timeout", audited=True) from None
+        except GeneratorExit:
+            log.log("gateway_client_disconnected", released_chars=len(held.released))
+            raise
+        finally:
+            upstream_events.close()  # client gone or upstream failed: stop the upstream too
+
+        raw = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": held.text or None,
+                        "tool_calls": [calls[i] for i in sorted(calls)],
+                    },
+                    "finish_reason": finish,
+                }
+            ],
+            "usage": usage,
+        }
+        result = self._check_response(raw, mw, session, enforce, log, gp)
+        msg, final_reason = result["choices"][0]["message"], result["choices"][0]["finish_reason"]
+        final, sent = msg.get("content") or "", held.released
+        if not final.startswith(sent):
+            # Already delivered and cannot be recalled: end without [DONE], loudly.
+            log.log(
+                "gateway_output_violation_after_delivery",
+                severity="high",
+                released_chars=len(sent),
+                enforced=enforce,
+            )
+            raise HttpError(
+                502, "output policy violation after delivery", "output_violation", audited=True
+            )
+        delta_out: dict[str, Any] = {"role": "assistant"} if first else {}
+        rest = final[len(sent) :]
+        if rest or first:
+            delta_out["content"] = rest or msg.get("content")
+        if msg.get("tool_calls"):
+            delta_out["tool_calls"] = [{"index": i, **tc} for i, tc in enumerate(msg["tool_calls"])]
+        if delta_out:
+            yield chunk(delta_out)
+        yield chunk({}, final_reason)
+        if include_usage and "usage" in result:
+            yield base | {"choices": [], "usage": result["usage"]}
+        log.log(
+            "gateway_response",
+            tools_removed=removed_tools,
+            finish_reason=final_reason,
+            released_early=len(sent),
+            buffered=held.buffering,
+        )
+
+    async def _stream_events(
+        self, send: Send, events: Generator[dict[str, Any], None, None], request_id: str
+    ) -> None:
+        """Send holdback chunks. Before the first one an error is a normal HTTP error."""
+        started = False
+        try:
+            while True:
+                try:
+                    # Each step may wait on the upstream and run validators: off the loop.
+                    event = await asyncio.to_thread(next, events, None)
+                except Exception as e:  # noqa: BLE001 - mapped below; never leak internals
+                    if not started:
+                        raise
+                    if not isinstance(e, HttpError):
+                        _LOG.exception("holdback stream failed")
+                        e = HttpError(500, "internal error", "internal_error")
+                    error = {
+                        "error": {"message": e.message, "type": "gateway_error", "code": e.code}
+                    }
+                    # No [DONE]: a client must not mistake a cut-off stream for a whole answer.
+                    body = f"data: {json.dumps(error)}\n\n".encode()
+                    await send({"type": "http.response.body", "body": body})
+                    return
+                if event is None:
+                    break
+                if not started:
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 200,
+                            "headers": [
+                                (b"content-type", b"text/event-stream"),
+                                (b"x-request-id", request_id.encode()),
+                                (b"cache-control", b"no-store"),
+                            ],
+                        }
+                    )
+                    started = True
+                data = f"data: {json.dumps(event)}\n\n".encode()
+                await send({"type": "http.response.body", "body": data, "more_body": True})
+            await send({"type": "http.response.body", "body": b"data: [DONE]\n\n"})
+        except OSError:
+            if not started:
+                raise
+            # The client went away mid-stream: no second response; finally stops the upstream.
+        finally:
+            events.close()  # also audits the disconnect when the stream was cut short
 
     def _parse(self, body: bytes, gp: GroupPolicy) -> dict[str, Any]:
         try:
@@ -841,3 +1089,22 @@ class Gateway:
             data = f"data: {json.dumps(event)}\n\n".encode()
             await send({"type": "http.response.body", "body": data, "more_body": True})
         await send({"type": "http.response.body", "body": b"data: [DONE]\n\n"})
+
+
+def _merge_tool_call(calls: dict[int, dict[str, Any]], tc: Any) -> None:
+    """Assemble streamed tool-call fragments by index; nothing is released until the end."""
+    index = tc.get("index", 0) if isinstance(tc, dict) else None
+    if not isinstance(index, int) or isinstance(index, bool):
+        raise UpstreamError("malformed streamed tool call")
+    if not 0 <= index < MAX_STREAM_TOOL_CALLS:
+        raise UpstreamError("too many streamed tool calls")
+    call = calls.setdefault(
+        index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+    )
+    fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+    if isinstance(tc.get("id"), str) and not call["id"]:
+        call["id"] = tc["id"]
+    if isinstance(fn.get("name"), str) and not call["function"]["name"]:
+        call["function"]["name"] = fn["name"]  # sent once; a repeat must not grow the name
+    if isinstance(fn.get("arguments"), str):
+        call["function"]["arguments"] += fn["arguments"]

@@ -24,6 +24,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 - CI tests Python 3.14 on Linux, and 3.14 is listed in the classifiers.
+- The hash-pinned lock files are refreshed (`scripts/lock.py --upgrade`). No runtime dependency changed; the release SBOM tool moves to cyclonedx-bom 8.
 
 ## [0.7.0] - 2026-11-16
 

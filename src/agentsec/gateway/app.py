@@ -34,6 +34,7 @@ from agentsec.gateway.bundle import (
     write_state,
 )
 from agentsec.gateway.config import GatewayConfig, Upstream
+from agentsec.gateway.metrics import CountingSink, Metrics
 from agentsec.gateway.oidc import OidcVerifier, TokenRejected, fetch_jwks
 from agentsec.gateway.policyset import GroupPolicy, PolicySet
 from agentsec.integrations.mcp import scan_tool_definitions
@@ -208,6 +209,8 @@ class Gateway:
                 # carries on (and logs) if that copy fails.
                 cef = open(config.cef_file, "a", encoding="utf-8")  # noqa: SIM115 - lives with the app
                 sink = TeeSink(sink, CefSink(cef))
+        self.metrics = Metrics()
+        sink = CountingSink(sink, self.metrics)  # counts a record only once it was written
         # The chain head is read once here; bind() gives each request a logger on that chain.
         self._audit = AuditLogger(
             sink, actor="gateway", log_content=config.log_content, keep_fields=AUDIT_KEEP_FIELDS
@@ -234,6 +237,7 @@ class Gateway:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             return  # lifespan is turned off in serve(); websockets are not served
+        send = self._counted(send)
         request_id = uuid.uuid4().hex
         try:
             path, method = scope["path"], scope["method"]
@@ -283,6 +287,56 @@ class Gateway:
             await self._sse(send, payload, request_id)
         else:
             await self._json(send, status, payload, request_id)
+
+    def _counted(self, send: Send) -> Send:
+        async def counted(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                self.metrics.response(message["status"])
+            await send(message)
+
+        return counted
+
+    # ------------------------------------------------------------------ admin
+    async def admin(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """The admin listener: /healthz, /readyz, /metrics. No auth, so loopback only."""
+        if scope["type"] != "http":
+            return
+        request_id = uuid.uuid4().hex
+        path, method = scope["path"], scope["method"]
+        if method != "GET" or path not in {"/healthz", "/readyz", "/metrics"}:
+            await self._error(send, HttpError(404, "not found", "not_found"), request_id)
+            return
+        if path == "/healthz":
+            await self._json(send, 200, {"status": "ok"}, request_id)
+            return
+        try:
+            # Without traffic nothing else checks for a new bundle; this keeps readiness honest.
+            await asyncio.to_thread(self._maybe_reload)
+        except Exception:  # noqa: BLE001 - _maybe_reload logs its own failures
+            _LOG.exception("bundle reload from the admin listener failed")
+        policies = self._policies
+        if path == "/metrics":
+            body = self.metrics.render(policies).encode()
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [
+                        (b"content-type", b"text/plain; version=0.0.4; charset=utf-8"),
+                        (b"cache-control", b"no-store"),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
+        expired = policies.expires is not None and datetime.now(UTC) >= policies.expires
+        payload = {
+            "status": "policy_expired" if expired else "ready",
+            "policy_rev": policies.revision,
+            # Shown so a group left in monitor mode is not forgotten.
+            "monitor_groups": [g.group for g in policies.groups if g.mode == "monitor"],
+        }
+        await self._json(send, 503 if expired else 200, payload, request_id)
 
     # ------------------------------------------------------------ policy
     def _group_policy(self, groups: tuple[str, ...]) -> tuple[PolicySet, GroupPolicy]:

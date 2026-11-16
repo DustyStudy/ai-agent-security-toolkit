@@ -1,6 +1,6 @@
 # Design: agentsec gateway
 
-Status: draft, not implemented. Target: after 0.5.0. Owner: TBD.
+Status: phases 1 and 2 implemented in 0.6.0 (preview); phase 3 (MCP gateway) not implemented. Owner: TBD.
 
 ## Problem
 

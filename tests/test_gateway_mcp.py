@@ -727,3 +727,14 @@ def test_capacity_eviction_never_resets_taint(tmp_path, monkeypatch):
     gw._sweep()
     assert set(gw._states) == {"alice"}  # the clean ones go; the tainted one stays
     assert gw._states["alice"].session.tainted
+
+
+@pytest.mark.parametrize("installed", ["2.0.0", "2.2.9", "1.27.0"])
+def test_an_older_mcp_sdk_is_refused_with_a_clear_error(installed):
+    with pytest.raises(RuntimeError, match="2.3 or newer"):
+        gwmcp.require_sdk(installed)
+
+
+def test_the_tested_sdk_and_newer_are_accepted():
+    for installed in ("2.3.0", "2.10.1", "3.0.0"):
+        gwmcp.require_sdk(installed)

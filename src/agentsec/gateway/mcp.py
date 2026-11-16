@@ -220,6 +220,7 @@ class McpGateway:
         connector: Connector = connect_upstream,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        require_sdk()
         from mcp import types
         from mcp.server.lowlevel import Server
         from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -436,6 +437,23 @@ class McpGateway:
     def _error(self, text: str) -> Any:
         t = self._types
         return t.CallToolResult(content=[t.TextContent(type="text", text=text)], is_error=True)
+
+
+MIN_SDK = (2, 3)  # the session manager, MCPServer and 2026 protocol support this relies on
+
+
+def require_sdk(installed: str | None = None) -> None:
+    """Refuse an MCP SDK older than the one this endpoint was built and tested against."""
+    from importlib.metadata import version
+
+    raw = installed or version("mcp")
+    parts = tuple(int(p) for p in raw.split(".")[:2] if p.isdigit())
+    if parts < MIN_SDK:
+        need = ".".join(map(str, MIN_SDK))
+        raise RuntimeError(
+            f"mcp_upstreams needs the MCP SDK {need} or newer (installed: {raw}); "
+            f'pip install -U "mcp>={need}"'
+        )
 
 
 def _header(scope: Any, name: bytes) -> str | None:

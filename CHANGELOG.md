@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-16
+
+Phase 3 of the gateway, in preview: an MCP endpoint and access tokens for IDE clients. Tested end to end with Claude Code (list, call, taint denial, revocation). Nothing in the library API is removed or made stricter. The MCP endpoint needs the `mcp` extra as well as `gateway`, with MCP SDK 2.3 or newer (checked at startup).
+
 ### Added
 - Gateway access tokens (`tokens:`), for IDE MCP configs and scripts that only take a fixed header: a signed-in user mints one with `POST /tokens` (JSON only), lists and revokes their own with `GET /tokens` and `DELETE /tokens/<id>`; admins use `agentsec token list|revoke`. Tokens are `agt_` plus 256 random bits, stored as SHA-256 hashes in SQLite, short-lived (default 7 days, at most `max_ttl_days`), capped per user, and cannot manage tokens themselves. Audit records carry the `token_id`.
 - Gateway MCP endpoint (`mcp_upstreams`, needs the `gateway` and `mcp` extras): one streamable-HTTP `/mcp` in front of approved upstream MCP servers, the third phase of [docs/design/GATEWAY.md](docs/design/GATEWAY.md). The MCP SDK speaks the protocol (2025 sessions and the 2026 stateless revision); every `tools/list` and `tools/call` runs under the caller's identity and group. Tools are namespaced `<upstream>__<tool>`; `GuardedMCPClient` scans and pins definitions, applies the tool policy and refuses unlisted tools; taint is shared across upstreams and sessions per user, so a new session cannot drop it; a session id works only for its opener; upstream answers are size-capped. Bundles gain per-group `mcp: [upstreams]` and signed `mcp_pins`.
@@ -159,7 +163,8 @@ Tagged but never released; use 0.4.1.
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.4.0...v0.4.1

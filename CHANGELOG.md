@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-15
+
+Breaking (fails closed): `resolve_dns` is on by default for URL rules without a `hosts` allowlist, `GuardedMCPClient.call_tool` needs a prior `list_tools()`, path arguments reach the tool resolved, and `deny_args` refuses more spellings.
+
 ### Security
 - URL checks refuse hosts containing `\`, `%` or any character outside `[a-z0-9._-]` (IP literals excepted). `urlsplit` kept them in the host while WHATWG fetchers read `\` as `/` and percent-decode the host, so `http://169.254.169.254\y.allowed.com/` passed a `*.allowed.com` allowlist and `http://%31%32%37.0.0.1/` passed `block_private`.
 - `SafeCommandRunner` gives the command `stdin=DEVNULL` instead of the host's stdin (under an MCP stdio server, the JSON-RPC channel), and runs it in its own process group. Timeout, output overflow and normal exit now kill the processes it started, not just the direct child, so a background grandchild can no longer hold the pipes open past the timeout. On Windows the tree is killed with `taskkill /T`, which misses grandchildren orphaned after their parent exited; on POSIX a descendant that calls `setsid()` leaves the group and escapes. It is still not an OS sandbox.
@@ -136,7 +140,8 @@ Tagged but never released; use 0.4.1.
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.2.2...v0.3.0

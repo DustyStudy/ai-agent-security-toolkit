@@ -7,7 +7,7 @@
 [![Release](https://img.shields.io/github/v/release/DustyStudy/ai-agent-security-toolkit)](https://github.com/DustyStudy/ai-agent-security-toolkit/releases)
 [![PyPI](https://img.shields.io/pypi/v/ai-agent-security-toolkit)](https://pypi.org/project/ai-agent-security-toolkit/)
 
-**Fuzz, contain, validate, and audit LLM agents.** Four pieces that fit together:
+**Fuzz, contain, validate, and audit LLM agents.** Five pieces that fit together:
 
 | | Module | What it does |
 |---|---|---|
@@ -15,6 +15,7 @@
 | 2 | [`agentsec.sandbox`](src/agentsec/sandbox) | Deny-by-default tool allowlist for agent frameworks: per-argument validation, path confinement, SSRF checks on URL arguments, rate limits, human approval, and **taint tracking** that blocks side-effecting tools after untrusted content is read. Plus a no-shell subprocess runner. |
 | 3 | [`agentsec.middleware`](src/agentsec/middleware) | Output validation (secrets/PII, markdown-image exfiltration, XSS markup, JSON-schema, protected strings) and a **hash-chained, tamper-evident audit log** with secret redaction. |
 | 4 | [`agentsec.threatmodel`](src/agentsec/threatmodel) | **STRIDE-for-agents** threat catalog (25 threats mapped to the OWASP LLM Top 10 2025, the OWASP Top 10 for Agentic Applications 2026 and MITRE ATLAS) and a generator that turns a YAML system description into a threat model with data-flow diagram, threat register, and verification plan. |
+| 5 | [`agentsec.gateway`](src/agentsec/gateway) | **Gateway** (preview) in front of local models and MCP servers: SSO/OIDC identity and access tokens for IDEs, per-group policy in signed bundles, tool and taint enforcement on MCP calls, output checks, rate limits, metrics and the same audit trail. |
 
 ```mermaid
 flowchart LR
@@ -56,6 +57,7 @@ Read it this way: tool policy and output validation reduce the *dangerous* outco
 ```bash
 pip install ai-agent-security-toolkit                # from PyPI
 pip install "ai-agent-security-toolkit[anthropic]"   # optional: fuzz Claude models directly
+pip install "ai-agent-security-toolkit[gateway,mcp]" # optional: run the gateway (section 5)
 pip install -e ".[dev]"                              # from a clone, for development
 ```
 
@@ -147,7 +149,7 @@ Each has its own section in [`docs/SANDBOX.md`](docs/SANDBOX.md), with the limit
 | LangChain and LangGraph tools | `agentsec.integrations.langchain.guard_tools([...], guard, session)` |
 | MCP servers | `agentsec.integrations.mcp.GuardedMCPClient`: allowlists and pins tool definitions, and drops poisoned or changed ones |
 | External commands | `SafeCommandRunner`: no shell, executable and option allowlists, scrubbed environment, timeout. It is **not** an OS sandbox |
-| A central gateway in front of local models (preview) | `agentsec serve`: see [`docs/GATEWAY.md`](docs/GATEWAY.md) |
+| A central gateway in front of local models and MCP servers (preview) | `agentsec serve`: see [section 5](#5-put-a-gateway-in-front-of-local-models-and-mcp-servers-preview) |
 
 ## 3. Validate output and keep an audit trail
 
@@ -192,6 +194,46 @@ agentsec threatmodel render system.yaml -o THREATMODEL.md
 
 The generator selects candidate threats by component type, draws the data-flow diagram with trust-boundary crossings, gives each row a triage hint (raised for components that ingest untrusted input, have side effects, or hold sensitive data), and links each threat to its mitigations, the toolkit control that implements it, and the fuzzer categories that test it. See the worked example: [`docs/threat-model/EXAMPLE-support-copilot.md`](docs/threat-model/EXAMPLE-support-copilot.md), the [method and blank template](docs/threat-model/README.md), and `agentsec threatmodel catalog`. Each threat is also mapped to the [OWASP Top 10 for Agentic Applications (2026)](https://genai.owasp.org/2025/12/09/owasp-top-10-for-agentic-applications-the-benchmark-for-agentic-security-in-the-age-of-autonomous-ai/) and to [MITRE ATLAS](https://github.com/mitre-atlas/atlas-data) techniques (content release 2026.09). `agentsec threatmodel crosswalk` prints the [framework crosswalk](docs/threat-model/frameworks.md), which lists the toolkit controls and fuzzer categories behind each entry.
 
+## 5. Put a gateway in front of local models and MCP servers (preview)
+
+The library protects an app only if that app's team wires it in. `agentsec serve` is the version a security team can run for everyone: one service in front of the company's local models (Ollama, vLLM, LM Studio) and approved MCP servers, with identity, per-group policy and one audit trail that the security team controls.
+
+```bash
+pip install "ai-agent-security-toolkit[gateway,mcp]"
+agentsec serve --config examples/gateway.yaml --check   # validate, then drop --check to run
+```
+
+It has two endpoints, and they give different guarantees:
+
+| Endpoint | Who uses it | What the gateway can guarantee |
+|---|---|---|
+| `/v1/chat/completions`, `/v1/models` (OpenAI-compatible) | Apps and chat tools: change `base_url` | What reaches and leaves the model: tools the policy does not allow are never offered, denied tool calls are stripped from answers, secrets and exfiltration links are removed. It does **not** control what the client then runs. |
+| `/mcp` (streamable HTTP) | Claude Code, Cursor, Continue, agents | The gateway makes the tool call itself, so the tool policy, taint, argument checks and definition pins are **enforced**, as long as the MCP servers accept connections only from the gateway. |
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="https://llm-gateway.corp.example/v1", api_key="unused")  # behind an SSO proxy
+```
+
+```json
+{"mcpServers": {"corp": {"type": "http", "url": "https://llm-gateway.corp.example/mcp",
+  "headers": {"Authorization": "Bearer agt_..."}}}}
+```
+
+- **Identity:** an SSO proxy's headers (accepted only from its address), or OIDC bearer tokens checked against your IdP's keys. IDE MCP configs, which take only a fixed header, use **access tokens**: a signed-in user mints one with `POST /tokens`. They're stored only as hashes, short-lived (7 days by default), revocable by the user or an admin (`agentsec token revoke`), and a token cannot mint more.
+- **Per-group policy in signed bundles:** each group gets its own tool policy, models, MCP servers, output rules and stream mode, signed with Ed25519 and reloaded without a restart. The gateway refuses rollbacks, and stops serving (503) when a bundle expires.
+- **On every call:** the request is rebuilt from an allowlist of fields, input is screened for injections, tool calls are checked and taint is tracked (a document from one MCP server cannot drive an email through another), the output guard runs on text and tool arguments, and per-user rate and concurrency limits apply.
+- **Streaming:** `buffer` (check the whole answer, then stream it) or `holdback` (stream text once it is checked and a set distance behind the newest text). If the final check objects to text already sent, the stream is cut off with an error event and no `[DONE]`.
+- **Operations:** a hash-chained audit log that names the user and the token used, a CEF copy for the SIEM, and `/metrics` and `/readyz` on a separate listener that only accepts connections from the same machine. Failures fail closed: an audit write that fails, an upstream error or an expired bundle gives a 5xx, never an unchecked answer.
+
+**Measured, not asserted:**
+- Llama 3.1 8B under the fuzzer: tool misuse and exfiltration went from 30% attack success on its own to 0% behind the gateway (40 cases).
+- CI fuzzes the real gateway in front of a model that obeys every injection.
+- Claude Code was connected to `/mcp` with an access token. It listed only allowed tools, and the gateway refused an email after an untrusted document had been read, in a new Claude Code session that had never seen the document.
+
+Setup, every setting and the failure table are in [docs/GATEWAY.md](docs/GATEWAY.md), and the threat model and design are in [docs/design/GATEWAY.md](docs/design/GATEWAY.md).
+
 ## Coverage against OWASP Top 10 for LLM Applications (2025)
 
 | Risk | Where this toolkit helps |
@@ -205,7 +247,7 @@ The generator selects candidate threats by component type, draws the data-flow d
 | LLM07 System prompt leakage | Fuzzer `prompt_leak` category, `ProtectedStringValidator` |
 | LLM08 Vector and embedding weaknesses | Catalog entries only |
 | LLM09 Misinformation | Out of scope |
-| LLM10 Unbounded consumption | Per-session call limits, subprocess timeouts and output caps |
+| LLM10 Unbounded consumption | Per-session call limits, subprocess timeouts and output caps; per-user rate, concurrency, body and response limits in the gateway |
 
 The catalog also covers all ten OWASP agentic risks; the [crosswalk](docs/threat-model/frameworks.md) shows which toolkit controls back each one. A mapping means a threat is an instance of, or contributes to, that entry, not that the entry is mitigated. NIST AI RMF and ISO/IEC 42001 are not mapped.
 
@@ -216,6 +258,7 @@ The catalog also covers all ten OWASP agentic risks; the [crosswalk](docs/threat
 - **The corpus is a starting set** of well-known technique families, not an exhaustive or adaptive attacker. Extend it with your own payloads (`FuzzConfig(corpus=...)`).
 - **The scanner is a tripwire.** Its documented bypasses are asserted in the tests on purpose.
 - **Output validators are pattern-based** and will not catch data a model re-encodes.
+- **The gateway is a preview.** Its config format may still change. It runs as one process (rate limits and the audit chain are per process). OIDC has not been tested against a real identity provider. Of the IDE clients, only Claude Code has been tried. On the model endpoint it controls what reaches and leaves the model, not what the client runs. It is a control only if model and MCP servers accept connections from the gateway alone.
 - **No OS-level isolation.** Use containers/microVMs for code execution, and IMDSv2 with hop limit 1 for cloud-hosted agents.
 
 ## Development

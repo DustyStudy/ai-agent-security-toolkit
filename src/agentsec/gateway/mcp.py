@@ -49,6 +49,7 @@ class Caller:
     policies: PolicySet
     gp: GroupPolicy
     request_id: str
+    token_id: str | None = None  # the access token used, if any (recorded on audit records)
 
 
 @contextlib.asynccontextmanager
@@ -417,13 +418,19 @@ class McpGateway:
                 self._config.upstream_timeout_s,
             )
         except ToolDenied as e:
-            state.audit.log("gateway_mcp_call", tool=name, allowed=False, reason=str(e))
+            state.audit.log(
+                "gateway_mcp_call",
+                tool=name,
+                allowed=False,
+                reason=str(e),
+                token_id=caller.token_id,
+            )
             return self._error(f"denied by policy: {e}")
         except Exception as e:  # noqa: BLE001 - an MCP error result, never a crash or a leak
             state.drop((rev, upstream))  # reconnect, and list again, before the next call
             state.audit.log("gateway_mcp_upstream_error", upstream=upstream, error=_reason(e))
             return self._error("upstream error")
-        state.audit.log("gateway_mcp_call", tool=name, allowed=True)
+        state.audit.log("gateway_mcp_call", tool=name, allowed=True, token_id=caller.token_id)
         return result
 
     def _error(self, text: str) -> Any:

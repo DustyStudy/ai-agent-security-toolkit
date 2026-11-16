@@ -180,6 +180,40 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_token(args: argparse.Namespace) -> int:
+    from datetime import UTC, datetime
+
+    from agentsec.gateway.config import ConfigError, load_config
+    from agentsec.gateway.tokens import TokenStore
+
+    try:
+        settings = load_config(args.config).tokens
+        if settings is None:
+            raise ConfigError("the config has no tokens section")
+        store = TokenStore(settings.store)
+    except (ConfigError, OSError, ValueError) as e:
+        print(f"token {args.action} failed: {e}", file=sys.stderr)
+        return 1
+
+    def when(ts: float | None) -> str:
+        return "-" if ts is None else datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%d %H:%M")
+
+    # No issue command: a token is issued only after an SSO sign-in (POST /tokens). Revocations
+    # are recorded in the store; the gateway's audit chain belongs to the gateway process.
+    if args.action == "list":
+        for t in store.list(user=args.user):
+            state = "revoked" if t.revoked else "live"
+            print(f"{t.id}  {t.user:<24} {state:<7} expires {when(t.expires)}  "
+                  f"last used {when(t.last_used)}  {t.name}")  # fmt: skip
+        return 0
+    if (args.id is None) == (args.user is None):
+        print("token revoke takes --id ID or --user USER", file=sys.stderr)
+        return 2
+    count = int(store.revoke(args.id)) if args.id else store.revoke_user(args.user)
+    print(f"revoked {count} token(s)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agentsec", description="Security toolkit for LLM agents.")
     p.add_argument("--version", action="version", version=f"agentsec {__version__}")
@@ -261,6 +295,17 @@ def build_parser() -> argparse.ArgumentParser:
     bv.add_argument("dir")
     bv.add_argument("--public-key", required=True, help="Ed25519 public key PEM file")
     b.set_defaults(func=cmd_bundle)
+
+    t = sub.add_parser("token", help="List or revoke gateway access tokens (admin).")
+    t_sub = t.add_subparsers(dest="action", required=True)
+    tl = t_sub.add_parser("list", help="List tokens (never the token values).")
+    tl.add_argument("--config", required=True, help="the gateway config with a tokens section")
+    tl.add_argument("--user", help="only this user's tokens")
+    tr = t_sub.add_parser("revoke", help="Revoke one token, or every token of a user.")
+    tr.add_argument("--config", required=True, help="the gateway config with a tokens section")
+    tr.add_argument("--id", help="the token id")
+    tr.add_argument("--user", help="revoke all of this user's tokens")
+    t.set_defaults(func=cmd_token)
     return p
 
 

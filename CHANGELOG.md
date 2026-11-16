@@ -22,6 +22,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Gateway: the per-user rate limiter kept an entry for every user it had ever seen. Users idle for a full window are now forgotten.
 - Gateway: expired and revoked access tokens are deleted from the store 7 days afterwards. Issuing and revoking in a loop grew the table and every `GET /tokens` answer without bound.
 
+### Changed
+- CI tests Python 3.14 on Linux, and 3.14 is listed in the classifiers.
+
 ## [0.7.0] - 2026-11-16
 
 Phase 3 of the gateway, in preview: an MCP endpoint and access tokens for IDE clients. Tested end to end with Claude Code (list, call, taint denial, revocation). Nothing in the library API is removed or made stricter. The MCP endpoint needs the `mcp` extra as well as `gateway`, with MCP SDK 2.3 or newer (checked at startup).

@@ -53,6 +53,8 @@ limits:
   upstream_timeout_s: 120
   requests_per_min: 60     # per user, per gateway process
   concurrent_requests: 4   # per user
+  max_connections: 1000    # all clients together, before authentication; above it, 503
+  shutdown_timeout_s: 30   # on SIGTERM, requests in flight get this long to finish
 
 upstreams:                 # "model" in a request selects one of these by name; clients never pass a URL
   llama3.1-8b:

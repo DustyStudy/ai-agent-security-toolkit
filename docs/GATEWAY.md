@@ -153,6 +153,7 @@ Labels are event names and status codes only, never users or request content. To
 | No group policy matches the user | 403 |
 | Bundle expired | 503 |
 | Rate or concurrency limit | 429 |
+| More than `limits.max_connections` (default 1000) connections and requests open | 503 from the HTTP server: plain text, not audited or counted in `/metrics` |
 | More than 8 token verifications in flight (`oidc` mode) | 503 |
 
 ## Deployment requirements
@@ -160,6 +161,8 @@ Labels are event names and status codes only, never users or request content. To
 - **The gateway must be the only route to the model servers.** Ollama has no authentication; bind it to localhost or a network only the gateway can reach. Otherwise users skip the gateway.
 - **TLS.** A non-loopback `listen.host` needs `listen.tls`, or `tls_terminated_by_proxy: true` when the auth proxy terminates TLS on the same host or a trusted network.
 - **One process.** Rate limits and the audit chain are per process. Run one replica per audit file.
+- **Shutdown.** On SIGTERM the gateway stops accepting connections and gives requests in flight `limits.shutdown_timeout_s` (default 30, whole seconds) to finish, then closes them. Set the orchestrator's grace period (Kubernetes `terminationGracePeriodSeconds`) a little above it.
+- **Idle connections.** `limits.max_connections` bounds the work the gateway accepts, not the sockets a client can hold open: a connection that never sends a request stays open and counts towards the cap. Put a proxy or load balancer with header and idle timeouts in front of an internet-facing gateway.
 - **Secrets by reference.** Upstream keys are `env:NAME` or `file:/path`; literals are refused.
 
 ## Limits in this version

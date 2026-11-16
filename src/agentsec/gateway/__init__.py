@@ -61,6 +61,12 @@ def serve(config: GatewayConfig) -> None:
         http="h11",  # the strict pure-Python parser: ambiguous framing is rejected
         lifespan="off",
         workers=1,  # one audit chain per process; see docs/design/GATEWAY.md
+        # Unauthenticated connections are otherwise unbounded: above the cap uvicorn answers
+        # 503 before the gateway (and its per-user limits) ever sees the request.
+        limit_concurrency=config.max_connections,
+        # Without it a SIGTERM waits for every open stream, until the orchestrator kills us.
+        # uvicorn takes whole seconds.
+        timeout_graceful_shutdown=max(1, round(config.shutdown_timeout_s)),
         log_level="info",
     )
 

@@ -85,6 +85,8 @@ class GatewayConfig:
     requests_per_min: int = 60
     concurrent_requests: int = 4
     body_timeout_s: float = 30.0
+    max_connections: int = 1000  # open connections and requests in flight; above it, 503
+    shutdown_timeout_s: float = 30.0  # on SIGTERM, how long requests in flight may finish
     mcp_upstreams: dict[str, McpUpstream] = field(default_factory=dict)
     mcp_session_idle_s: float = 3600.0
     tokens: TokenSettings | None = None  # set: users may mint access tokens (POST /tokens)
@@ -150,6 +152,8 @@ _SECTIONS: dict[str, set[str]] = {
         "concurrent_requests",
         "body_timeout_s",
         "mcp_session_idle_s",
+        "max_connections",
+        "shutdown_timeout_s",
     },
     "audit": {"file", "log_content", "cef_file"},
     "upstream": {"url", "model", "api_key"},
@@ -514,6 +518,8 @@ def load_config(path: str | Path) -> GatewayConfig:
         requests_per_min=_positive(limits, "requests_per_min", 60),
         concurrent_requests=_positive(limits, "concurrent_requests", 4),
         body_timeout_s=_positive(limits, "body_timeout_s", 30.0, float),
+        max_connections=_positive(limits, "max_connections", 1000),
+        shutdown_timeout_s=_positive(limits, "shutdown_timeout_s", 30.0, float),
         mcp_upstreams=mcp_upstreams,
         mcp_session_idle_s=_positive(limits, "mcp_session_idle_s", 3600.0, float),
         tokens=_tokens(data, base),

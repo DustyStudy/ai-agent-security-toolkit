@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -32,6 +32,7 @@ class GroupPolicy:
     spotlight_tool_results: bool
     stream_mode: str = "buffer"  # holdback: stream text that is held_chars behind and checked
     holdback_chars: int = 256
+    mcp: frozenset[str] | None = frozenset()  # MCP upstreams this group may reach; None: all
 
 
 def stream_settings(output: dict[str, Any], where: str) -> tuple[str, int]:
@@ -63,6 +64,7 @@ def group_policy(
     spotlight_tool_results: bool = False,
     stream_mode: str = "buffer",
     holdback_chars: int = 256,
+    mcp: Iterable[str] | None = (),
 ) -> GroupPolicy:
     protected = tuple(protected)
     # Tool arguments: secrets and protected strings only. PII and links are normal in
@@ -81,6 +83,7 @@ def group_policy(
         spotlight_tool_results=spotlight_tool_results,
         stream_mode=stream_mode,
         holdback_chars=holdback_chars,
+        mcp=None if mcp is None else frozenset(mcp),
     )
 
 
@@ -92,6 +95,9 @@ class PolicySet:
     groups: tuple[GroupPolicy, ...]
     expires: datetime | None = None
     numeric_revision: int | None = None  # bundles only: refuses rollbacks on reload
+    # MCP upstream name -> {namespaced tool: fingerprint}. An upstream with pins only offers
+    # tools whose definition matches its pin; without pins, definitions are only scanned.
+    mcp_pins: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
     def resolve(self, user_groups: Iterable[str]) -> GroupPolicy | None:
         """First entry that names one of the user's groups, or "*". None means 403."""

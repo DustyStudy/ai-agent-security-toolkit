@@ -32,9 +32,9 @@ SIGNATURE = "manifest.sig"
 FORMAT = "agentsec-bundle-v1"
 MAX_FILE_BYTES = 1024 * 1024
 
-_ENTRY_KEYS = {"group", "tools", "mode", "models", "output", "input"}
+_ENTRY_KEYS = {"group", "tools", "mode", "models", "output", "input", "mcp"}
 _OUTPUT_KEYS = {"allowed_hosts", "protected", "stream_mode", "holdback_chars"}
-_MANIFEST_KEYS = {"revision", "created", "expires", "group_policies"}
+_MANIFEST_KEYS = {"revision", "created", "expires", "group_policies", "mcp_pins"}
 
 
 class BundleError(ValueError):
@@ -72,9 +72,11 @@ def _referenced_files(manifest: dict[str, Any]) -> list[str]:
     entries = manifest.get("group_policies")
     if not isinstance(entries, list):
         raise BundleError("group_policies must be a list")
-    return sorted(
-        {e["tools"] for e in entries if isinstance(e, dict) and isinstance(e.get("tools"), str)}
-    )
+    files = {e["tools"] for e in entries if isinstance(e, dict) and isinstance(e.get("tools"), str)}
+    pins = manifest.get("mcp_pins") or {}
+    if isinstance(pins, dict):
+        files |= {v for v in pins.values() if isinstance(v, str)}  # signed like the policies
+    return sorted(files)
 
 
 # ----------------------------------------------------------------------------- signing
@@ -203,6 +205,26 @@ def _expiry(value: Any) -> datetime:
     return value
 
 
+def _pins(data: bytes, rel: str) -> dict[str, str]:
+    """A ToolPins file (``agentsec mcp pin`` format) from the checked bytes."""
+    from agentsec.integrations.mcp import PIN_FILE_VERSION
+
+    try:
+        doc = json.loads(data)
+    except ValueError:
+        raise BundleError(f"{rel}: not JSON") from None
+    if not isinstance(doc, dict):
+        raise BundleError(f"{rel}: not a tool pin file (version {PIN_FILE_VERSION})")
+    tools = doc.get("tools")
+    if (
+        doc.get("version") != PIN_FILE_VERSION
+        or not isinstance(tools, dict)
+        or not all(isinstance(k, str) and isinstance(v, str) for k, v in tools.items())
+    ):
+        raise BundleError(f"{rel}: not a tool pin file (version {PIN_FILE_VERSION})")
+    return dict(tools)
+
+
 def _strs(value: Any, where: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise BundleError(f"{where} must be a list of strings")
@@ -214,6 +236,7 @@ def load_bundle(
     public_key: Any,
     *,
     upstreams: set[str] | None = None,
+    mcp_upstreams: set[str] | None = None,
     now: datetime | None = None,
 ) -> PolicySet:
     """Verify and parse a bundle. ``upstreams`` checks each group's ``models`` against config."""
@@ -253,6 +276,11 @@ def load_bundle(
         if not isinstance(mode, str) or mode not in {"enforce", "monitor"}:
             raise BundleError(f"{where}.mode must be 'enforce' or 'monitor'")
         models = None if e.get("models") is None else _strs(e["models"], f"{where}.models")
+        mcp = _strs(e.get("mcp", []), f"{where}.mcp")
+        if mcp_upstreams is not None and set(mcp) - mcp_upstreams:
+            raise BundleError(
+                f"{where}.mcp names unknown mcp_upstreams: {sorted(set(mcp) - mcp_upstreams)}"
+            )
         if models is not None and upstreams is not None and set(models) - upstreams:
             raise BundleError(
                 f"{where}.models names unknown upstreams: {sorted(set(models) - upstreams)}"
@@ -284,13 +312,25 @@ def load_bundle(
                 protected=_strs(output.get("protected", []), f"{where}.output.protected"),
                 stream_mode=stream_mode,
                 holdback_chars=holdback_chars,
+                mcp=mcp,
                 **flags,
             )
         )
+    pins_raw = manifest.get("mcp_pins") or {}
+    if not isinstance(pins_raw, dict):
+        raise BundleError("mcp_pins must map MCP upstream names to pin files")
+    mcp_pins = {}
+    for name, rel in pins_raw.items():
+        if mcp_upstreams is not None and name not in mcp_upstreams:
+            raise BundleError(f"mcp_pins names an unknown mcp_upstream: {name!r}")
+        if not isinstance(rel, str) or rel not in contents:
+            raise BundleError(f"mcp_pins.{name} must name a signed pin file")
+        mcp_pins[str(name)] = _pins(contents[rel], rel)
     return PolicySet(
         # Short enough to stay readable in the audit log with log_content off.
         revision=f"bundle:{revision}:{_sha(manifest_bytes)[:16]}",
         groups=tuple(groups),
         expires=expires,
         numeric_revision=revision,
+        mcp_pins=mcp_pins,
     )

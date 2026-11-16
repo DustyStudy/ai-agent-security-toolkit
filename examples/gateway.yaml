@@ -60,6 +60,10 @@ upstreams:                 # "model" in a request selects one of these by name; 
     model: llama3.1:8b
     # api_key: env:VLLM_API_KEY      # env:NAME or file:/path; literal keys are refused
 
+# mcp_upstreams:          # one /mcp endpoint for IDEs and agents (needs the mcp extra)
+#   jira: {url: https://mcp-jira.internal/mcp, auth: file:/run/secrets/jira-mcp-token}
+#   docs: {url: http://mcp-docs.internal:8080/mcp, pins: pins/docs.json}
+
 audit:
   file: audit.jsonl        # hash-chained; verify with `agentsec audit verify audit.jsonl`
   log_content: false       # strings over 64 characters are stored as sha256 + length

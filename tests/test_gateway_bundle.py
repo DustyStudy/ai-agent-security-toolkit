@@ -379,3 +379,64 @@ def test_reloads_record_the_state_before_enforcing(tmp_path):
     clock.t = 11
     call(app, body=chat(), headers=who("eng"))
     assert json.loads((tmp_path / "state.json").read_text())["revision"] == 2
+
+
+# ------------------------------------------------------------------- MCP in bundles
+
+
+def mcp_bundle(root, pins='{"version": 1, "tools": {"docs__search": "abc"}}', mcp="[docs]"):
+    (root / "pins").mkdir(parents=True, exist_ok=True)
+    (root / "pins" / "docs.json").write_text(pins)
+    make_bundle(
+        root,
+        extra_entries="""\
+        mcp_pins: {docs: pins/docs.json}
+        """,
+    )
+    text = (
+        (root / "manifest.yaml")
+        .read_text()
+        .replace("    models: [local, big]\n", f"    models: [local, big]\n    mcp: {mcp}\n")
+    )
+    (root / "manifest.yaml").write_text(text)
+    sign_bundle(root, pem(KEY))
+    return root
+
+
+def load_mcp(root, mcp_upstreams=frozenset({"docs"})):
+    from agentsec.gateway.bundle import load_public_key
+
+    return load_bundle(
+        root,
+        load_public_key(pub_pem(KEY)),
+        upstreams={"local", "big"},
+        mcp_upstreams=set(mcp_upstreams),
+    )
+
+
+def test_a_bundle_carries_mcp_access_and_signed_pins(tmp_path):
+    policies = load_mcp(mcp_bundle(tmp_path / "b"))
+    eng, fin = policies.groups
+    assert eng.mcp == frozenset({"docs"}) and fin.mcp == frozenset()
+    assert policies.mcp_pins == {"docs": {"docs__search": "abc"}}
+
+
+def test_a_tampered_pin_file_fails_the_signature(tmp_path):
+    root = mcp_bundle(tmp_path / "b")
+    (root / "pins" / "docs.json").write_text('{"version": 1, "tools": {}}')
+    with pytest.raises(BundleError, match="signed hash"):
+        load_mcp(root)
+
+
+@pytest.mark.parametrize(
+    ("kw", "upstreams", "error"),
+    [
+        ({"mcp": "[nope]"}, {"docs"}, "unknown mcp_upstreams"),
+        ({}, set(), "unknown mcp_upstream"),
+        ({"pins": "[]"}, {"docs"}, "pin file"),
+        ({"pins": "not json"}, {"docs"}, "not JSON"),
+    ],
+)
+def test_mcp_bundle_settings_are_validated(tmp_path, kw, upstreams, error):
+    with pytest.raises(BundleError, match=error):
+        load_mcp(mcp_bundle(tmp_path / "b", **kw), mcp_upstreams=upstreams)

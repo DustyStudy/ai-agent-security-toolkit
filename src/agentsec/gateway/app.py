@@ -263,6 +263,7 @@ class Gateway:
         sink: AuditSink | None = None,
         clock: Callable[[], float] = time.monotonic,
         jwks_fetch: Callable[[str], dict[str, Any]] = fetch_jwks,
+        mcp_connector: Any = None,
     ) -> None:
         self.config = config
         self._transport = transport
@@ -292,6 +293,17 @@ class Gateway:
         self._oidc = None if config.oidc is None else OidcVerifier(config.oidc, fetch=jwks_fetch)
         self._auth_slots = asyncio.Semaphore(MAX_CONCURRENT_AUTH)
         self._limiter = _Limiter(config.requests_per_min, config.concurrent_requests, clock)
+        self._mcp = None
+        if config.mcp_upstreams:
+            try:
+                from agentsec.gateway.mcp import McpGateway
+            except ImportError as e:  # pragma: no cover - depends on the install
+                raise RuntimeError(
+                    'mcp_upstreams needs the mcp extra: pip install "ai-agent-security-toolkit'
+                    '[gateway,mcp]"'
+                ) from e
+            extra = {} if mcp_connector is None else {"connector": mcp_connector}
+            self._mcp = McpGateway(config, self._audit, self._scanner, clock=clock, **extra)
         self._audit.log(
             "gateway_start",
             policy_rev=config.policies.revision,
@@ -323,6 +335,14 @@ class Gateway:
                     if gp.models is None or n in gp.models
                 ]
                 await self._json(send, 200, {"object": "list", "data": data}, request_id)
+                return
+            if path == "/mcp" and self._mcp is not None:
+                if method not in {"POST", "GET", "DELETE"}:
+                    raise HttpError(405, "method not allowed", "method_not_allowed")
+                with self._limiter.slot(user):
+                    await self._serve_mcp(
+                        scope, receive, send, user, groups, policies, gp, request_id
+                    )
                 return
             if path != "/v1/chat/completions":
                 raise HttpError(404, "not found", "not_found")
@@ -359,6 +379,37 @@ class Gateway:
             await self._sse(send, payload, request_id)
         else:
             await self._json(send, status, payload, request_id)
+
+    async def _serve_mcp(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        user: str,
+        groups: tuple[str, ...],
+        policies: PolicySet,
+        gp: GroupPolicy,
+        request_id: str,
+    ) -> None:
+        from agentsec.gateway.mcp import Caller
+
+        assert self._mcp is not None  # noqa: S101 - the route checks it
+        started = False
+
+        async def tracked(message: dict[str, Any]) -> None:
+            nonlocal started
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        caller = Caller(user, groups, policies, gp, request_id)
+        # One deadline for the whole exchange: a stalled body or upstream holds a slot otherwise.
+        deadline = self.config.body_timeout_s + 2 * self.config.upstream_timeout_s
+        try:
+            await asyncio.wait_for(self._mcp.handle(scope, receive, tracked, caller), deadline)
+        except TimeoutError:
+            if started:
+                return  # the answer was on its way; nothing more can be said
+            raise HttpError(504, "mcp request timed out", "upstream_timeout") from None
 
     def _counted(self, send: Send) -> Send:
         async def counted(message: dict[str, Any]) -> None:
@@ -453,7 +504,10 @@ class Gateway:
             current = self._policies
             try:
                 new = load_bundle(
-                    bundle.dir, bundle.public_key, upstreams=set(self.config.upstreams)
+                    bundle.dir,
+                    bundle.public_key,
+                    upstreams=set(self.config.upstreams),
+                    mcp_upstreams=set(self.config.mcp_upstreams),
                 )
                 if new.revision == current.revision:
                     self._bundle_seen = seen  # the bundle already in force

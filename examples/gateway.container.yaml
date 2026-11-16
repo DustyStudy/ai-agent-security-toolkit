@@ -1,0 +1,24 @@
+# Example config for the container image (see docs/GATEWAY.md, "Container image").
+# Mount this directory read-only at /etc/agentsec and a writable volume at /var/lib/agentsec.
+# Everything not shown here works as in gateway.yaml.
+
+listen:
+  host: 0.0.0.0                    # inside the container; publish the port only to the auth proxy
+  port: 8443
+  tls_terminated_by_proxy: true    # or mount a certificate and set listen.tls
+
+identity:
+  mode: trusted_header
+  # The auth proxy's own address on the container network, as a /32: give the proxy a fixed
+  # address. A wider network lets any other container on it name a user in a header.
+  trusted_proxies: [172.28.0.10/32]
+
+policy: policy.yaml
+
+upstreams:
+  llama3.1-8b:
+    url: http://ollama:11434/v1    # a model server on the same container network, reachable from the gateway only
+    model: llama3.1:8b
+
+audit:
+  file: /var/lib/agentsec/audit.jsonl   # absolute: the config directory is mounted read-only

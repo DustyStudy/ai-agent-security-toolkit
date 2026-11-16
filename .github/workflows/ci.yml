@@ -271,3 +271,54 @@ jobs:
           name: fuzz-report
           path: fuzz.json
           retention-days: 14
+
+  container:
+    # The gateway image builds from the hash-pinned locks and serves /healthz as it should be
+    # run: non-root, read-only root filesystem, no capabilities.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the image
+        run: docker build -t agentsec-gateway:ci .
+
+      - name: The example container config is valid inside the image
+        run: >
+          docker run --rm -v "$PWD/examples:/etc/agentsec:ro" agentsec-gateway:ci
+          serve --config /etc/agentsec/gateway.container.yaml --check
+
+      - name: Smoke test - hardened run answers /healthz and refuses a request without identity
+        run: |
+          docker run -d --name gateway --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /var/lib/agentsec:uid=10001,gid=10001,mode=0700 \
+            -v "$PWD/examples:/etc/agentsec:ro" agentsec-gateway:ci \
+            serve --config /etc/agentsec/gateway.container.yaml
+          probe='
+          import urllib.error, urllib.request
+          base = "http://127.0.0.1:8443"
+          assert urllib.request.urlopen(base + "/healthz").status == 200
+          try:
+              urllib.request.urlopen(base + "/v1/models")
+          except urllib.error.HTTPError as e:
+              assert e.code == 401, e.code
+          else:
+              raise SystemExit("a request without identity was served")
+          '
+          ok=""
+          for _ in $(seq 20); do
+            if docker exec gateway python -c "$probe" 2>/dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          docker logs gateway
+          test "$ok" = 1
+          test "$(docker exec gateway id -u)" = 10001
+          ! docker exec gateway python -m pip --version
+          docker exec gateway test -s /var/lib/agentsec/audit.jsonl

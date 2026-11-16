@@ -165,6 +165,28 @@ Labels are event names and status codes only, never users or request content. To
 - **Idle connections.** `limits.max_connections` bounds the work the gateway accepts, not the sockets a client can hold open: a connection that never sends a request stays open and counts towards the cap. Put a proxy or load balancer with header and idle timeouts in front of an internet-facing gateway.
 - **Secrets by reference.** Upstream keys are `env:NAME` or `file:/path`; literals are refused.
 
+## Container image
+
+The repository's `Dockerfile` builds the gateway from the hash-pinned locks (`requirements/requirements-gateway.txt`) on a digest-pinned `python:3.13-slim`. No image is published yet: build it yourself.
+
+```bash
+docker build -t agentsec-gateway .
+docker run -d --name agentsec-gateway \
+  --read-only --cap-drop ALL --security-opt no-new-privileges \
+  -v "$PWD/examples:/etc/agentsec:ro" \
+  -v agentsec-data:/var/lib/agentsec \
+  -p 127.0.0.1:8443:8443 \
+  agentsec-gateway serve --config /etc/agentsec/gateway.container.yaml
+```
+
+- **Config** is read from `/etc/agentsec/gateway.yaml` unless you pass `--config`. Mount the directory read-only. [`examples/gateway.container.yaml`](../examples/gateway.container.yaml) is a starting point.
+- **State** goes to `/var/lib/agentsec`, the only writable path the image needs: give `audit.file`, `tokens.store` and `bundle.state_file` absolute paths there, and mount a volume so they survive the container. The audit chain continues from the file it finds.
+- **User.** The process runs as uid and gid 10001 with no shell login, and the image has no pip. A volume mounted over `/var/lib/agentsec` must be writable by 10001 (Kubernetes: `fsGroup: 10001`).
+- **Listening.** Inside a container `listen.host` must be `0.0.0.0`, which needs `listen.tls` or `tls_terminated_by_proxy: true`. Publish the port only where the auth proxy can reach it, and set `identity.trusted_proxies` to the proxy's own address on the container network as a `/32`. A wider network lets any other container on it name a user in a header.
+- **Probes.** The image has no `HEALTHCHECK`, because the port and TLS come from your config. Probe `GET /healthz` on the listener, or `/readyz` on the admin listener. That listener is loopback only: it is reachable from the container's own network namespace, which in Kubernetes means every container in the same Pod, and from nowhere else.
+- **Secrets** are `env:NAME` or `file:/path` references as elsewhere: pass them with `-e` or mount them, never bake them into an image built on top of this one.
+- **Shutdown.** `docker stop` sends SIGTERM; see `limits.shutdown_timeout_s` and give the container a stop timeout a little above it (`--stop-timeout`).
+
 ## Limits in this version
 
 - MCP taint is per user and lasts until the user has been idle for `limits.mcp_session_idle_s` (default 1 hour): one tainted session taints that user's other MCP sessions too.

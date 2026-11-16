@@ -1,0 +1,10 @@
+# Allowlist: the image is built from these and nothing else in the working tree.
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!src
+!requirements/requirements-gateway.txt
+!requirements/requirements-release-tools.txt
+**/__pycache__
+**/*.pyc

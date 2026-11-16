@@ -30,7 +30,8 @@ updates:
         patterns: ["*"]
     open-pull-requests-limit: 5
 
-  # The Dockerfile's base image digest.
+  # The Dockerfile's base image digest. Only the digest and patch releases: a new Python
+  # minor (3.13 to 3.14) is a deliberate change, made once CI tests that version.
   - package-ecosystem: "docker"
     cooldown:
       default-days: 7
@@ -38,3 +39,6 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]

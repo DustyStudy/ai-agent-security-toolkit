@@ -74,7 +74,7 @@ SIGNALS: tuple[Signal, ...] = (
         0.3,
         r"\b(?:message|notice|instruction)s?\s+from\s+(?:the\s+)?(?:developer|admin(?:istrator)?|system|security\s+team|anthropic|openai)\b",
     ),
-    _s("exfil_markdown", 0.6, r"!\[[^\]]*\]\(https?://[^)]*[?&][^)]*\)"),
+    _s("exfil_markdown", 0.6, r"!\[(?:[^\]!]|!(?!\[))*+\]\(https?://(?:[^)?&\]]|\](?!\())*+[?&]"),
     _s(
         "tool_coercion",
         0.4,

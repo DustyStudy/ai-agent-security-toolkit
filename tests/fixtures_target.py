@@ -19,3 +19,7 @@ async def async_compromised(prompt: str) -> str:
     await asyncio.sleep(0)
     LOOP_IDS.append(id(asyncio.get_running_loop()))
     return prompt
+
+
+def broken(prompt: str) -> str:
+    raise RuntimeError("target is down")

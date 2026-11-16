@@ -9,6 +9,7 @@ import textwrap
 import pytest
 
 from agentsec.gateway import ConfigError, Gateway, UpstreamError, load_config
+from agentsec.gateway.app import _Limiter
 from agentsec.middleware.audit import MemorySink
 
 POLICY = """
@@ -222,6 +223,18 @@ def test_rate_limit_per_user(tmp_path):
     assert [call(app, body=chat())[0] for _ in range(3)] == [200, 200, 429]
 
 
+def test_the_limiter_forgets_idle_users():
+    now = [0.0]
+    limiter = _Limiter(per_min=2, concurrent=1, clock=lambda: now[0])
+    for user in ("alice", "bob"):
+        with limiter.slot(user):
+            pass
+    now[0] = 61.0
+    with limiter.slot("carol"):
+        pass
+    assert set(limiter._recent) == {"carol"} and not limiter._active
+
+
 # --------------------------------------------------------------------------- tools
 
 
@@ -310,6 +323,20 @@ def test_injection_in_input_blocks_the_request(tmp_path):
     assert status == 400 and out["error"]["code"] == "input_blocked"
     assert upstream.requests == []
     assert "gateway_input_blocked" in events(sink)
+
+
+@pytest.mark.parametrize(
+    "image", ["http://169.254.169.254/latest", {"url": "https://x.test/a.png"}]
+)
+def test_remote_image_urls_are_not_forwarded(tmp_path, image):
+    upstream = FakeUpstream()
+    app, sink = gateway(tmp_path, upstream)
+    assert call(app, body=chat([{"type": "text", "text": "hi"}, INLINE_IMAGE]))[0] == 200
+    status, out = call(app, body=chat([{"type": "image_url", "image_url": image}]))
+    assert status == 400 and out["error"]["code"] == "input_blocked"
+    assert len(upstream.requests) == 1
+    blocked = [r for r in sink.records if r["event"] == "gateway_input_blocked"]
+    assert "remote image URL" in blocked[0]["data"]["reasons"][0]
 
 
 # -------------------------------------------------------------------------- output
@@ -401,11 +428,20 @@ def test_audit_log_on_disk_verifies(tmp_path):
         ("listen:\n  host: 0.0.0.0\n", "needs listen.tls"),
         ("surprise: 1\n", "unknown top-level"),
         ("limits:\n  max_body_bytes: 0\n", "positive"),
+        ("identity:\n  trusted_proxies: [0.0.0.0/0]\n", "every address"),
+        ("identity:\n  trusted_proxies: ['::/0']\n", "every address"),
     ],
 )
 def test_unsafe_or_unknown_config_is_refused(tmp_path, extra, match):
     with pytest.raises(ConfigError, match=match):
         write_config(tmp_path, extra=extra)
+
+
+def test_a_credential_over_plain_http_is_warned_about(tmp_path, caplog):
+    write_config(
+        tmp_path, extra="upstreams:\n  far: {url: 'http://llm.internal/v1', api_key: 'env:K'}\n"
+    )
+    assert "upstreams.far sends its credential over plain HTTP" in caplog.text
 
 
 def test_upstream_api_key_must_be_a_reference(tmp_path):
@@ -494,7 +530,10 @@ def test_tool_call_arguments_cannot_carry_secrets_or_protected_strings(tmp_path)
     assert events(sink).count("gateway_tool_call_output_violation") == 2
 
 
-@pytest.mark.parametrize("content", [[], None, [{"type": "image_url", "image_url": {"url": "x"}}]])
+INLINE_IMAGE = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+
+
+@pytest.mark.parametrize("content", [[], None, [INLINE_IMAGE]])
 def test_tool_results_without_text_still_taint_the_request(tmp_path, content):
     message = {
         "role": "assistant",

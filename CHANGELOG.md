@@ -4,6 +4,24 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Security
+- Gateway: a message part with a remote `image_url` is refused in enforce mode (`input_blocked`, reason `remote image URL`) and logged in monitor mode. A model server that fetches image URLs would otherwise fetch any address a user names from its own network position. Inline `data:` images pass.
+- Gateway: `identity.trusted_proxies` refuses a `/0` network, which let every peer name any user in a header.
+- Gateway: a warning at config load when an upstream or MCP upstream with a credential uses a plain `http://` URL to a non-loopback host.
+- The audit log redacts the whole value under a credential key: `{"password": "..."}` and `{"api_key": "..."}` were written in full, because keys and values were scanned separately.
+- `SecretLeakValidator`, `PIIValidator` and `OutputGuard.default()` scan the whole output. They stopped at 200,000 characters and passed the rest unread. `redact_text` and `find_sensitive` keep their `max_scan_chars` default.
+- Redaction covers quoted credential values up to 4,096 characters, and values whose closing quote is missing. A quoted value over 200 characters matched nothing and was left in full.
+- `InjectionScanner` and redaction: the `exfil_markdown` and JWT patterns run in linear time. Text made of repeated `![` or `eyJ-` took quadratic time, several seconds for 200 KB, which one gateway user could use to stall the process. A JWT directly after a `-` is no longer matched.
+- `JsonSchemaValidator` refuses `NaN` and `Infinity`. Python's JSON parser accepts them, and `NaN` passes every `minimum` and `maximum`.
+- Windows: a path argument with stream syntax (`.env::$DATA`, `file:stream`) is refused. It opened the file while no `deny_patterns` entry for the file name matched.
+- `GuardedMCPClient`: a tool missing from a complete listing can no longer be called. It stayed callable from the earlier listing.
+
+### Fixed
+- `agentsec fuzz` exits 2 when every case errored. It printed `0/0 attacks succeeded` and passed any `--max-asr` gate.
+- `agentsec audit verify` and `verify_file` read the log one record at a time instead of loading it whole.
+- Gateway: the per-user rate limiter kept an entry for every user it had ever seen. Users idle for a full window are now forgotten.
+- Gateway: expired and revoked access tokens are deleted from the store 7 days afterwards. Issuing and revoking in a loop grew the table and every `GET /tokens` answer without bound.
+
 ## [0.7.0] - 2026-11-16
 
 Phase 3 of the gateway, in preview: an MCP endpoint and access tokens for IDE clients. Tested end to end with Claude Code (list, call, taint denial, revocation). Nothing in the library API is removed or made stricter. The MCP endpoint needs the `mcp` extra as well as `gateway`, with MCP SDK 2.3 or newer (checked at startup).

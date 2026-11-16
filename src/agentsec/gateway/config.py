@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import logging
 import math
 import os
 import re
@@ -18,6 +19,8 @@ from agentsec.gateway.oidc import SUPPORTED_ALGORITHMS, OidcSettings
 from agentsec.gateway.policyset import ANY_GROUP, PolicySet, group_policy, stream_settings
 from agentsec.gateway.tokens import TokenSettings
 from agentsec.sandbox.policy import Policy
+
+_LOG = logging.getLogger("agentsec.gateway")
 
 
 class ConfigError(ValueError):
@@ -198,6 +201,12 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
+def _warn_plain_http(where: str, url: str, secret: Any) -> None:
+    parts = urlsplit(url)
+    if secret and parts.scheme == "http" and not _is_loopback(parts.hostname or ""):
+        _LOG.warning("%s sends its credential over plain HTTP; use an https URL", where)
+
+
 def _oidc(section: dict[str, Any]) -> OidcSettings:
     issuer = _typed(section.get("issuer"), str, "identity.oidc.issuer")
     audience = _typed(section.get("audience"), str, "identity.oidc.audience")
@@ -262,6 +271,7 @@ def _mcp_upstreams(data: dict[str, Any], base: Path) -> tuple[dict[str, McpUpstr
             if "bundle" in data:
                 raise ConfigError(f"with bundle, mcp_upstreams.{name}.pins goes in the bundle")
             pins[name] = _pin_file(base / _typed(u["pins"], str, f"mcp_upstreams.{name}.pins"))
+        _warn_plain_http(f"mcp_upstreams.{name}", url, auth)
         upstreams[name] = McpUpstream(name=name, url=url, auth_ref=auth)
     return upstreams, pins
 
@@ -429,6 +439,9 @@ def load_config(path: str | Path) -> GatewayConfig:
         proxies = tuple(ipaddress.ip_network(p, strict=False) for p in proxies_raw)
     except ValueError as e:
         raise ConfigError(f"identity.trusted_proxies: {e}") from e
+    if any(p.prefixlen == 0 for p in proxies):
+        # Every peer could then name any user in a header.
+        raise ConfigError("identity.trusted_proxies must not trust every address (/0)")
 
     upstreams_raw = data.get("upstreams")
     if not isinstance(upstreams_raw, dict) or not upstreams_raw:
@@ -447,6 +460,7 @@ def load_config(path: str | Path) -> GatewayConfig:
             not isinstance(api_key, str) or not api_key.startswith(("env:", "file:"))
         ):
             raise ConfigError(f"upstreams.{name}.api_key must be 'env:NAME' or 'file:/path'")
+        _warn_plain_http(f"upstreams.{name}", url, api_key)
         upstreams[str(name)] = Upstream(
             name=str(name),
             url=url.rstrip("/"),

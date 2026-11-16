@@ -37,6 +37,10 @@ def path_within_roots(value: str, roots: Sequence[str]) -> tuple[bool, str]:
     # Windows: "\x" (no drive) resolves against the current drive, so require a drive or UNC.
     if os.name == "nt" and not os.path.splitdrive(value)[0]:
         return False, value
+    # Windows: "file::$DATA" and "file:stream" open a stream of "file" under another name,
+    # which no deny pattern written for the file name matches.
+    if os.name == "nt" and ":" in os.path.splitdrive(value)[1]:
+        return False, value
     resolved = os.path.realpath(value)
     for root in roots:
         real_root = os.path.realpath(root)

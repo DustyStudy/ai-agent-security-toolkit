@@ -51,6 +51,8 @@ def guard_tool(
 
     The guard sees the arguments the model supplied after LangChain's own validation, including
     defaults LangChain fills in, so the policy must allow every argument in the tool's schema.
+    The original tool then validates them once more: a schema validator that changes its input
+    (dollars to cents, say) must give the same result when run twice.
     Tool artifacts (``response_format="content_and_artifact"``) are not passed through.
     """
     policy_name = name or tool.name

@@ -75,13 +75,13 @@ def _assignment_rules(kind: str, key: str) -> tuple[_Rule, ...]:
         _Rule(
             kind,
             "secret",
-            re.compile(key + r"\"(?!\[REDACTED:[a-z_]+\]\")((?:[^\"\\\n]|\\.){1,200})\""),
+            re.compile(key + r"\"(?!\[REDACTED:[a-z_]+\]\")((?:[^\"\\\n]|\\.){1,4096})\"?"),
             group=1,
         ),
         _Rule(
             kind,
             "secret",
-            re.compile(key + r"'(?!\[REDACTED:[a-z_]+\]')((?:[^'\\\n]|\\.){1,200})'"),
+            re.compile(key + r"'(?!\[REDACTED:[a-z_]+\]')((?:[^'\\\n]|\\.){1,4096})'?"),
             group=1,
         ),
     )
@@ -167,7 +167,11 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(
         "jwt",
         "secret",
-        re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
+        # One start per run of token characters ("-" included in the lookbehind): with \b,
+        # "eyJ-eyJ-eyJ-..." restarted at every "eyJ" and rescanned the rest of the run.
+        re.compile(
+            r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}\b"
+        ),
     ),
     _Rule("bearer_token", "secret", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}")),
     _Rule(

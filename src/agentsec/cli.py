@@ -67,6 +67,10 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
     if not args.quiet:
         print()
         print(report.to_markdown(max_bypasses=8))
+    if report.total and report.errors == report.total:
+        # Zero successes out of zero scored cases would pass any --max-asr gate.
+        print("FAIL: every case errored; nothing was evaluated", file=sys.stderr)
+        return 2
     if args.max_asr is not None and report.exceeds(args.max_asr):
         print(f"FAIL: ASR {report.asr:.1%} exceeds --max-asr {args.max_asr:.1%}", file=sys.stderr)
         return 1

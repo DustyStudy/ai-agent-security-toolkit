@@ -19,7 +19,7 @@ mypy src
 pytest --cov=agentsec
 ```
 
-All four also run in CI. Tests run on Linux, Windows and macOS, on Python 3.11 to 3.13, with a 90% coverage floor. Add a line to `CHANGELOG.md` under "Unreleased" for user-visible changes.
+All four also run in CI. Tests run on Linux, Windows and macOS, on Python 3.11 to 3.14, with a 90% coverage floor. Add a line to `CHANGELOG.md` under "Unreleased" for user-visible changes.
 
 ## Pinned CI dependencies
 

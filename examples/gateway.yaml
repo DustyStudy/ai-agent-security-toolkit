@@ -64,6 +64,11 @@ upstreams:                 # "model" in a request selects one of these by name; 
 #   jira: {url: https://mcp-jira.internal/mcp, auth: file:/run/secrets/jira-mcp-token}
 #   docs: {url: http://mcp-docs.internal:8080/mcp, pins: pins/docs.json}
 
+# tokens:                  # access tokens for IDE MCP configs (POST /tokens after SSO)
+#   store: tokens.db
+#   default_ttl_days: 7
+#   max_ttl_days: 30
+
 audit:
   file: audit.jsonl        # hash-chained; verify with `agentsec audit verify audit.jsonl`
   log_content: false       # strings over 64 characters are stored as sha256 + length

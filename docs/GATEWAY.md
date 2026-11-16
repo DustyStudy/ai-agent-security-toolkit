@@ -79,8 +79,37 @@ mcp_upstreams:
 - **Pins.** Write them with `ToolPins` from a reviewed listing (names already namespaced). Set `mcp_upstreams.<name>.pins` with a single policy file; in a bundle, list them in the manifest (`mcp_pins: {docs: pins/docs.json}`) so they are signed with the policies.
 - **Limits.** Each upstream answer is capped at `limits.max_response_bytes` as it arrives; compressed answers are refused, because a small gzip body can expand far past the cap. An upstream may list at most 1000 tools, counted before any are filtered out.
 - **Failure.** An upstream that is down only hides its own tools; calls to it return an MCP error, and the audit log records the error type, never the upstream's error text. A denied call returns an MCP error result naming the reason.
-- **Identity.** The same modes as the model endpoint (auth-proxy headers or an OIDC bearer token). IDE tools that only accept a fixed header need an auth proxy in front of the gateway for now; gateway-issued access tokens are planned.
+- **Identity.** The same modes as the model endpoint (auth-proxy headers or an OIDC bearer token). IDE tools that only accept a fixed header use an access token (below).
 - Only tools are proxied: no resources, prompts or sampling, and no server-initiated streams (`GET /mcp` is 405). `mode: monitor` does not apply here: MCP calls are always enforced, because the gateway would be the one running a call the policy refuses.
+
+## Access tokens for IDEs and scripts
+
+IDE MCP configs (Claude Code, Cursor, Continue) mostly take a URL and one fixed header, not an SSO login. With a `tokens` section, a signed-in user can mint an access token and put it in that header:
+
+```yaml
+tokens:
+  store: /var/lib/agentsec/tokens.db   # SQLite; holds only SHA-256 hashes
+  default_ttl_days: 7
+  max_ttl_days: 30                     # at most 90
+  max_per_user: 20
+```
+
+```bash
+# Through the SSO proxy (or with an OIDC token): the token is shown once.
+curl -X POST https://llm-gateway.corp.example/tokens \
+  -H 'Content-Type: application/json' -d '{"name": "laptop cursor", "ttl_days": 7}'
+```
+
+```json
+{"mcpServers": {"corp": {"type": "http", "url": "https://llm-gateway.corp.example/mcp",
+  "headers": {"Authorization": "Bearer agt_..."}}}}
+```
+
+- **Use.** `Authorization: Bearer agt_...` works on `/mcp` and the model endpoints, from any address. It stands for the user and the groups they had when it was issued, so a group change takes effect when the token is replaced; keep lifetimes short.
+- **Issue.** Only an SSO identity (trusted proxy header or OIDC token) can mint, list or revoke tokens: a token cannot manage tokens, so a leaked one cannot mint more. `POST /tokens` requires `Content-Type: application/json`, which a cross-site form cannot send. Each user may hold `max_per_user` live tokens.
+- **Revoke.** Users list and revoke their own with `GET /tokens` and `DELETE /tokens/<id>`. Admins run `agentsec token list --config gateway.yaml [--user U]` and `agentsec token revoke --config gateway.yaml --id ID` (or `--user U` for all of a user's tokens, for example when someone leaves). There is no command to issue a token outside SSO.
+- **Storage.** Only a SHA-256 hash is stored; a token is 256 random bits, so the hash cannot be reversed. On POSIX the store is created owner-only. Back it up like any credential store; losing it only means users mint new tokens.
+- **Audit.** Issue and revoke through the API are audited; `gateway_request` and `gateway_mcp_call` records carry the `token_id` used, never the token. Revocations from the CLI are recorded in the store (the audit chain belongs to the gateway process).
 
 ## Testing the gateway with the fuzzer
 
@@ -135,12 +164,11 @@ Labels are event names and status codes only, never users or request content. To
 
 ## Limits in this version
 
-- No gateway-issued access tokens yet, so IDE MCP clients need an auth proxy or an OIDC token.
 - MCP taint is per user and lasts until the user has been idle for `limits.mcp_session_idle_s` (default 1 hour): one tainted session taints that user's other MCP sessions too.
 - Holdback cannot take back text it released: a secret or protected string longer than `holdback_chars`, or a rule that needs the whole answer, is only caught by the final check, which then cuts the stream short.
 - `/readyz` does not probe the upstreams or the audit file; a failed audit write shows as 503 responses and stops the event counters.
 - Without `bundle.state_file`, rollback protection across restarts relies on `min_revision` and `expires`.
-- IDE tools that only take a static API key cannot get an OIDC token; see the design's open questions.
+- An access token keeps the groups its user had at issue time until it expires or is revoked; removing someone from the IdP does not revoke their tokens (run `agentsec token revoke --user`).
 - Tool-call limits (`max_calls`) count per request, not per user over time.
 - Path and URL argument rules are evaluated on the gateway host, which may not match where the client runs the tool.
 - Models that write tool calls as JSON text instead of `tool_calls` are not recognised as tool calls.

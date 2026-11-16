@@ -16,6 +16,7 @@ import yaml
 
 from agentsec.gateway.oidc import SUPPORTED_ALGORITHMS, OidcSettings
 from agentsec.gateway.policyset import ANY_GROUP, PolicySet, group_policy, stream_settings
+from agentsec.gateway.tokens import TokenSettings
 from agentsec.sandbox.policy import Policy
 
 
@@ -83,6 +84,7 @@ class GatewayConfig:
     body_timeout_s: float = 30.0
     mcp_upstreams: dict[str, McpUpstream] = field(default_factory=dict)
     mcp_session_idle_s: float = 3600.0
+    tokens: TokenSettings | None = None  # set: users may mint access tokens (POST /tokens)
 
 
 def resolve_secret(ref: str) -> str:
@@ -109,6 +111,7 @@ _TOP = {
     "limits",
     "upstreams",
     "mcp_upstreams",
+    "tokens",
     "audit",
 }
 _SECTIONS: dict[str, set[str]] = {
@@ -148,6 +151,7 @@ _SECTIONS: dict[str, set[str]] = {
     "audit": {"file", "log_content", "cef_file"},
     "upstream": {"url", "model", "api_key"},
     "mcp_upstream": {"url", "auth", "pins"},
+    "tokens": {"store", "default_ttl_days", "max_ttl_days", "max_per_user"},
     "bundle": {"dir", "public_key_file", "min_revision", "reload_interval_s", "state_file"},
 }
 
@@ -260,6 +264,28 @@ def _mcp_upstreams(data: dict[str, Any], base: Path) -> tuple[dict[str, McpUpstr
             pins[name] = _pin_file(base / _typed(u["pins"], str, f"mcp_upstreams.{name}.pins"))
         upstreams[name] = McpUpstream(name=name, url=url, auth_ref=auth)
     return upstreams, pins
+
+
+MAX_TOKEN_TTL_DAYS = 90
+
+
+def _tokens(data: dict[str, Any], base: Path) -> TokenSettings | None:
+    if "tokens" not in data:
+        return None
+    section = _section(data, "tokens")
+    store = _typed(section.get("store"), str, "tokens.store")
+    default = _positive(section, "default_ttl_days", 7.0, float)
+    longest = _positive(section, "max_ttl_days", 30.0, float)
+    if not default <= longest <= MAX_TOKEN_TTL_DAYS:
+        raise ConfigError(
+            f"tokens: default_ttl_days <= max_ttl_days <= {MAX_TOKEN_TTL_DAYS} is required"
+        )
+    return TokenSettings(
+        store=str(base / store),
+        default_ttl_s=default * 86400,
+        max_ttl_s=longest * 86400,
+        max_per_user=_positive(section, "max_per_user", 20),
+    )
 
 
 def _pin_file(path: Path) -> dict[str, str]:
@@ -476,4 +502,5 @@ def load_config(path: str | Path) -> GatewayConfig:
         body_timeout_s=_positive(limits, "body_timeout_s", 30.0, float),
         mcp_upstreams=mcp_upstreams,
         mcp_session_idle_s=_positive(limits, "mcp_session_idle_s", 3600.0, float),
+        tokens=_tokens(data, base),
     )

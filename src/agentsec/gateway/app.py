@@ -9,10 +9,12 @@ and only then sent to the client as SSE chunks.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import ipaddress
 import json
 import logging
+import math
 import threading
 import time
 import urllib.error
@@ -38,6 +40,12 @@ from agentsec.gateway.holdback import Holdback
 from agentsec.gateway.metrics import CountingSink, Metrics
 from agentsec.gateway.oidc import OidcVerifier, TokenRejected, fetch_jwks
 from agentsec.gateway.policyset import GroupPolicy, PolicySet
+from agentsec.gateway.tokens import (
+    TokenError,
+    TokenSettings,
+    TokenStore,
+    looks_like_token,
+)
 from agentsec.integrations.mcp import scan_tool_definitions
 from agentsec.middleware.audit import AuditLogger, AuditSink, FileSink, TeeSink
 from agentsec.middleware.cef import CefSink
@@ -64,12 +72,25 @@ _ROLES = {"system", "developer", "user", "assistant", "tool"}
 _FINISH = {"stop", "length", "tool_calls", "content_filter"}
 WITHHELD_NOTICE = "A tool call was withheld by policy."
 MAX_CONCURRENT_AUTH = 8  # token verifications in flight, across all clients
+_TOKEN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "agentsec_token_id", default=None
+)
 MAX_STREAM_TOOL_CALLS = 64  # tool-call indexes accepted in one streamed answer
 _LOG = logging.getLogger("agentsec.gateway")
 # Decision metadata stays readable with log_content off; prompts and answers are still hashed.
 # These hold policy reasons, names and error kinds, never message text.
 AUDIT_KEEP_FIELDS = frozenset(
-    {"reasons", "reason", "error", "tools", "validators", "signals", "policy_rev", "groups"}
+    {
+        "reasons",
+        "reason",
+        "error",
+        "tools",
+        "validators",
+        "signals",
+        "policy_rev",
+        "groups",
+        "token_id",
+    }  # fmt: skip
 )
 
 
@@ -264,6 +285,7 @@ class Gateway:
         clock: Callable[[], float] = time.monotonic,
         jwks_fetch: Callable[[str], dict[str, Any]] = fetch_jwks,
         mcp_connector: Any = None,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self.config = config
         self._transport = transport
@@ -293,6 +315,9 @@ class Gateway:
         self._oidc = None if config.oidc is None else OidcVerifier(config.oidc, fetch=jwks_fetch)
         self._auth_slots = asyncio.Semaphore(MAX_CONCURRENT_AUTH)
         self._limiter = _Limiter(config.requests_per_min, config.concurrent_requests, clock)
+        self._tokens = (
+            None if config.tokens is None else TokenStore(config.tokens.store, clock=wall_clock)
+        )
         self._mcp = None
         if config.mcp_upstreams:
             try:
@@ -325,7 +350,8 @@ class Gateway:
             if path == "/healthz" and method == "GET":
                 await self._json(send, 200, {"status": "ok"}, request_id)
                 return
-            user, groups = await self._identify(scope, request_id)
+            user, groups, token_id = await self._identify(scope, request_id)
+            _TOKEN_ID.set(token_id)  # recorded on this request's audit records
             # A reload reads and verifies files: off the event loop.
             policies, gp = await asyncio.to_thread(self._group_policy, groups)
             if path == "/v1/models" and method == "GET":
@@ -335,6 +361,12 @@ class Gateway:
                     if gp.models is None or n in gp.models
                 ]
                 await self._json(send, 200, {"object": "list", "data": data}, request_id)
+                return
+            if self._tokens is not None and (path == "/tokens" or path.startswith("/tokens/")):
+                with self._limiter.slot(user):
+                    await self._serve_tokens(
+                        scope, receive, send, user, groups, token_id, request_id
+                    )
                 return
             if path == "/mcp" and self._mcp is not None:
                 if method not in {"POST", "GET", "DELETE"}:
@@ -380,6 +412,92 @@ class Gateway:
         else:
             await self._json(send, status, payload, request_id)
 
+    # ------------------------------------------------------------------ tokens
+    async def _serve_tokens(
+        self, scope: Scope, receive: Receive, send: Send, user: str, groups: tuple[str, ...],
+        token_id: str | None, request_id: str,
+    ) -> None:  # fmt: skip
+        """POST /tokens, GET /tokens, DELETE /tokens/<id>: a user's own access tokens."""
+        assert self._tokens is not None  # noqa: S101 - the route checks it
+        settings = self.config.tokens
+        assert settings is not None  # noqa: S101 - set together with the store
+        if token_id is not None:
+            # Only an SSO sign-in manages tokens: a leaked token must not mint or keep others.
+            raise HttpError(403, "tokens cannot be managed with a token", "forbidden")
+        path, method = scope["path"], scope["method"]
+        log = self._audit.bind(actor=user, session_id=request_id)
+        if path == "/tokens" and method == "GET":
+            listed = await asyncio.to_thread(self._tokens.list, user=user)
+            await self._json(send, 200, {"data": [t.public() for t in listed]}, request_id)
+            return
+        if path == "/tokens" and method == "POST":
+            ctype = dict(scope.get("headers", [])).get(b"content-type", b"")
+            if ctype.split(b";")[0].strip().lower() != b"application/json":
+                # A cross-site form post cannot send this type without a CORS preflight.
+                raise HttpError(415, "content-type must be application/json", "bad_request")
+            try:
+                body = await asyncio.wait_for(self._read_body(receive), self.config.body_timeout_s)
+            except TimeoutError:
+                raise HttpError(408, "request body timed out", "body_timeout") from None
+            name, ttl_s = self._token_request(body, settings)
+            try:
+                info, token = await asyncio.to_thread(
+                    self._tokens.issue, user, groups, name, ttl_s, settings.max_per_user
+                )
+            except TokenError as e:
+                raise HttpError(409, str(e), "too_many_tokens") from None
+            log.log("gateway_token_issued", token_id=info.id, name=name, expires=info.expires)
+            await self._json(
+                send, 201, {**info.public(), "token": token}, request_id
+            )  # shown once: only its hash is kept
+            return
+        if path.startswith("/tokens/") and method == "DELETE":
+            target = path[len("/tokens/") :]
+            done = await asyncio.to_thread(self._tokens.revoke, target, user=user)
+            if not done:
+                raise HttpError(404, "no such token", "not_found")  # also someone else's
+            log.log("gateway_token_revoked", token_id=target, by="owner")
+            await self._json(send, 200, {"id": target, "revoked": True}, request_id)
+            return
+        raise HttpError(405 if path == "/tokens" else 404, "not found", "not_found")
+
+    @staticmethod
+    def _token_request(body: bytes, settings: TokenSettings) -> tuple[str, float]:
+        try:
+            data = json.loads(body or b"{}")
+        except ValueError:
+            raise HttpError(400, "body is not valid JSON", "bad_request") from None
+        if not isinstance(data, dict) or set(data) - {"name", "ttl_days"}:
+            raise HttpError(400, "body takes name and ttl_days", "bad_request")
+        name = data.get("name", "")
+        if not isinstance(name, str) or len(name) > 64 or not name.isprintable():
+            raise HttpError(
+                400, "name must be printable text of at most 64 characters", "bad_request"
+            )
+        ttl = data.get("ttl_days")
+        if ttl is None:
+            return name, settings.default_ttl_s
+        if not isinstance(ttl, int | float) or isinstance(ttl, bool):
+            raise HttpError(400, "ttl_days must be a number", "bad_request")
+        try:
+            ttl_s = float(ttl) * 86400  # a huge JSON integer overflows a float
+        except OverflowError:
+            ttl_s = math.inf
+        if not math.isfinite(ttl_s):
+            raise HttpError(400, "ttl_days is above the allowed maximum", "bad_request")
+        if not 0 < ttl_s <= settings.max_ttl_s:
+            raise HttpError(400, "ttl_days is above the allowed maximum", "bad_request")
+        return name, ttl_s
+
+    def _from_access_token(self, token: str, request_id: str) -> tuple[str, tuple[str, ...], str]:
+        assert self._tokens is not None  # noqa: S101 - callers check it
+        try:
+            info = self._tokens.verify(token)
+        except TokenError as e:
+            self._audit.log("gateway_auth_failed", request_id=request_id, reason=str(e))
+            raise HttpError(401, "unauthenticated", "unauthenticated", audited=True) from None
+        return info.user, info.groups, info.id
+
     async def _serve_mcp(
         self,
         scope: Scope,
@@ -401,7 +519,7 @@ class Gateway:
             started = started or message["type"] == "http.response.start"
             await send(message)
 
-        caller = Caller(user, groups, policies, gp, request_id)
+        caller = Caller(user, groups, policies, gp, request_id, _TOKEN_ID.get())
         # One deadline for the whole exchange: a stalled body or upstream holds a slot otherwise.
         deadline = self.config.body_timeout_s + 2 * self.config.upstream_timeout_s
         try:
@@ -544,8 +662,20 @@ class Gateway:
         except Exception:  # noqa: BLE001 - the client gets its error either way
             _LOG.warning("could not audit a rejected request", exc_info=True)
 
-    async def _identify(self, scope: Scope, request_id: str) -> tuple[str, tuple[str, ...]]:
-        if self._oidc is None:
+    async def _identify(
+        self, scope: Scope, request_id: str
+    ) -> tuple[str, tuple[str, ...], str | None]:
+        token_id = None
+        bearer = _bearer(scope)
+        if self._tokens is not None and bearer is not None and looks_like_token(bearer):
+            # An access token stands in for the SSO sign-in it was issued after, from any peer.
+            if self._auth_slots.locked():
+                raise HttpError(503, "busy", "busy")
+            async with self._auth_slots:
+                user, groups, token_id = await asyncio.to_thread(
+                    self._from_access_token, bearer, request_id
+                )
+        elif self._oidc is None:
             user, groups = self._from_trusted_header(scope)
         else:
             # Unauthenticated work is bounded before any per-user limiter can apply: a flood of
@@ -560,7 +690,7 @@ class Gateway:
         allowed = self.config.allowed_groups
         if allowed and not set(groups) & set(allowed):
             raise HttpError(403, "forbidden", "forbidden")
-        return user, groups
+        return user, groups, token_id
 
     def _from_token(
         self, verifier: OidcVerifier, scope: Scope, request_id: str
@@ -642,6 +772,7 @@ class Gateway:
             model=req["model"],
             stream=stream,
             stream_mode=gp.stream_mode if stream else None,
+            token_id=_TOKEN_ID.get(),
         )
         upstream = cfg.upstreams[req["model"]]
         guard = ToolGuard(gp.policy, audit=log)
@@ -1162,3 +1293,12 @@ def _merge_tool_call(calls: dict[int, dict[str, Any]], tc: Any) -> None:
         call["function"]["name"] = fn["name"]  # sent once; a repeat must not grow the name
     if isinstance(fn.get("arguments"), str):
         call["function"]["arguments"] += fn["arguments"]
+
+
+def _bearer(scope: Scope) -> str | None:
+    """The token of a single ``Authorization: Bearer`` header, or None."""
+    auth = [v for k, v in scope.get("headers", []) if k.lower() == b"authorization"]
+    if len(auth) != 1:
+        return None
+    scheme, _, token = auth[0].decode("latin-1").partition(" ")
+    return token.strip() if scheme.lower() == "bearer" and token.strip() else None

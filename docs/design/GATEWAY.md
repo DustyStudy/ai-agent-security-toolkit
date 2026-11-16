@@ -1,6 +1,6 @@
 # Design: agentsec gateway
 
-Status: phases 1 and 2 implemented in 0.6.0 (preview); phase 3 (MCP gateway) implemented on main, except gateway-issued access tokens for IDE clients. Owner: TBD.
+Status: phases 1 and 2 implemented in 0.6.0 (preview); phase 3 (MCP gateway and access tokens for IDE clients) implemented on main. Owner: TBD.
 
 ## Problem
 
@@ -278,7 +278,7 @@ From PRODUCTION.md: about 1.3 ms to scan 10 KB, about 1 ms for `OutputGuard` on 
 
 ## Open questions
 
-1. **IDE client credentials.** Cursor, Continue and Claude Code mostly take a static API key, not an OIDC flow. Options: gateway-minted personal access tokens (stored hashed, short-lived, revocable, issued after SSO), or a local helper that refreshes tokens. Without one, phase 3 adoption stalls.
+1. **IDE client credentials.** Resolved: gateway-minted access tokens (stored hashed, short-lived, revocable, issued after SSO), see docs/GATEWAY.md. A local helper that refreshes OIDC tokens remains an option for clients that can run one.
 2. **Users in several groups.** First match wins is predictable. The intersection of policies is safer but harder to reason about. Which do security teams expect?
 3. **Approvals.** Deny is safe but blunt. Could MCP elicitation, or an out-of-band approval with a resumable call, work on the MCP path?
 4. **Signing key custody.** Should `bundle sign` call into a KMS or HSM, or use Sigstore/cosign offline, or something else? This decides the `--key` format.

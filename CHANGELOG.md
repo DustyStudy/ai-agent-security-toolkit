@@ -5,6 +5,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ## [Unreleased]
 
 ### Added
+- A `Dockerfile` for the gateway: built from a new hash-pinned `requirements/requirements-gateway.txt` on a digest-pinned `python:3.13-slim`, running as uid 10001 with no pip, and working with a read-only root filesystem and no capabilities. CI builds it and smoke-tests it that way. `examples/gateway.container.yaml` and the "Container image" section of [docs/GATEWAY.md](docs/GATEWAY.md) show how to run it. No image is published yet.
 - Gateway `limits.max_connections` (default 1000): above that many open connections and requests in flight, the HTTP server answers 503 before authentication. There was no cap.
 - Gateway `limits.shutdown_timeout_s` (default 30): on SIGTERM, requests in flight get that long to finish. The gateway used to wait for every open stream, until the orchestrator killed it.
 

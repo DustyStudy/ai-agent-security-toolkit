@@ -27,6 +27,8 @@ REQ = "requirements/requirements-"
 LOCKS: dict[str, list[str]] = {
     "runtime": ["pyproject.toml"],
     "dev": ["pyproject.toml", "--extra", "dev", "--extra", "gateway", "--extra", "mcp"],
+    # What the container image installs: the gateway and its MCP endpoint, no dev tools.
+    "gateway": ["pyproject.toml", "--extra", "gateway", "--extra", "mcp"],
     "integrations": [
         "pyproject.toml",
         "--extra",

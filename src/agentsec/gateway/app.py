@@ -9,6 +9,7 @@ and only then sent to the client as SSE chunks.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -20,23 +21,29 @@ import uuid
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
+from agentsec.gateway.bundle import (
+    MANIFEST,
+    MAX_FILE_BYTES,
+    SIGNATURE,
+    BundleError,
+    load_bundle,
+    write_state,
+)
 from agentsec.gateway.config import GatewayConfig, Upstream
 from agentsec.gateway.oidc import OidcVerifier, TokenRejected, fetch_jwks
+from agentsec.gateway.policyset import GroupPolicy, PolicySet
 from agentsec.integrations.mcp import scan_tool_definitions
 from agentsec.middleware.audit import AuditLogger, AuditSink, FileSink, TeeSink
 from agentsec.middleware.cef import CefSink
 from agentsec.middleware.injection import InjectionScanner
 from agentsec.middleware.pipeline import AgentMiddleware
-from agentsec.middleware.validators import (
-    OutputGuard,
-    OutputValidator,
-    ProtectedStringValidator,
-    SecretLeakValidator,
-)
 from agentsec.sandbox.adapters import parse_openai_tool_call
 from agentsec.sandbox.guard import Session, ToolGuard
+from agentsec.sandbox.policy import Policy
 
 Scope = dict[str, Any]
 Receive = Callable[[], Awaitable[dict[str, Any]]]
@@ -205,20 +212,23 @@ class Gateway:
         self._audit = AuditLogger(
             sink, actor="gateway", log_content=config.log_content, keep_fields=AUDIT_KEEP_FIELDS
         )
-        self._output_guard = OutputGuard.default(
-            allowed_hosts=config.allowed_hosts, protected=config.protected
-        )
-        # Tool arguments: secrets and protected strings only. PII and links are normal in
-        # arguments (an email address for send_email); the policy's argument rules cover those.
-        arg_validators: list[OutputValidator] = [SecretLeakValidator()]
-        if config.protected:
-            arg_validators.append(ProtectedStringValidator(config.protected))
-        self._argument_guard = OutputGuard(arg_validators)
+        self._policies = config.policies
+        self._reload_lock = threading.Lock()
+        self._reload_clock = clock
+        self._next_reload = clock() + (config.bundle.reload_interval_s if config.bundle else 0)
+        # None: the first due check does a full load. The files may have changed between
+        # load_config and here, so a fingerprint taken now could describe another bundle.
+        self._bundle_seen: str | None = None
+        self._last_reject: str | None = None
         self._scanner = InjectionScanner()
         self._oidc = None if config.oidc is None else OidcVerifier(config.oidc, fetch=jwks_fetch)
         self._auth_slots = asyncio.Semaphore(MAX_CONCURRENT_AUTH)
         self._limiter = _Limiter(config.requests_per_min, config.concurrent_requests, clock)
-        self._audit.log("gateway_start", policy_rev=config.policy_rev, mode=config.mode)
+        self._audit.log(
+            "gateway_start",
+            policy_rev=config.policies.revision,
+            groups=[g.group for g in config.policies.groups],
+        )
 
     # ------------------------------------------------------------------ ASGI
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -231,10 +241,13 @@ class Gateway:
                 await self._json(send, 200, {"status": "ok"}, request_id)
                 return
             user, groups = await self._identify(scope, request_id)
+            # A reload reads and verifies files: off the event loop.
+            policies, gp = await asyncio.to_thread(self._group_policy, groups)
             if path == "/v1/models" and method == "GET":
                 data = [
                     {"id": n, "object": "model", "owned_by": "agentsec"}
                     for n in self.config.upstreams
+                    if gp.models is None or n in gp.models
                 ]
                 await self._json(send, 200, {"object": "list", "data": data}, request_id)
                 return
@@ -252,7 +265,7 @@ class Gateway:
                     raise HttpError(408, "request body timed out", "body_timeout") from None
                 # Policy checks may resolve DNS and the upstream call blocks: keep both off the loop.
                 status, payload, stream = await asyncio.to_thread(
-                    self._complete, body, user, groups, request_id
+                    self._complete, body, user, groups, request_id, policies, gp
                 )
         except HttpError as e:
             if not e.audited:
@@ -270,6 +283,80 @@ class Gateway:
             await self._sse(send, payload, request_id)
         else:
             await self._json(send, status, payload, request_id)
+
+    # ------------------------------------------------------------ policy
+    def _group_policy(self, groups: tuple[str, ...]) -> tuple[PolicySet, GroupPolicy]:
+        self._maybe_reload()
+        policies = self._policies  # one read: the request keeps this revision throughout
+        if policies.expires is not None and datetime.now(UTC) >= policies.expires:
+            # Stale policy is a slow failure: refuse service rather than enforce it forever.
+            raise HttpError(503, "policy bundle expired", "policy_expired")
+        gp = policies.resolve(groups)
+        if gp is None:
+            raise HttpError(403, "forbidden", "forbidden")
+        return policies, gp
+
+    def _bundle_fingerprint(self) -> str | None:
+        bundle = self.config.bundle
+        if bundle is None:
+            return None
+        h = hashlib.sha256()
+        for name in (MANIFEST, SIGNATURE):
+            try:
+                with (Path(bundle.dir) / name).open("rb") as fh:
+                    # Bounded, like the verifier: anyone who can write the directory must not be
+                    # able to make the gateway read a huge file into memory.
+                    h.update(fh.read(MAX_FILE_BYTES + 1))
+            except OSError:
+                h.update(b"missing")
+            h.update(b"\0")
+        return h.hexdigest()
+
+    def _maybe_reload(self) -> None:
+        bundle = self.config.bundle
+        if bundle is None or bundle.reload_interval_s == 0:
+            return
+        now = self._reload_clock()
+        if now < self._next_reload or not self._reload_lock.acquire(blocking=False):
+            return  # not due, or another request is already reloading
+        try:
+            self._next_reload = now + bundle.reload_interval_s
+            seen = self._bundle_fingerprint()
+            if seen == self._bundle_seen:
+                return
+            current = self._policies
+            try:
+                new = load_bundle(
+                    bundle.dir, bundle.public_key, upstreams=set(self.config.upstreams)
+                )
+                if new.revision == current.revision:
+                    self._bundle_seen = seen  # the bundle already in force
+                    return
+                floor = max(bundle.min_revision, (current.numeric_revision or 0) + 1)
+                if new.numeric_revision is None or new.numeric_revision < floor:
+                    raise BundleError(
+                        f"revision {new.numeric_revision} is not above the current "
+                        f"{current.numeric_revision} (rollback refused)"
+                    )
+                if bundle.state_file is not None:
+                    # Persist before enforcing: if this fails, the old bundle stays in force.
+                    write_state(bundle.state_file, new)
+            except Exception as e:  # noqa: BLE001 - any failure keeps the last good bundle
+                # Retried every interval (a bundle copied file by file settles), logged once.
+                if str(e) != self._last_reject:
+                    self._last_reject = str(e)
+                    self._audit.log(
+                        "gateway_bundle_rejected", reason=str(e), policy_rev=current.revision
+                    )
+                return
+            self._policies, self._bundle_seen, self._last_reject = new, seen, None
+            self._audit.log(
+                "gateway_bundle_loaded",
+                policy_rev=new.revision,
+                groups=[g.group for g in new.groups],
+            )
+        finally:
+            self._reload_lock.release()
 
     def _log_rejection(self, e: HttpError, request_id: str) -> None:
         try:
@@ -352,35 +439,42 @@ class Gateway:
 
     # ------------------------------------------------------------- the request
     def _complete(
-        self, body: bytes, user: str, groups: tuple[str, ...], request_id: str
+        self,
+        body: bytes,
+        user: str,
+        groups: tuple[str, ...],
+        request_id: str,
+        policies: PolicySet,
+        gp: GroupPolicy,
     ) -> tuple[int, dict[str, Any], bool]:
         cfg = self.config
         log = self._audit.bind(actor=user, session_id=request_id)
-        enforce = cfg.mode == "enforce"
-        req = self._parse(body)
+        enforce = gp.mode == "enforce"
+        req = self._parse(body, gp)
         stream = req.pop("stream")
         include_usage = req.pop("include_usage")
         log.log(
             "gateway_request",
             groups=list(groups),
-            policy_rev=cfg.policy_rev,
-            mode=cfg.mode,
+            policy_group=gp.group,
+            policy_rev=policies.revision,
+            mode=gp.mode,
             model=req["model"],
             stream=stream,
         )
         upstream = cfg.upstreams[req["model"]]
-        guard = ToolGuard(cfg.policy, audit=log)
+        guard = ToolGuard(gp.policy, audit=log)
         mw = AgentMiddleware(
             guard=guard,
-            output_guard=self._output_guard,
+            output_guard=gp.output_guard,
             scanner=self._scanner,
             audit=log,
-            block_on_injection=cfg.block_on_injection,
-            spotlight_untrusted=cfg.spotlight_tool_results,
+            block_on_injection=gp.block_on_injection,
+            spotlight_untrusted=gp.spotlight_tool_results,
         )
         session = Session(id=request_id)  # taint is per request: the history is resent each turn
 
-        removed_tools = self._filter_tools(req, log, enforce)
+        removed_tools = self._filter_tools(req, log, enforce, gp.policy)
         blocked = self._screen_messages(req, mw, session)
         if blocked:
             log.log("gateway_input_blocked", reasons=blocked, enforced=enforce)
@@ -398,7 +492,7 @@ class Gateway:
             log.log("gateway_upstream_error", upstream=upstream.name, error="timeout")
             raise HttpError(504, "upstream timeout", "upstream_timeout") from None
 
-        result = self._check_response(raw, mw, session, enforce, log)
+        result = self._check_response(raw, mw, session, enforce, log, gp)
         result.update(
             id=f"chatcmpl-{request_id}", object="chat.completion", created=int(time.time())
         )
@@ -412,7 +506,7 @@ class Gateway:
         )
         return 200, result, stream
 
-    def _parse(self, body: bytes) -> dict[str, Any]:
+    def _parse(self, body: bytes, gp: GroupPolicy) -> dict[str, Any]:
         try:
             data = json.loads(body)
         except ValueError:
@@ -420,7 +514,11 @@ class Gateway:
         if not isinstance(data, dict):
             raise HttpError(400, "body must be a JSON object", "bad_request")
         model = data.get("model")
-        if not isinstance(model, str) or model not in self.config.upstreams:
+        if (
+            not isinstance(model, str)
+            or model not in self.config.upstreams
+            or (gp.models is not None and model not in gp.models)
+        ):
             raise HttpError(404, "unknown model", "model_not_found")
         if data.get("n", 1) != 1:
             raise HttpError(400, "only n=1 is supported", "bad_request")
@@ -448,10 +546,12 @@ class Gateway:
         req["stream"], req["include_usage"] = stream, include_usage
         return req
 
-    def _filter_tools(self, req: dict[str, Any], log: AuditLogger, enforce: bool) -> list[str]:
+    def _filter_tools(
+        self, req: dict[str, Any], log: AuditLogger, enforce: bool, policy: Policy
+    ) -> list[str]:
         """Offer the model only tools the policy allows and whose definitions scan clean."""
         if not enforce:
-            return self._monitor_tools(req, log)
+            return self._monitor_tools(req, log, policy)
         tools = req.pop("tools", None)
         choice = req.pop("tool_choice", None)
         parallel = req.pop("parallel_tool_calls", None)
@@ -461,12 +561,12 @@ class Gateway:
             return []
         if not isinstance(tools, list):
             raise HttpError(400, "tools must be a list", "bad_request")
-        policy = self.config.policy.tools
+        rules = policy.tools
         kept, removed = [], []
         for t in tools:
             fn = t.get("function") if isinstance(t, dict) and t.get("type") == "function" else None
             name = fn.get("name") if isinstance(fn, dict) else None
-            rule = policy.get(name) if isinstance(name, str) else None
+            rule = rules.get(name) if isinstance(name, str) else None
             if rule is None or not rule.allow:
                 removed.append(str(name))
                 continue
@@ -492,17 +592,17 @@ class Gateway:
                     req[key] = value
         return removed
 
-    def _monitor_tools(self, req: dict[str, Any], log: AuditLogger) -> list[str]:
+    def _monitor_tools(self, req: dict[str, Any], log: AuditLogger, policy: Policy) -> list[str]:
         """Monitor mode: record what enforce mode would remove, and remove nothing."""
         tools = req.get("tools")
         if not isinstance(tools, list):
             return []
-        policy = self.config.policy.tools
+        rules = policy.tools
         named = [t for t in tools if isinstance(t, dict) and isinstance(t.get("function"), dict)]
         would = []
         for t in named:
             name = t["function"].get("name")
-            rule = policy.get(name) if isinstance(name, str) else None
+            rule = rules.get(name) if isinstance(name, str) else None
             if rule is None or not rule.allow:
                 would.append(str(name))
         would += [f.tool for f in scan_tool_definitions([_scannable(t) for t in named])]
@@ -536,7 +636,13 @@ class Gateway:
         return reasons
 
     def _check_response(
-        self, raw: Any, mw: AgentMiddleware, session: Session, enforce: bool, log: AuditLogger
+        self,
+        raw: Any,
+        mw: AgentMiddleware,
+        session: Session,
+        enforce: bool,
+        log: AuditLogger,
+        gp: GroupPolicy,
     ) -> dict[str, Any]:
         choices = raw.get("choices") if isinstance(raw, dict) else None
         message = choices[0].get("message") if choices and isinstance(choices[0], dict) else None
@@ -576,7 +682,7 @@ class Gateway:
                 call_id = call_id or f"call_{uuid.uuid4().hex}"
             # Arguments are model output too: a secret or protected string must not ride out in
             # one. Withheld rather than rewritten, since a rewritten argument changes the action.
-            arg_check = self._argument_guard.process(arguments)
+            arg_check = gp.argument_guard.process(arguments)
             if arg_check.violations:
                 log.log(
                     "gateway_tool_call_output_violation",

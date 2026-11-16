@@ -1,0 +1,15 @@
+# Example gateway policy bundle. Sign it where the signing key lives, then point the gateway at it:
+#   agentsec bundle sign examples/bundle --key file:/secure/bundle-signing.pem
+#   agentsec bundle verify examples/bundle --public-key /etc/agentsec/bundle-signing.pub
+# Raise `revision` on every change: the gateway refuses a bundle that is not newer.
+revision: 1
+expires: '2027-06-30T00:00:00Z'   # past this, the gateway stops serving (503)
+group_policies:                   # first entry naming one of the user's groups wins
+  - group: ml-platform
+    tools: policies/ml-platform.yaml
+    models: [llama3.1-8b]
+    output: {allowed_hosts: [corp.example], protected: []}
+    input: {block_on_injection: true, spotlight_tool_results: false}
+  - group: '*'                    # every other authenticated user
+    tools: policies/default.yaml
+    mode: monitor                 # log what would be refused, refuse nothing

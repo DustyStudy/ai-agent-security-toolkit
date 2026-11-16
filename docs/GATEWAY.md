@@ -36,6 +36,28 @@ client.chat.completions.create(model="llama3.1-8b", messages=[{"role": "user", "
 
 `mode: monitor` computes and logs every decision but delivers requests and answers unchanged. Identity, body and rate limits apply in both modes.
 
+## Per-group policy with signed bundles
+
+Instead of one `policy:` file, the gateway can enforce a **bundle**: a directory with a `manifest.yaml`, the ToolGuard policies it references, and a `manifest.sig` written by `agentsec bundle sign`. See [`examples/bundle/`](../examples/bundle/).
+
+```yaml
+# gateway.yaml: replaces policy, mode, output and input, which move into the bundle
+bundle:
+  dir: /var/lib/agentsec/bundle
+  public_key_file: /etc/agentsec/bundle-signing.pub   # Ed25519
+  min_revision: 0          # raise it to refuse old bundles, also across restarts
+  reload_interval_s: 10    # 0: never reload
+  state_file: /var/lib/agentsec/bundle-state.json   # recommended: blocks rollback across restarts
+```
+
+- **Groups.** The first `group_policies` entry that names one of the user's groups wins; `group: '*'` matches every authenticated user. A user who matches no entry gets a 403. Each entry has its own tool policy, `mode`, `models` (the upstreams the group may use; others get a 404 and are left out of `/v1/models`), `output` and `input` settings.
+- **Signature.** `manifest.sig` holds the SHA-256 of the manifest and of every referenced file, and an Ed25519 signature over that list. The gateway checks the signature first, then every hash, and parses YAML only from the bytes it hashed. Paths must stay inside the bundle.
+- **Startup.** No valid bundle, no gateway: `agentsec serve` refuses to start.
+- **Reload.** Every `reload_interval_s` the gateway checks whether `manifest.yaml` or `manifest.sig` changed. A new bundle is used only if it verifies and its `revision` is above the current one (and at least `min_revision`). Anything else keeps the last good bundle and writes one `gateway_bundle_rejected` audit record per distinct reason. Requests already running finish under the revision they started with, and every request records `policy_rev` and `policy_group`.
+- **Rollback across restarts.** With `state_file`, the gateway records the highest revision it accepted (written atomically, before the bundle is enforced) and refuses an older bundle, or a different bundle with the same revision number, at startup and on reload. Keep the state file writable by the gateway only, outside the bundle directory. Without it, only `min_revision` and `expires` limit a rollback after a restart.
+- **Expiry.** `expires` is required. Once it passes, the gateway answers 503 until a newer bundle loads.
+- **Keys.** Generate a key pair with `openssl genpkey -algorithm ed25519 -out bundle-signing.pem` and `openssl pkey -in bundle-signing.pem -pubout -out bundle-signing.pub`. Keep the private key away from the gateway host and out of the repository; `bundle sign --key` takes `env:NAME` or `file:/path`, never the key itself. KMS or HSM signing is a design open question.
+
 ## Failure behaviour
 
 | Failure | Result |
@@ -47,6 +69,8 @@ client.chat.completions.create(model="llama3.1-8b", messages=[{"role": "user", "
 | Upstream answer malformed | 502 |
 | Any other error | 500 with no detail |
 | Body too large | 413 |
+| No group policy matches the user | 403 |
+| Bundle expired | 503 |
 | Rate or concurrency limit | 429 |
 | More than 8 token verifications in flight (`oidc` mode) | 503 |
 
@@ -59,7 +83,8 @@ client.chat.completions.create(model="llama3.1-8b", messages=[{"role": "user", "
 
 ## Limits in this version
 
-- Signed policy bundles, per-group policies, metrics, holdback streaming and the MCP gateway are later phases of the design.
+- Metrics, holdback streaming and the MCP gateway are later phases of the design.
+- Without `bundle.state_file`, rollback protection across restarts relies on `min_revision` and `expires`.
 - IDE tools that only take a static API key cannot get an OIDC token; see the design's open questions.
 - Tool-call limits (`max_calls`) count per request, not per user over time.
 - Path and URL argument rules are evaluated on the gateway host, which may not match where the client runs the tool.

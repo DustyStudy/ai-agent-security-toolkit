@@ -154,9 +154,29 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print(f"invalid gateway config: {e}", file=sys.stderr)
         return 2
     if args.check:
-        print(f"config ok: {len(config.upstreams)} upstream(s), policy {config.policy_rev}")
+        print(f"config ok: {len(config.upstreams)} upstream(s), policy {config.policies.revision}")
         return 0
     serve(config)
+    return 0
+
+
+def cmd_bundle(args: argparse.Namespace) -> int:
+    from agentsec.gateway.bundle import BundleError, load_bundle, load_public_key, sign_bundle
+    from agentsec.gateway.config import ConfigError, resolve_secret
+
+    try:
+        if args.action == "sign":
+            # A reference, never the key on the command line: argv is visible to other users.
+            out = sign_bundle(args.dir, resolve_secret(args.key).encode())
+            print(f"signed: {out}")
+        else:
+            with open(args.public_key, "rb") as fh:
+                policies = load_bundle(args.dir, load_public_key(fh.read()))
+            groups = ", ".join(g.group for g in policies.groups)
+            print(f"bundle ok: {policies.revision}, expires {policies.expires}, groups {groups}")
+    except (BundleError, ConfigError, OSError, ValueError) as e:
+        print(f"bundle {args.action} failed: {e}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -228,6 +248,18 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--config", required=True, help="gateway YAML config")
     sv.add_argument("--check", action="store_true", help="validate the config and exit")
     sv.set_defaults(func=cmd_serve)
+
+    b = sub.add_parser("bundle", help="Sign or verify a gateway policy bundle.")
+    b_sub = b.add_subparsers(dest="action", required=True)
+    bs = b_sub.add_parser("sign", help="Write manifest.sig for a bundle directory.")
+    bs.add_argument("dir")
+    bs.add_argument(
+        "--key", required=True, help="Ed25519 private key PEM as env:NAME or file:/path"
+    )
+    bv = b_sub.add_parser("verify", help="Verify a bundle's signature, hashes and contents.")
+    bv.add_argument("dir")
+    bv.add_argument("--public-key", required=True, help="Ed25519 public key PEM file")
+    b.set_defaults(func=cmd_bundle)
     return p
 
 

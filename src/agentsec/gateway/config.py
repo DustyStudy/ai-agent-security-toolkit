@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from agentsec.gateway.oidc import SUPPORTED_ALGORITHMS, OidcSettings
+from agentsec.gateway.policyset import ANY_GROUP, PolicySet, group_policy
 from agentsec.sandbox.policy import Policy
 
 
@@ -34,11 +35,17 @@ class Upstream:
 
 
 @dataclass(frozen=True)
+class BundleSettings:
+    dir: str
+    public_key: Any  # Ed25519PublicKey
+    min_revision: int = 0  # refuse older bundles, also across restarts
+    reload_interval_s: float = 10.0  # 0: never reload
+    state_file: str | None = None  # highest accepted revision, so a restart cannot roll back
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
-    policy: Policy
-    # First 128 bits of the policy file's sha256: under the 64 characters that log_content=False
-    # would replace with a hash.
-    policy_rev: str
+    policies: PolicySet  # what is enforced at startup; a bundle may replace it on reload
     upstreams: dict[str, Upstream]
     audit_file: str
     trusted_proxies: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
@@ -51,11 +58,7 @@ class GatewayConfig:
     tls_cert_file: str | None = None
     tls_key_file: str | None = None
     tls_terminated_by_proxy: bool = False
-    mode: str = "enforce"  # enforce | monitor
-    allowed_hosts: tuple[str, ...] = ()
-    protected: tuple[str, ...] = ()
-    block_on_injection: bool = True
-    spotlight_tool_results: bool = False
+    bundle: BundleSettings | None = None  # set: policies come from a signed bundle
     log_content: bool = False
     cef_file: str | None = None
     max_body_bytes: int = 1024 * 1024
@@ -79,7 +82,18 @@ def resolve_secret(ref: str) -> str:
     raise ConfigError("secrets must be references: 'env:NAME' or 'file:/path'")
 
 
-_TOP = {"listen", "identity", "policy", "mode", "output", "input", "limits", "upstreams", "audit"}
+_TOP = {
+    "listen",
+    "identity",
+    "policy",
+    "bundle",
+    "mode",
+    "output",
+    "input",
+    "limits",
+    "upstreams",
+    "audit",
+}
 _SECTIONS: dict[str, set[str]] = {
     "listen": {"host", "port", "tls", "tls_terminated_by_proxy"},
     "tls": {"cert_file", "key_file"},
@@ -114,6 +128,7 @@ _SECTIONS: dict[str, set[str]] = {
     },
     "audit": {"file", "log_content", "cef_file"},
     "upstream": {"url", "model", "api_key"},
+    "bundle": {"dir", "public_key_file", "min_revision", "reload_interval_s", "state_file"},
 }
 
 
@@ -192,6 +207,69 @@ def _oidc(section: dict[str, Any]) -> OidcSettings:
     )
 
 
+def _single_policy(data: dict[str, Any], base: Path) -> PolicySet:
+    """One policy for every authenticated user, from ``policy``, ``mode``, ``output``, ``input``."""
+    policy_section = data.get("policy")
+    if not isinstance(policy_section, str):
+        raise ConfigError("policy must be the path of a tool policy YAML file (or use bundle)")
+    raw_policy = (base / policy_section).read_bytes()  # one read: the hash covers what is parsed
+    policy = Policy.from_dict(yaml.safe_load(raw_policy))
+    mode = data.get("mode", "enforce")
+    if mode not in {"enforce", "monitor"}:
+        raise ConfigError("mode must be 'enforce' or 'monitor'")
+    output, inp = _section(data, "output"), _section(data, "input")
+    entry = group_policy(
+        ANY_GROUP,
+        policy,
+        mode=mode,
+        allowed_hosts=_strs(output.get("allowed_hosts", []), "output.allowed_hosts"),
+        protected=_strs(output.get("protected", []), "output.protected"),
+        block_on_injection=_typed(inp.get("block_on_injection", True), bool, "block_on_injection"),
+        spotlight_tool_results=_typed(
+            inp.get("spotlight_tool_results", False), bool, "spotlight_tool_results"
+        ),
+    )
+    # First 128 bits of the file's sha256: under the 64 characters log_content=False hashes.
+    return PolicySet(
+        revision="sha256:" + hashlib.sha256(raw_policy).hexdigest()[:32], groups=(entry,)
+    )
+
+
+def _bundle(
+    section: dict[str, Any], base: Path, upstreams: set[str]
+) -> tuple[BundleSettings, PolicySet]:
+    from agentsec.gateway.bundle import (
+        BundleError,
+        check_state,
+        load_bundle,
+        load_public_key,
+        read_state,
+        write_state,
+    )
+
+    root = _typed(section.get("dir"), str, "bundle.dir")
+    key_file = _typed(section.get("public_key_file"), str, "bundle.public_key_file")
+    min_revision = _typed(section.get("min_revision", 0), int, "bundle.min_revision")
+    interval = _typed(section.get("reload_interval_s", 10.0), float, "bundle.reload_interval_s")
+    if min_revision < 0 or not math.isfinite(interval) or interval < 0:
+        raise ConfigError("bundle.min_revision and bundle.reload_interval_s must be >= 0")
+    state = section.get("state_file")
+    state_file = None if state is None else str(base / _typed(state, str, "bundle.state_file"))
+    try:
+        key = load_public_key((base / key_file).read_bytes())
+        settings = BundleSettings(str(base / root), key, min_revision, float(interval), state_file)
+        # No valid bundle, no gateway: never start without a verified policy.
+        policies = load_bundle(settings.dir, key, upstreams=upstreams)
+        if policies.numeric_revision is not None and policies.numeric_revision < min_revision:
+            raise BundleError(f"bundle revision is below bundle.min_revision ({min_revision})")
+        if state_file is not None:
+            check_state(policies, read_state(state_file))
+            write_state(state_file, policies)
+    except (BundleError, OSError, ValueError) as e:
+        raise ConfigError(f"bundle: {e}") from e
+    return settings, policies
+
+
 def load_config(path: str | Path) -> GatewayConfig:
     path = Path(path)
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -236,16 +314,6 @@ def load_config(path: str | Path) -> GatewayConfig:
     except ValueError as e:
         raise ConfigError(f"identity.trusted_proxies: {e}") from e
 
-    policy_section = data.get("policy")
-    if not isinstance(policy_section, str):
-        raise ConfigError("policy must be the path of a tool policy YAML file")
-    raw_policy = (base / policy_section).read_bytes()  # one read: the hash covers what is parsed
-    policy = Policy.from_dict(yaml.safe_load(raw_policy))
-
-    mode = data.get("mode", "enforce")
-    if mode not in {"enforce", "monitor"}:
-        raise ConfigError("mode must be 'enforce' or 'monitor'")
-
     upstreams_raw = data.get("upstreams")
     if not isinstance(upstreams_raw, dict) or not upstreams_raw:
         raise ConfigError("upstreams must map at least one model name to an upstream")
@@ -270,18 +338,22 @@ def load_config(path: str | Path) -> GatewayConfig:
             api_key_ref=api_key,
         )
 
-    output, inp, limits = (
-        _section(data, "output"),
-        _section(data, "input"),
-        _section(data, "limits"),
-    )
+    limits = _section(data, "limits")
+    bundle = None
+    if "bundle" in data:
+        if any(k in data for k in ("policy", "mode", "output", "input")):
+            # With a bundle every group carries its own; a second source would be ambiguous.
+            raise ConfigError("with bundle, put policy, mode, output and input in the bundle")
+        bundle, policies = _bundle(_section(data, "bundle"), base, set(upstreams))
+    else:
+        policies = _single_policy(data, base)
     audit = _section(data, "audit")
     audit_file = _typed(audit.get("file"), str, "audit.file")
     cef_file = audit.get("cef_file")
 
     return GatewayConfig(
-        policy=policy,
-        policy_rev="sha256:" + hashlib.sha256(raw_policy).hexdigest()[:32],
+        policies=policies,
+        bundle=bundle,
         upstreams=upstreams,
         audit_file=str(base / audit_file),
         trusted_proxies=proxies,
@@ -298,13 +370,6 @@ def load_config(path: str | Path) -> GatewayConfig:
         tls_cert_file=None if cert is None else str(base / cert),
         tls_key_file=None if key is None else str(base / key),
         tls_terminated_by_proxy=behind_proxy,
-        mode=mode,
-        allowed_hosts=_strs(output.get("allowed_hosts", []), "output.allowed_hosts"),
-        protected=_strs(output.get("protected", []), "output.protected"),
-        block_on_injection=_typed(inp.get("block_on_injection", True), bool, "block_on_injection"),
-        spotlight_tool_results=_typed(
-            inp.get("spotlight_tool_results", False), bool, "spotlight_tool_results"
-        ),
         log_content=_typed(audit.get("log_content", False), bool, "audit.log_content"),
         cef_file=None if cef_file is None else str(base / _typed(cef_file, str, "cef_file")),
         max_body_bytes=_positive(limits, "max_body_bytes", 1024 * 1024),

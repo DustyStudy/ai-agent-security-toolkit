@@ -66,7 +66,7 @@ bundle:
 With `mcp_upstreams` set, the gateway also serves one MCP endpoint, `/mcp` (streamable HTTP), in front of approved upstream MCP servers. Here the gateway makes the tool call itself, so its policy really is enforced, as long as the upstream servers accept connections only from the gateway.
 
 ```yaml
-# gateway.yaml (needs pip install "ai-agent-security-toolkit[gateway,mcp]")
+# gateway.yaml (needs pip install "ai-agent-security-toolkit[gateway,mcp]" with mcp>=2.3)
 mcp_upstreams:
   jira: {url: https://mcp-jira.internal/mcp, auth: file:/run/secrets/jira-mcp-token}
   docs: {url: http://mcp-docs.internal:8080/mcp, pins: pins/docs.json}

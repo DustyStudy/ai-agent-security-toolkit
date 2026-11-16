@@ -1,6 +1,6 @@
 # Design: agentsec gateway
 
-Status: phases 1 and 2 implemented in 0.6.0 (preview); phase 3 (MCP gateway and access tokens for IDE clients) implemented on main. Owner: TBD.
+Status: phases 1 and 2 implemented in 0.6.0, phase 3 (MCP gateway and access tokens for IDE clients) in 0.7.0; all in preview. Owner: TBD.
 
 ## Problem
 

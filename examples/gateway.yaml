@@ -15,6 +15,18 @@ identity:
   groups_header: X-Auth-Request-Groups
   trusted_proxies: [127.0.0.1/32]   # the header is ignored from any other peer and the request refused
   allowed_groups: []                # empty: any user the proxy authenticated
+  # Or verify the IdP's tokens directly (Authorization: Bearer <JWT>). Remove trusted_proxies
+  # and the header settings above; the two modes cannot be combined.
+  # mode: oidc
+  # oidc:
+  #   issuer: https://idp.corp.example/realms/main
+  #   audience: agentsec-gateway
+  #   jwks_url: https://idp.corp.example/realms/main/protocol/openid-connect/certs
+  #   algorithms: [RS256, ES256]    # asymmetric only
+  #   user_claim: sub
+  #   groups_claim: groups          # must be a list of strings in the token
+  #   jwks_cache_s: 600
+  #   leeway_s: 60
 
 policy: policy.yaml        # the existing ToolGuard policy format; its sha256 is logged as policy_rev
 mode: enforce              # monitor: log every decision, change nothing (try a policy before enforcing)

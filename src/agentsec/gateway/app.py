@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from agentsec.gateway.config import GatewayConfig, Upstream
+from agentsec.gateway.oidc import OidcVerifier, TokenRejected, fetch_jwks
 from agentsec.integrations.mcp import scan_tool_definitions
 from agentsec.middleware.audit import AuditLogger, AuditSink, FileSink, TeeSink
 from agentsec.middleware.cef import CefSink
@@ -52,6 +53,7 @@ _MESSAGE_FIELDS = {"role", "content", "name", "tool_calls", "tool_call_id"}
 _ROLES = {"system", "developer", "user", "assistant", "tool"}
 _FINISH = {"stop", "length", "tool_calls", "content_filter"}
 WITHHELD_NOTICE = "A tool call was withheld by policy."
+MAX_CONCURRENT_AUTH = 8  # token verifications in flight, across all clients
 _LOG = logging.getLogger("agentsec.gateway")
 # Decision metadata stays readable with log_content off; prompts and answers are still hashed.
 # These hold policy reasons, names and error kinds, never message text.
@@ -61,9 +63,10 @@ AUDIT_KEEP_FIELDS = frozenset(
 
 
 class HttpError(Exception):
-    def __init__(self, status: int, message: str, code: str) -> None:
+    def __init__(self, status: int, message: str, code: str, *, audited: bool = False) -> None:
         super().__init__(message)
         self.status, self.message, self.code = status, message, code
+        self.audited = audited  # already has its own audit record; do not log it twice
 
 
 class UpstreamError(Exception):
@@ -187,6 +190,7 @@ class Gateway:
         transport: Transport = http_transport,
         sink: AuditSink | None = None,
         clock: Callable[[], float] = time.monotonic,
+        jwks_fetch: Callable[[str], dict[str, Any]] = fetch_jwks,
     ) -> None:
         self.config = config
         self._transport = transport
@@ -211,6 +215,8 @@ class Gateway:
             arg_validators.append(ProtectedStringValidator(config.protected))
         self._argument_guard = OutputGuard(arg_validators)
         self._scanner = InjectionScanner()
+        self._oidc = None if config.oidc is None else OidcVerifier(config.oidc, fetch=jwks_fetch)
+        self._auth_slots = asyncio.Semaphore(MAX_CONCURRENT_AUTH)
         self._limiter = _Limiter(config.requests_per_min, config.concurrent_requests, clock)
         self._audit.log("gateway_start", policy_rev=config.policy_rev, mode=config.mode)
 
@@ -224,7 +230,7 @@ class Gateway:
             if path == "/healthz" and method == "GET":
                 await self._json(send, 200, {"status": "ok"}, request_id)
                 return
-            user, groups = self._identify(scope)
+            user, groups = await self._identify(scope, request_id)
             if path == "/v1/models" and method == "GET":
                 data = [
                     {"id": n, "object": "model", "owned_by": "agentsec"}
@@ -249,7 +255,8 @@ class Gateway:
                     self._complete, body, user, groups, request_id
                 )
         except HttpError as e:
-            self._log_rejection(e, request_id)
+            if not e.audited:
+                self._log_rejection(e, request_id)
             await self._error(send, e, request_id)
             return
         except OSError:
@@ -270,7 +277,39 @@ class Gateway:
         except Exception:  # noqa: BLE001 - the client gets its error either way
             _LOG.warning("could not audit a rejected request", exc_info=True)
 
-    def _identify(self, scope: Scope) -> tuple[str, tuple[str, ...]]:
+    async def _identify(self, scope: Scope, request_id: str) -> tuple[str, tuple[str, ...]]:
+        if self._oidc is None:
+            user, groups = self._from_trusted_header(scope)
+        else:
+            # Unauthenticated work is bounded before any per-user limiter can apply: a flood of
+            # bad tokens gets 503s instead of queueing up the worker threads.
+            if self._auth_slots.locked():
+                raise HttpError(503, "busy", "busy")
+            async with self._auth_slots:
+                # A JWKS refresh is blocking network I/O: keep it off the event loop.
+                user, groups = await asyncio.to_thread(
+                    self._from_token, self._oidc, scope, request_id
+                )
+        allowed = self.config.allowed_groups
+        if allowed and not set(groups) & set(allowed):
+            raise HttpError(403, "forbidden", "forbidden")
+        return user, groups
+
+    def _from_token(
+        self, verifier: OidcVerifier, scope: Scope, request_id: str
+    ) -> tuple[str, tuple[str, ...]]:
+        auth = [v for k, v in scope.get("headers", []) if k.lower() == b"authorization"]
+        scheme, _, token = (auth[0].decode("latin-1") if len(auth) == 1 else "").partition(" ")
+        try:
+            if scheme.lower() != "bearer" or not token.strip():
+                raise TokenRejected("no single bearer token")
+            return verifier.verify(token.strip())
+        except TokenRejected as e:
+            # The reason is for the log; the client learns nothing about why.
+            self._audit.log("gateway_auth_failed", request_id=request_id, reason=str(e))
+            raise HttpError(401, "unauthenticated", "unauthenticated", audited=True) from None
+
+    def _from_trusted_header(self, scope: Scope) -> tuple[str, tuple[str, ...]]:
         """Trusted-header identity: the header counts only from a configured auth proxy."""
         client = scope.get("client")
         try:
@@ -295,9 +334,6 @@ class Gateway:
         groups = (
             tuple(g.strip() for g in groups_raw[0].split(",") if g.strip()) if groups_raw else ()
         )
-        allowed = self.config.allowed_groups
-        if allowed and not set(groups) & set(allowed):
-            raise HttpError(403, "forbidden", "forbidden")
         return user, groups
 
     async def _read_body(self, receive: Receive) -> bytes:

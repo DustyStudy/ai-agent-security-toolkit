@@ -22,7 +22,11 @@ client.chat.completions.create(model="llama3.1-8b", messages=[{"role": "user", "
 
 ## What it does on each request
 
-1. **Identity.** The user header is accepted only when the TCP peer is in `identity.trusted_proxies`. A missing, empty, repeated or untrusted header gets a 401. `allowed_groups` restricts access by group.
+1. **Identity**, one of two modes (`identity.mode`):
+   - `trusted_header`: the user header is accepted only when the TCP peer is in `identity.trusted_proxies`. A missing, empty, repeated or untrusted header gets a 401.
+   - `oidc`: one `Authorization: Bearer <JWT>` from your IdP, verified against its JWKS (fetched over https). Only asymmetric algorithms are accepted; `iss`, `aud`, `exp`, `iat` and `sub` must be present and valid; a key that declares an algorithm verifies only that algorithm. Keys are cached and refreshed after half of `jwks_cache_s`; if the IdP is down, the cached keys work until `jwks_cache_s`, then every token is refused. Key fetches, for an unknown `kid` or a stale cache, happen at most once a minute and have a total deadline. The audit log records why a token failed; the client only sees 401.
+
+   In both modes `allowed_groups` restricts access by group.
 2. **Rebuild the request.** Only known fields go upstream (`model`, `messages`, `tools`, `tool_choice`, `temperature`, `max_tokens`, ...). `model` picks a configured upstream by name, so a client can never choose a URL. `max_tokens` is capped and `n` must be 1.
 3. **Filter tools.** Tools the policy does not allow, and tool definitions that look poisoned, are removed before the model sees them. A `tool_choice` naming a removed tool gets a 400.
 4. **Screen input.** Every message is scanned for prompt injection. `role: tool` messages count as untrusted and taint the request, whatever their content, so the policy's taint rules (deny side-effecting tools after reading untrusted content) apply to the answer. A flagged message blocks the request.
@@ -44,6 +48,7 @@ client.chat.completions.create(model="llama3.1-8b", messages=[{"role": "user", "
 | Any other error | 500 with no detail |
 | Body too large | 413 |
 | Rate or concurrency limit | 429 |
+| More than 8 token verifications in flight (`oidc` mode) | 503 |
 
 ## Deployment requirements
 
@@ -54,7 +59,8 @@ client.chat.completions.create(model="llama3.1-8b", messages=[{"role": "user", "
 
 ## Limits in this version
 
-- Identity is trusted-header only; OIDC tokens, signed policy bundles, per-group policies and the MCP gateway are later phases of the design.
+- Signed policy bundles, per-group policies, metrics, holdback streaming and the MCP gateway are later phases of the design.
+- IDE tools that only take a static API key cannot get an OIDC token; see the design's open questions.
 - Tool-call limits (`max_calls`) count per request, not per user over time.
 - Path and URL argument rules are evaluated on the gateway host, which may not match where the client runs the tool.
 - Models that write tool calls as JSON text instead of `tool_calls` are not recognised as tool calls.

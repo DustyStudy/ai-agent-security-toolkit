@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from agentsec.gateway.oidc import SUPPORTED_ALGORITHMS, OidcSettings
 from agentsec.sandbox.policy import Policy
 
 
@@ -43,6 +45,7 @@ class GatewayConfig:
     user_header: str = "x-auth-request-user"
     groups_header: str = "x-auth-request-groups"
     allowed_groups: tuple[str, ...] = ()  # empty: any authenticated user
+    oidc: OidcSettings | None = None  # set: identity comes from bearer tokens, not headers
     host: str = "127.0.0.1"
     port: int = 8443
     tls_cert_file: str | None = None
@@ -80,7 +83,24 @@ _TOP = {"listen", "identity", "policy", "mode", "output", "input", "limits", "up
 _SECTIONS: dict[str, set[str]] = {
     "listen": {"host", "port", "tls", "tls_terminated_by_proxy"},
     "tls": {"cert_file", "key_file"},
-    "identity": {"mode", "user_header", "groups_header", "trusted_proxies", "allowed_groups"},
+    "identity": {
+        "mode",
+        "user_header",
+        "groups_header",
+        "trusted_proxies",
+        "allowed_groups",
+        "oidc",
+    },
+    "oidc": {
+        "issuer",
+        "audience",
+        "jwks_url",
+        "algorithms",
+        "user_claim",
+        "groups_claim",
+        "jwks_cache_s",
+        "leeway_s",
+    },
     "output": {"allowed_hosts", "protected"},
     "input": {"block_on_injection", "spotlight_tool_results"},
     "limits": {
@@ -124,8 +144,9 @@ def _strs(value: Any, where: str) -> tuple[str, ...]:
 
 def _positive(section: dict[str, Any], key: str, default: Any, kind: type = int) -> Any:
     value = _typed(section.get(key, default), kind, key)
-    if value <= 0:
-        raise ConfigError(f"{key} must be positive")
+    # YAML has .nan and .inf: NaN passes "<= 0", and infinity disables a limit or an expiry.
+    if not math.isfinite(value) or value <= 0:
+        raise ConfigError(f"{key} must be a positive finite number")
     return value
 
 
@@ -136,6 +157,39 @@ def _is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _oidc(section: dict[str, Any]) -> OidcSettings:
+    issuer = _typed(section.get("issuer"), str, "identity.oidc.issuer")
+    audience = _typed(section.get("audience"), str, "identity.oidc.audience")
+    jwks_url = _typed(section.get("jwks_url"), str, "identity.oidc.jwks_url")
+    parts = urlsplit(jwks_url)
+    loopback = parts.hostname is not None and _is_loopback(parts.hostname)
+    if not (parts.scheme == "https" or (parts.scheme == "http" and loopback)):
+        # The keys decide who is anyone: fetching them over plain HTTP lets the network forge users.
+        raise ConfigError("identity.oidc.jwks_url must be https (http only for a loopback host)")
+    algorithms = _strs(section.get("algorithms", ["RS256", "ES256"]), "identity.oidc.algorithms")
+    bad = set(algorithms) - SUPPORTED_ALGORITHMS
+    if bad or not algorithms:
+        raise ConfigError(
+            f"identity.oidc.algorithms must be asymmetric algorithms from "
+            f"{sorted(SUPPORTED_ALGORITHMS)}; refused: {sorted(bad)}"
+        )
+    leeway = _typed(section.get("leeway_s", 60.0), float, "identity.oidc.leeway_s")
+    if not 0 <= leeway <= 300:
+        raise ConfigError("identity.oidc.leeway_s must be between 0 and 300 seconds")
+    return OidcSettings(
+        issuer=issuer,
+        audience=audience,
+        jwks_url=jwks_url,
+        algorithms=algorithms,
+        user_claim=_typed(section.get("user_claim", "sub"), str, "identity.oidc.user_claim"),
+        groups_claim=_typed(
+            section.get("groups_claim", "groups"), str, "identity.oidc.groups_claim"
+        ),
+        jwks_cache_s=_positive(section, "jwks_cache_s", 600.0, float),
+        leeway_s=float(leeway),
+    )
 
 
 def load_config(path: str | Path) -> GatewayConfig:
@@ -162,11 +216,21 @@ def load_config(path: str | Path) -> GatewayConfig:
         )
 
     identity = _section(data, "identity")
-    if identity.get("mode", "trusted_header") != "trusted_header":
-        raise ConfigError("identity.mode: only 'trusted_header' is supported in this version")
+    identity_mode = identity.get("mode", "trusted_header")
     proxies_raw = _strs(identity.get("trusted_proxies", []), "identity.trusted_proxies")
-    if not proxies_raw:
-        raise ConfigError("identity.trusted_proxies must list the auth proxy's addresses")
+    oidc = None
+    if identity_mode == "trusted_header":
+        if not proxies_raw:
+            raise ConfigError("identity.trusted_proxies must list the auth proxy's addresses")
+        if "oidc" in identity:
+            raise ConfigError("identity.oidc is only read with mode: oidc")
+    elif identity_mode == "oidc":
+        if proxies_raw or "user_header" in identity or "groups_header" in identity:
+            # One listener, one identity source: a header path next to tokens is a bypass.
+            raise ConfigError("identity mode oidc takes no trusted_proxies or identity headers")
+        oidc = _oidc(_section(identity, "oidc"))
+    else:
+        raise ConfigError("identity.mode must be 'trusted_header' or 'oidc'")
     try:
         proxies = tuple(ipaddress.ip_network(p, strict=False) for p in proxies_raw)
     except ValueError as e:
@@ -228,6 +292,7 @@ def load_config(path: str | Path) -> GatewayConfig:
             identity.get("groups_header", "X-Auth-Request-Groups"), str, "groups_header"
         ).lower(),
         allowed_groups=_strs(identity.get("allowed_groups", []), "identity.allowed_groups"),
+        oidc=oidc,
         host=host,
         port=port,
         tls_cert_file=None if cert is None else str(base / cert),

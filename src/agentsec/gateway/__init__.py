@@ -6,6 +6,9 @@ Design and limits: docs/design/GATEWAY.md.
 
 from __future__ import annotations
 
+import threading
+import time
+
 from agentsec.gateway.app import Gateway, HttpError, UpstreamError, http_transport
 from agentsec.gateway.config import ConfigError, GatewayConfig, Upstream, load_config
 
@@ -18,8 +21,35 @@ def serve(config: GatewayConfig) -> None:
         raise SystemExit(
             'agentsec serve needs the gateway extra: pip install "ai-agent-security-toolkit[gateway]"'
         ) from e
+    gateway = Gateway(config)
+    if config.admin_port is not None:
+        admin = uvicorn.Server(
+            uvicorn.Config(
+                gateway.admin,
+                host=config.admin_host,
+                port=config.admin_port,
+                interface="asgi3",  # a bound method: uvicorn would guess ASGI2 and fail
+                proxy_headers=False,
+                server_header=False,
+                http="h11",
+                lifespan="off",
+                log_level="warning",
+            )
+        )
+        # A daemon thread: it stops with the main server. Outside the main thread uvicorn
+        # installs no signal handlers, so Ctrl+C still reaches the main server.
+        thread = threading.Thread(target=admin.run, name="agentsec-admin", daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 10
+        while not admin.started and thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not admin.started:
+            # A port in use, say: refuse to run without the readiness and metrics configured.
+            raise SystemExit(
+                f"admin listener failed to start on {config.admin_host}:{config.admin_port}"
+            )
     uvicorn.run(
-        Gateway(config),
+        gateway,
         host=config.host,
         port=config.port,
         ssl_certfile=config.tls_cert_file,

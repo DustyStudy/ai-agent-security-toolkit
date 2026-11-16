@@ -9,6 +9,10 @@ listen:
   #   cert_file: /etc/agentsec/tls/server.crt
   #   key_file: /etc/agentsec/tls/server.key
 
+# admin:                   # /healthz, /readyz and /metrics (Prometheus); no auth, so loopback only
+#   host: 127.0.0.1
+#   port: 9090
+
 identity:
   mode: trusted_header     # the only mode in this version; put an SSO proxy (oauth2-proxy) in front
   user_header: X-Auth-Request-User

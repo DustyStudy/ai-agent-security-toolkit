@@ -58,6 +58,19 @@ bundle:
 - **Expiry.** `expires` is required. Once it passes, the gateway answers 503 until a newer bundle loads.
 - **Keys.** Generate a key pair with `openssl genpkey -algorithm ed25519 -out bundle-signing.pem` and `openssl pkey -in bundle-signing.pem -pubout -out bundle-signing.pub`. Keep the private key away from the gateway host and out of the repository; `bundle sign --key` takes `env:NAME` or `file:/path`, never the key itself. KMS or HSM signing is a design open question.
 
+## Metrics and readiness
+
+Set `admin: {port: 9090}` (and optionally `host`, which must be a loopback IP such as `127.0.0.1` or `::1`, not `localhost`, and a port other than `listen.port`). If the admin port cannot be bound, the gateway does not start. to start a second listener with no authentication:
+
+- `GET /healthz`: liveness.
+- `GET /readyz`: 200 with the policy revision and any groups in monitor mode; 503 once the policy has expired. It also checks for a new bundle, so a gateway with no traffic still reloads.
+- `GET /metrics`: Prometheus text.
+  - `agentsec_gateway_events_total{event}`: every audit event written, counted only once the record is on disk. Blocks and denials are events such as `gateway_tool_calls_withheld`, `gateway_tools_removed`, `gateway_input_blocked`, `gateway_output_changed`, `gateway_auth_failed` and `gateway_bundle_rejected`.
+  - `agentsec_gateway_responses_total{status}`: responses sent by the main listener.
+  - `agentsec_gateway_policy_info{policy_rev}`, `agentsec_gateway_monitor_groups`, `agentsec_gateway_policy_expiry_timestamp_seconds`.
+
+Labels are event names and status codes only, never users or request content. To scrape from another host, run the scraper as a sidecar or put an authenticating proxy in front; the admin listener itself never leaves loopback.
+
 ## Failure behaviour
 
 | Failure | Result |
@@ -83,7 +96,8 @@ bundle:
 
 ## Limits in this version
 
-- Metrics, holdback streaming and the MCP gateway are later phases of the design.
+- Holdback streaming and the MCP gateway are later phases of the design.
+- `/readyz` does not probe the upstreams or the audit file; a failed audit write shows as 503 responses and stops the event counters.
 - Without `bundle.state_file`, rollback protection across restarts relies on `min_revision` and `expires`.
 - IDE tools that only take a static API key cannot get an OIDC token; see the design's open questions.
 - Tool-call limits (`max_calls`) count per request, not per user over time.

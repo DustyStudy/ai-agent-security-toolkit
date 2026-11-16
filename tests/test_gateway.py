@@ -8,7 +8,7 @@ import textwrap
 
 import pytest
 
-from agentsec.gateway import ConfigError, Gateway, UpstreamError, load_config
+from agentsec.gateway import ConfigError, Gateway, UpstreamError, load_config, serve
 from agentsec.gateway.app import _Limiter
 from agentsec.middleware.audit import MemorySink
 
@@ -453,6 +453,18 @@ def test_upstream_api_key_must_be_a_reference(tmp_path):
     )
     with pytest.raises(ConfigError, match="env:NAME"):
         load_config(tmp_path / "g.yaml")
+
+
+def test_serve_caps_connections_and_bounds_shutdown(tmp_path, monkeypatch):
+    uvicorn = pytest.importorskip("uvicorn")
+    seen = {}
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: seen.update(kw))
+    serve(write_config(tmp_path, extra="limits: {max_connections: 50, shutdown_timeout_s: 12.4}\n"))
+    assert seen["limit_concurrency"] == 50 and seen["timeout_graceful_shutdown"] == 12
+    serve(write_config(tmp_path))
+    assert seen["limit_concurrency"] == 1000 and seen["timeout_graceful_shutdown"] == 30
+    with pytest.raises(ConfigError, match="positive"):
+        write_config(tmp_path, extra="limits: {max_connections: 0}\n")
 
 
 def test_serve_check_validates_the_config(tmp_path, capsys):

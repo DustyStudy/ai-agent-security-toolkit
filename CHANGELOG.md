@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- Gateway `limits.max_connections` (default 1000): above that many open connections and requests in flight, the HTTP server answers 503 before authentication. There was no cap.
+- Gateway `limits.shutdown_timeout_s` (default 30): on SIGTERM, requests in flight get that long to finish. The gateway used to wait for every open stream, until the orchestrator killed it.
+
 ### Security
 - Gateway: a message part with a remote `image_url` is refused in enforce mode (`input_blocked`, reason `remote image URL`) and logged in monitor mode. A model server that fetches image URLs would otherwise fetch any address a user names from its own network position. Inline `data:` images pass.
 - Gateway: `identity.trusted_proxies` refuses a `/0` network, which let every peer name any user in a header.

@@ -1,0 +1,8 @@
+version: 1
+taint: {enabled: true, action: deny}
+tools:
+  search_docs:
+    description: Search the internal knowledge base.
+    returns_untrusted: true
+    args:
+      query: {type: string, required: true, max_length: 300}

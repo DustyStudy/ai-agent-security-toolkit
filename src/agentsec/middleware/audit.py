@@ -13,6 +13,7 @@ Logs with a restricted resource policy) and periodically anchor
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -279,6 +280,19 @@ class AuditLogger:
             head.seq += 1
             head.prev_hash = record["hash"]
             return record
+
+    def bind(self, *, actor: str | None = None, session_id: str | None = None) -> AuditLogger:
+        """A logger with another actor or session that appends to this logger's chain.
+
+        Cheaper than a new ``AuditLogger`` on the same sink, which re-reads the sink's last
+        record: use it for one logger per request or user in a long-running service.
+        """
+        bound = copy.copy(self)  # shares the sink and the chain head
+        if actor is not None:
+            bound.actor = actor
+        if session_id is not None:
+            bound.session_id = session_id
+        return bound
 
     def checkpoint(self) -> dict[str, Any]:
         """Latest chain head. Anchor this outside the agent host's write reach."""

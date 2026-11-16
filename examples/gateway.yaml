@@ -1,0 +1,48 @@
+# Example config for `agentsec serve` (pip install "ai-agent-security-toolkit[gateway]").
+# Check it with:  agentsec serve --config examples/gateway.yaml --check
+# Unknown keys are errors. Paths are relative to this file.
+
+listen:
+  host: 127.0.0.1          # a non-loopback host needs tls below, or tls_terminated_by_proxy: true
+  port: 8443
+  # tls:
+  #   cert_file: /etc/agentsec/tls/server.crt
+  #   key_file: /etc/agentsec/tls/server.key
+
+identity:
+  mode: trusted_header     # the only mode in this version; put an SSO proxy (oauth2-proxy) in front
+  user_header: X-Auth-Request-User
+  groups_header: X-Auth-Request-Groups
+  trusted_proxies: [127.0.0.1/32]   # the header is ignored from any other peer and the request refused
+  allowed_groups: []                # empty: any user the proxy authenticated
+
+policy: policy.yaml        # the existing ToolGuard policy format; its sha256 is logged as policy_rev
+mode: enforce              # monitor: log every decision, change nothing (try a policy before enforcing)
+
+input:
+  block_on_injection: true
+  spotlight_tool_results: false     # true wraps role:tool content in spotlight markers
+
+output:
+  allowed_hosts: [corp.example]     # links and images to other hosts are stripped from answers
+  protected: []                     # strings that must never appear in output (system-prompt canaries)
+
+limits:
+  max_body_bytes: 1048576
+  body_timeout_s: 30       # a slow or stalled upload gets a 408
+  max_response_bytes: 5242880
+  max_tokens_cap: 4096
+  upstream_timeout_s: 120
+  requests_per_min: 60     # per user, per gateway process
+  concurrent_requests: 4   # per user
+
+upstreams:                 # "model" in a request selects one of these by name; clients never pass a URL
+  llama3.1-8b:
+    url: http://127.0.0.1:11434/v1   # Ollama's OpenAI-compatible API; reachable from the gateway only
+    model: llama3.1:8b
+    # api_key: env:VLLM_API_KEY      # env:NAME or file:/path; literal keys are refused
+
+audit:
+  file: audit.jsonl        # hash-chained; verify with `agentsec audit verify audit.jsonl`
+  log_content: false       # strings over 64 characters are stored as sha256 + length
+  # cef_file: audit.cef    # a CEF copy for a SIEM forwarder to tail

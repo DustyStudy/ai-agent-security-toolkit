@@ -142,6 +142,7 @@ Each has its own section in [`docs/SANDBOX.md`](docs/SANDBOX.md), with the limit
 | LangChain and LangGraph tools | `agentsec.integrations.langchain.guard_tools([...], guard, session)` |
 | MCP servers | `agentsec.integrations.mcp.GuardedMCPClient`: allowlists and pins tool definitions, and drops poisoned or changed ones |
 | External commands | `SafeCommandRunner`: no shell, executable and option allowlists, scrubbed environment, timeout. It is **not** an OS sandbox |
+| A central gateway in front of local models (preview) | `agentsec serve`: see [`docs/GATEWAY.md`](docs/GATEWAY.md) |
 
 ## 3. Validate output and keep an audit trail
 

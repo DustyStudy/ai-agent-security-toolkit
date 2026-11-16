@@ -140,7 +140,7 @@ async def arun_anthropic_tool_uses(
 # --------------------------------------------------------------------------- OpenAI
 
 
-def _openai_call(tc: dict[str, Any]) -> tuple[ToolCall, str | None]:
+def parse_openai_tool_call(tc: dict[str, Any]) -> tuple[ToolCall, str | None]:
     """Parse one ``tool_calls`` entry. The second item is a refusal message, or ``None``."""
     fn = tc.get("function")
     if not isinstance(fn, dict):
@@ -173,7 +173,7 @@ def run_openai_tool_calls(
     """Turn chat-completions ``tool_calls`` into ``role: tool`` messages."""
     messages: list[dict[str, Any]] = []
     for tc in tool_calls:
-        call, refusal = _openai_call(tc)
+        call, refusal = parse_openai_tool_call(tc)
         if refusal is not None:
             guard.authorize(call, session)  # denied; called so the attempt is audited
             content = refusal
@@ -192,7 +192,7 @@ async def arun_openai_tool_calls(
     """Async :func:`run_openai_tool_calls`. Registry functions may be sync or ``async def``."""
     messages: list[dict[str, Any]] = []
     for tc in tool_calls:
-        call, refusal = _openai_call(tc)
+        call, refusal = parse_openai_tool_call(tc)
         if refusal is not None:
             await guard.aauthorize(call, session)  # denied; called so the attempt is audited
             content = refusal
@@ -206,6 +206,7 @@ __all__ = [
     "ToolRegistry",
     "arun_anthropic_tool_uses",
     "arun_openai_tool_calls",
+    "parse_openai_tool_call",
     "run_anthropic_tool_uses",
     "run_openai_tool_calls",
 ]

@@ -4,6 +4,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- `agentsec serve` (preview, `pip install "ai-agent-security-toolkit[gateway]"`): an OpenAI-compatible `/v1/chat/completions` gateway in front of local model servers such as Ollama and vLLM, the first phase of [docs/design/GATEWAY.md](docs/design/GATEWAY.md). It identifies users from a trusted auth-proxy header, rebuilds each request from an allowlist, offers the model only tools the policy allows, strips denied `tool_calls` from responses (per-request taint from `role: tool` messages), runs input screening and `OutputGuard`, serves streaming from the checked response, rate-limits per user, writes a hash-chained audit log, and fails closed. See [docs/GATEWAY.md](docs/GATEWAY.md) and [`examples/gateway.yaml`](examples/gateway.yaml).
+- `AuditLogger.bind(actor=..., session_id=...)`: a logger on the same chain with another actor or session, without re-reading the sink.
+- `agentsec.sandbox.adapters.parse_openai_tool_call` (was private `_openai_call`).
+
 ## [0.5.0] - 2026-11-15
 
 Breaking (fails closed): `resolve_dns` is on by default for URL rules without a `hosts` allowlist, `GuardedMCPClient.call_tool` needs a prior `list_tools()`, path arguments reach the tool resolved, and `deny_args` refuses more spellings.

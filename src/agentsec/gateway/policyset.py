@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from agentsec.middleware.validators import (
     OutputGuard,
@@ -15,6 +16,8 @@ from agentsec.middleware.validators import (
 from agentsec.sandbox.policy import Policy
 
 ANY_GROUP = "*"
+STREAM_MODES = {"buffer", "holdback"}
+HOLDBACK_MIN, HOLDBACK_MAX = 32, 8192
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,25 @@ class GroupPolicy:
     argument_guard: OutputGuard
     block_on_injection: bool
     spotlight_tool_results: bool
+    stream_mode: str = "buffer"  # holdback: stream text that is held_chars behind and checked
+    holdback_chars: int = 256
+
+
+def stream_settings(output: dict[str, Any], where: str) -> tuple[str, int]:
+    """``stream_mode`` and ``holdback_chars`` from an ``output`` section. Raises ValueError."""
+    mode = output.get("stream_mode", "buffer")
+    if not isinstance(mode, str) or mode not in STREAM_MODES:
+        raise ValueError(f"{where}.stream_mode must be 'buffer' or 'holdback'")
+    chars = output.get("holdback_chars", 256)
+    if (
+        not isinstance(chars, int)
+        or isinstance(chars, bool)
+        or not HOLDBACK_MIN <= chars <= HOLDBACK_MAX
+    ):
+        raise ValueError(
+            f"{where}.holdback_chars must be an integer from {HOLDBACK_MIN} to {HOLDBACK_MAX}"
+        )
+    return mode, chars
 
 
 def group_policy(
@@ -39,6 +61,8 @@ def group_policy(
     protected: Iterable[str] = (),
     block_on_injection: bool = True,
     spotlight_tool_results: bool = False,
+    stream_mode: str = "buffer",
+    holdback_chars: int = 256,
 ) -> GroupPolicy:
     protected = tuple(protected)
     # Tool arguments: secrets and protected strings only. PII and links are normal in
@@ -55,6 +79,8 @@ def group_policy(
         argument_guard=OutputGuard(arg_validators),
         block_on_injection=block_on_injection,
         spotlight_tool_results=spotlight_tool_results,
+        stream_mode=stream_mode,
+        holdback_chars=holdback_chars,
     )
 
 

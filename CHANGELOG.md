@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-16
+
+A security review of the toolkit: redaction, scan limits and gateway input checks. Fails closed in four places that worked before: the gateway refuses a remote `image_url` in enforce mode and a `/0` network in `identity.trusted_proxies`, `JsonSchemaValidator` refuses `NaN` and `Infinity`, and `agentsec fuzz` exits 2 when every case errored. A JWT directly after a `-` is no longer redacted by the JWT rule. Also new: a container image for the gateway (build it yourself; none is published), a connection cap and a shutdown timeout.
+
 ### Added
 - A `Dockerfile` for the gateway: built from a new hash-pinned `requirements/requirements-gateway.txt` on a digest-pinned `python:3.13-slim`, running as uid 10001 with no pip, and working with a read-only root filesystem and no capabilities. CI builds it and smoke-tests it that way. `examples/gateway.container.yaml` and the "Container image" section of [docs/GATEWAY.md](docs/GATEWAY.md) show how to run it. No image is published yet.
 - Gateway `limits.max_connections` (default 1000): above that many open connections and requests in flight, the HTTP server answers 503 before authentication. There was no cap.
@@ -190,7 +194,8 @@ Tagged but never released; use 0.4.1.
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.4.1...v0.5.0

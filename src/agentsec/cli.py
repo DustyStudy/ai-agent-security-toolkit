@@ -144,6 +144,22 @@ def cmd_threatmodel(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    from agentsec.gateway import ConfigError, load_config, serve
+    from agentsec.sandbox.policy import PolicyError
+
+    try:
+        config = load_config(args.config)
+    except (ConfigError, PolicyError, OSError) as e:
+        print(f"invalid gateway config: {e}", file=sys.stderr)
+        return 2
+    if args.check:
+        print(f"config ok: {len(config.upstreams)} upstream(s), policy {config.policy_rev}")
+        return 0
+    serve(config)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agentsec", description="Security toolkit for LLM agents.")
     p.add_argument("--version", action="version", version=f"agentsec {__version__}")
@@ -207,6 +223,11 @@ def build_parser() -> argparse.ArgumentParser:
         "crosswalk", help="Map the catalog to OWASP Agentic Top 10 and MITRE ATLAS (Markdown)."
     )
     tm.set_defaults(func=cmd_threatmodel)
+
+    sv = sub.add_parser("serve", help="Run the policy-enforcing gateway (the gateway extra).")
+    sv.add_argument("--config", required=True, help="gateway YAML config")
+    sv.add_argument("--check", action="store_true", help="validate the config and exit")
+    sv.set_defaults(func=cmd_serve)
     return p
 
 

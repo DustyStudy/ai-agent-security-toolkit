@@ -62,6 +62,10 @@ def test_example_policy_is_valid_and_lint_clean():
     assert main(["policy", "validate", "--strict", str(ROOT / "examples" / "policy.yaml")]) == 0
 
 
+def test_example_gateway_config_is_valid():
+    assert main(["serve", "--config", str(ROOT / "examples" / "gateway.yaml"), "--check"]) == 0
+
+
 def test_example_agent_loop_guards_tools_and_writes_verifiable_audit(tmp_path):
     ex = _load_example()
     client = _Client("Here is the summary.")

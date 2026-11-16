@@ -35,6 +35,8 @@ LOCKS: dict[str, list[str]] = {
         "mcp",
         "--extra",
         "langchain",
+        "--extra",
+        "gateway",
         f"{REQ}langgraph.in",
     ],  # fmt: skip
     "fuzz": ["pyproject.toml", f"{REQ}fuzz.in"],

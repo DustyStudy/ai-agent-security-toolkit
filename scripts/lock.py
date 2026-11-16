@@ -26,7 +26,7 @@ REQ = "requirements/requirements-"
 # lock name -> uv inputs (files and extras) that make up that lock
 LOCKS: dict[str, list[str]] = {
     "runtime": ["pyproject.toml"],
-    "dev": ["pyproject.toml", "--extra", "dev"],
+    "dev": ["pyproject.toml", "--extra", "dev", "--extra", "gateway"],
     "integrations": [
         "pyproject.toml",
         "--extra",

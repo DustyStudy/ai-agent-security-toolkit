@@ -223,6 +223,9 @@ class AuditLogger:
         log_content: If False, string fields longer than ``preview_chars`` are
             replaced by their SHA-256 and length only. Use this when prompts may
             hold regulated data you do not want at rest in the log.
+        keep_fields: Top-level ``data`` keys whose strings ``log_content=False`` leaves
+            readable (still redacted and truncated), for decision metadata such as denial
+            ``reasons`` that an analyst must be able to read. Never list a content field.
         max_field_chars: Truncation limit for any single string field. The full
             content's SHA-256 is always recorded when truncation happens.
     """
@@ -237,6 +240,7 @@ class AuditLogger:
         log_content: bool = True,
         preview_chars: int = 64,
         max_field_chars: int = 4000,
+        keep_fields: Iterable[str] = (),
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.sink = sink
@@ -246,6 +250,7 @@ class AuditLogger:
         self._log_content = log_content
         self._preview_chars = preview_chars
         self._max_field_chars = max_field_chars
+        self._keep_fields = frozenset(keep_fields)
         self._clock = clock or (lambda: datetime.now(UTC))
         # Loggers on the same file (one per conversation, say) share one chain head, so
         # their records interleave into a single chain instead of forking it.
@@ -272,7 +277,10 @@ class AuditLogger:
                 "session_id": self.session_id,
                 "actor": self.actor,
                 "event": event,
-                "data": self._clean(data),
+                "data": {
+                    self._clean_key(k): self._clean(v, keep=k in self._keep_fields)
+                    for k, v in data.items()
+                },
                 "prev_hash": head.prev_hash,
             }
             record["hash"] = compute_hash(record)
@@ -304,26 +312,26 @@ class AuditLogger:
             }
 
     # -- internals ---------------------------------------------------------
-    def _clean(self, value: Any) -> Any:
+    def _clean(self, value: Any, keep: bool = False) -> Any:
         if isinstance(value, str):
-            return self._clean_str(value)
+            return self._clean_str(value, keep)
         if isinstance(value, dict):
             # Keys are redacted too: an agent can put a secret in a key as easily as a value.
-            return {self._clean_key(k): self._clean(v) for k, v in value.items()}
+            return {self._clean_key(k): self._clean(v, keep) for k, v in value.items()}
         if isinstance(value, list | tuple | set | frozenset):
-            return [self._clean(v) for v in value]
+            return [self._clean(v, keep) for v in value]
         if isinstance(value, int | float | bool) or value is None:
             return value
-        return self._clean_str(repr(value))
+        return self._clean_str(repr(value), keep)
 
     def _clean_key(self, key: Any) -> str:
         text = str(key)
         return redact_text(text)[0] if self._redact else text
 
-    def _clean_str(self, text: str) -> Any:
+    def _clean_str(self, text: str, keep: bool = False) -> Any:
         if self._redact:
             text, _ = redact_text(text)
-        if not self._log_content and len(text) > self._preview_chars:
+        if not self._log_content and not keep and len(text) > self._preview_chars:
             return {"sha256": _sha256(text), "length": len(text)}
         if len(text) > self._max_field_chars:
             return {

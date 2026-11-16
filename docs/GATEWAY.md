@@ -59,5 +59,5 @@ client.chat.completions.create(model="llama3.1-8b", messages=[{"role": "user", "
 - Path and URL argument rules are evaluated on the gateway host, which may not match where the client runs the tool.
 - Models that write tool calls as JSON text instead of `tool_calls` are not recognised as tool calls.
 - The whole history is rescanned and re-audited on every turn.
-- With `log_content: false`, every audit string over 64 characters (including long denial reasons) is stored as a hash and length; shorter strings, such as a short prompt, are stored in full after redaction.
+- With `log_content: false`, prompt and answer strings over 64 characters are stored as a hash and length; shorter ones, such as a short prompt, are stored in full after redaction. Decision fields (`reasons`, `error`, `tools`, `validators`, `signals`, `policy_rev`, `groups`) stay readable. Denial reasons can name a URL's host.
 - A client disconnect does not cancel the upstream call.

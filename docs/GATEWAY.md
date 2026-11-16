@@ -61,6 +61,21 @@ bundle:
 - **Expiry.** `expires` is required. Once it passes, the gateway answers 503 until a newer bundle loads.
 - **Keys.** Generate a key pair with `openssl genpkey -algorithm ed25519 -out bundle-signing.pem` and `openssl pkey -in bundle-signing.pem -pubout -out bundle-signing.pub`. Keep the private key away from the gateway host and out of the repository; `bundle sign --key` takes `env:NAME` or `file:/path`, never the key itself. KMS or HSM signing is a design open question.
 
+## Testing the gateway with the fuzzer
+
+`agentsec fuzz` can attack the gateway like any OpenAI-compatible endpoint, so you can compare the attack-success rate with and without it:
+
+```bash
+agentsec fuzz --target ollama:llama3.1:8b --categories tool_misuse,exfiltration
+agentsec fuzz --categories tool_misuse,exfiltration \
+  --target 'openai-compat:http://127.0.0.1:8443/v1#model=local&header=X-Auth-Request-User:fuzz'
+```
+
+- `token=env:NAME` (or `file:/path`) sends a bearer token in `oidc` mode; `header=Name:value` sets a header such as the trusted-proxy user for a test instance. Add `stream=1` to test the group's stream mode.
+- Raise `limits.requests_per_min` for the fuzzing user, or most cases end as 429 errors.
+- A request the gateway refuses (`input_blocked`) scores as blocked. A stream it cuts short scores the text already delivered.
+- Each case plants a random system-prompt secret the gateway is never told about, so plain-text leaks of it still count as successes. Tool misuse and exfiltration markup should reach 0%; the test suite checks this against a model that obeys every injection, in both stream modes.
+
 ## Metrics and readiness
 
 Set `admin: {port: 9090}` (and optionally `host`, which must be a loopback IP such as `127.0.0.1` or `::1`, not `localhost`, and a port other than `listen.port`). If the admin port cannot be bound, the gateway does not start. to start a second listener with no authentication:

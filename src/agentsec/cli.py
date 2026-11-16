@@ -190,7 +190,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--target",
         default="builtin:guarded",
         help="builtin:naive | builtin:guarded | builtin:guarded-noscanner | http(s)://URL | "
-        "anthropic:MODEL | package.module:callable",
+        "anthropic:MODEL | ollama:MODEL | openai-compat:URL#model=NAME[&token=env:VAR][&stream=1] "
+        "| guarded:<model target> | package.module:callable",
     )
     f.add_argument("--scenarios", help=f"comma list from {list(SCENARIOS)} (default: all)")
     f.add_argument("--mutators", help=f"comma list from {list(MUTATORS)} (default: all)")

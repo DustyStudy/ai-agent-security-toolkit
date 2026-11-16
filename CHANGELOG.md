@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-16
+
+The gateway (`agentsec serve`, the `gateway` extra) is new and in preview: its config format may still change. Nothing in the library API is removed or made stricter.
+
 ### Added
 - `agentsec serve` (preview, `pip install "ai-agent-security-toolkit[gateway]"`): an OpenAI-compatible `/v1/chat/completions` gateway in front of local model servers such as Ollama and vLLM, the first phase of [docs/design/GATEWAY.md](docs/design/GATEWAY.md). It identifies users from a trusted auth-proxy header, rebuilds each request from an allowlist, offers the model only tools the policy allows, strips denied `tool_calls` from responses (per-request taint from `role: tool` messages), runs input screening and `OutputGuard`, serves streaming from the checked response, rate-limits per user, writes a hash-chained audit log, and fails closed. See [docs/GATEWAY.md](docs/GATEWAY.md) and [`examples/gateway.yaml`](examples/gateway.yaml).
 - Gateway `identity.mode: oidc`: verifies `Authorization: Bearer` JWTs against the IdP's JWKS with PyJWT (now in the `gateway` extra). Asymmetric algorithms only, required `iss`/`aud`/`exp`/`iat`/`sub`, a key's declared `alg` enforced, JWKS over https with a bounded cache and at most one unknown-`kid` refresh a minute. Header identity settings are refused in this mode.
@@ -151,7 +155,8 @@ Tagged but never released; use 0.4.1.
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.3.0...v0.4.0

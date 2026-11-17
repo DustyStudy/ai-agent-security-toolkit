@@ -73,6 +73,10 @@ class GatewayConfig:
     tls_cert_file: str | None = None
     tls_key_file: str | None = None
     tls_terminated_by_proxy: bool = False
+    # Host header names (no port) the main listener accepts. Empty: the loopback names when host is
+    # loopback, otherwise the Host header is not checked (load_config warns).
+    allowed_hosts: tuple[str, ...] = ()
+    allowed_origins: tuple[str, ...] = ()  # an Origin header outside this list is refused
     admin_port: int | None = None  # set: /metrics and /readyz on admin_host:admin_port
     admin_host: str = "127.0.0.1"
     bundle: BundleSettings | None = None  # set: policies come from a signed bundle
@@ -121,7 +125,14 @@ _TOP = {
     "audit",
 }
 _SECTIONS: dict[str, set[str]] = {
-    "listen": {"host", "port", "tls", "tls_terminated_by_proxy"},
+    "listen": {
+        "host",
+        "port",
+        "tls",
+        "tls_terminated_by_proxy",
+        "allowed_hosts",
+        "allowed_origins",
+    },
     "admin": {"host", "port"},
     "tls": {"cert_file", "key_file"},
     "identity": {
@@ -205,6 +216,15 @@ def _is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def loopback_hosts(host: str) -> frozenset[str] | None:
+    """Host header names for a loopback listener, or None when ``host`` is not loopback."""
+    if not _is_loopback(host):
+        return None
+    return frozenset(
+        {"localhost", "127.0.0.1", "[::1]", f"[{host}]" if ":" in host else host.lower()}
+    )
 
 
 def _warn_plain_http(where: str, url: str, secret: Any) -> None:
@@ -409,6 +429,27 @@ def load_config(path: str | Path) -> GatewayConfig:
         raise ConfigError(
             "a non-loopback listen.host needs listen.tls, or tls_terminated_by_proxy: true"
         )
+    allowed_hosts = tuple(
+        h.lower() for h in _strs(listen.get("allowed_hosts", []), "listen.allowed_hosts")
+    )
+    for h in allowed_hosts:
+        # The name in a Host header: a DNS name, an IPv4 address or [IPv6]. No port, no wildcards.
+        if not re.fullmatch(r"\[[0-9a-f:.]+\]|[a-z0-9.-]+", h):
+            raise ConfigError(f"listen.allowed_hosts: {h!r} is not a host name (without a port)")
+    if not allowed_hosts and not _is_loopback(host):
+        _LOG.warning(
+            "listen.allowed_hosts is not set and listen.host is not loopback: "
+            "the Host header is not checked"
+        )
+    allowed_origins = tuple(
+        o.lower() for o in _strs(listen.get("allowed_origins", []), "listen.allowed_origins")
+    )
+    for o in allowed_origins:
+        parts = urlsplit(o)
+        if parts.scheme not in {"http", "https"} or o != f"{parts.scheme}://{parts.netloc}":
+            raise ConfigError(
+                f"listen.allowed_origins: {o!r} is not an origin such as https://chat.corp.example"
+            )
 
     admin = _section(data, "admin")
     admin_host = _typed(admin.get("host", "127.0.0.1"), str, "admin.host")
@@ -509,6 +550,8 @@ def load_config(path: str | Path) -> GatewayConfig:
         tls_cert_file=None if cert is None else str(base / cert),
         tls_key_file=None if key is None else str(base / key),
         tls_terminated_by_proxy=behind_proxy,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
         admin_host=admin_host,
         admin_port=admin_port,
         log_content=_typed(audit.get("log_content", False), bool, "audit.log_content"),

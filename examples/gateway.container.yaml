@@ -6,6 +6,9 @@ listen:
   host: 0.0.0.0                    # inside the container; publish the port only to the auth proxy
   port: 8443
   tls_terminated_by_proxy: true    # or mount a certificate and set listen.tls
+  # The Host name the proxy forwards. Unset on a non-loopback host, the Host header is not
+  # checked and a warning is logged. /healthz is exempt, so probes by address keep working.
+  # allowed_hosts: [gateway.corp.example]
 
 identity:
   mode: trusted_header

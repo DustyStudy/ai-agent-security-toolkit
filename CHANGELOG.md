@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 - `docs/SANDBOX.md`: the four `locked_install_rules` commands were each run against the real package manager on Windows 11 (pip 26.3, uv 0.12.19, npm 11.19.1, pnpm 12.21.0). All four installed from the lock file, refused a manifest the lock file did not cover, and, for npm and pnpm, ran no install scripts. pip, uv and pnpm's native `pnpm.exe` ran through `SafeCommandRunner`; `npm.cmd` is a batch file and was run directly. No command changed.
+- Threat catalog and framework crosswalk: the coding-agent controls from 0.9.0 and 0.10.0 are now listed against the threats they address, each with its known limits. `agentsec hook` is under AG-S-01 (untrusted content impersonates an instruction source), `agentsec scan-workflows` under AG-E-02 (untrusted input chained to a privileged action) and `locked_install_rules` under AG-T-05 (dependency supply chain), next to `scan-config`, which was already there. No threat was added and no framework mapping changed; `docs/threat-model/frameworks.md` and the example threat model are regenerated.
 
 ## [0.10.0] - 2026-11-17
 

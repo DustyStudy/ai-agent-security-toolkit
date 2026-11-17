@@ -1,0 +1,3 @@
+a: !include other.yaml
+b: !!python/name:os.getcwd
+c: !!set {x, y}

@@ -16,12 +16,14 @@ import copy
 import ipaddress
 import os
 import tempfile
+import time
 import unicodedata
 from collections.abc import Callable
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from typing import Any
 from urllib.parse import urlsplit
 
+from agentsec.configscan import scan_config
 from agentsec.middleware import (
     AuditLogger,
     InjectionScanner,
@@ -427,6 +429,30 @@ def exec_options(data: bytes) -> None:
             assert flag in allowed, f"option {a!r} accepted with allowed_options={allowed}"
 
 
+_CONFIG_ROOT = tempfile.mkdtemp(prefix="agentsec-fuzz-config-")
+os.makedirs(os.path.join(_CONFIG_ROOT, ".claude"), exist_ok=True)
+# One name per parsed format, each classified as "config" under an agent directory.
+_CONFIG_FILES = [".claude/settings.json", ".claude/config.toml", ".claude/agent.yaml"]
+_CONFIG_SECONDS = 30.0  # a scan takes milliseconds, under 0.5 s at PyYAML's nesting limit
+
+
+def config(data: bytes) -> None:
+    """scan-config never raises, never skips a file, stays fast and is deterministic."""
+    for rel in _CONFIG_FILES:
+        Path(_CONFIG_ROOT, rel).write_bytes(data)
+    started = time.monotonic()
+    first = scan_config(_CONFIG_ROOT)
+    elapsed = time.monotonic() - started
+    second = scan_config(_CONFIG_ROOT)
+    assert elapsed < _CONFIG_SECONDS, f"scan took {elapsed:.1f}s for {len(data)} bytes"
+    for rel in _CONFIG_FILES:
+        listed = any(i == rel or i.startswith(rel + "#") for i in first.items)
+        refused = any(f.item == rel and f.kind in {"unparsed", "oversized"} for f in first.findings)
+        assert listed or refused, f"{rel} was skipped: no item and no unparsed finding"
+    assert first.fingerprints == second.fingerprints, "two scans of the same bytes differ"
+    assert first.findings == second.findings, "two scans of the same bytes differ"
+
+
 TARGETS: dict[str, Callable[[bytes], None]] = {
     "cef": cef,
     "url": url,
@@ -438,6 +464,7 @@ TARGETS: dict[str, Callable[[bytes], None]] = {
     "guard": guard,
     "audit": audit,
     "exec_options": exec_options,
+    "config": config,
 }
 
 __all__ = ["NASTY", "TARGETS", "Reader"]

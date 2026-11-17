@@ -206,6 +206,11 @@ def _load_yaml(text: str) -> dict[str, Any]:
     loader = _YamlLoader(text)
     try:
         data = loader.get_single_data()
+    except (LookupError, AttributeError, TypeError, OverflowError) as exc:
+        # PyYAML's constructors leak these for a standard tag on a value it does not fit:
+        # `!!int ""` is an IndexError, `!!bool maybe` a KeyError, `!!timestamp x` an
+        # AttributeError.
+        raise ValueError("tag does not fit its value") from exc
     finally:
         loader.dispose()
     if not isinstance(data, dict):
@@ -221,12 +226,13 @@ def _entries(rel: str, data: Any) -> list[tuple[str, str, Any]]:
     settings that do (helpers, status lines, environment overrides), and a list of the dangerous
     ones would go stale.
     """
-    if not isinstance(data, Mapping):
+    if not isinstance(data, Mapping) or not data:
+        # An empty mapping is listed under the file's own id, so the file is in the inventory.
         return [(rel, "setting", data)]
     out: list[tuple[str, str, Any]] = []
     for key, value in data.items():
         kind = _EXPANDED.get(str(key).casefold())
-        if kind and isinstance(value, Mapping):
+        if kind and isinstance(value, Mapping) and value:  # an empty one is listed as a setting
             out += [(f"{rel}#{key}.{name}", kind, {key: {name: v}}) for name, v in value.items()]
         else:
             out.append((f"{rel}#{key}", "setting", {key: value}))
@@ -357,7 +363,8 @@ def check_pins(scan: ConfigScan, pins: Mapping[str, str]) -> list[ConfigFinding]
             continue
         detail = "pinned entry is gone"
         if any(i.startswith(pinned_id + "#") for i in scan.items):
-            # A YAML config pinned whole by a release that did not parse it.
+            # A YAML config pinned whole by a release that did not parse it, or a config
+            # file that had no entries when it was pinned.
             detail = "pinned as a whole file, now listed per entry: review and re-pin"
         findings.append(ConfigFinding(pinned_id, "removed", detail))
     return findings

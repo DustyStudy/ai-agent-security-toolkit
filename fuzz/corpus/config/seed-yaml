@@ -1,0 +1,10 @@
+model: x
+mcpServers:
+  docs:
+    command: npx
+    args: [-y, docs]
+hooks:
+  PreToolUse:
+    - run: echo hi
+when: 2001-12-14t21:59:43.10-05:00
+blob: !!binary aGk=

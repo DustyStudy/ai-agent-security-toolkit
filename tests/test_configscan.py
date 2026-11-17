@@ -679,3 +679,50 @@ def test_known_limit_a_yaml_comment_and_yaml_outside_agent_directories_are_not_p
     write(tmp_path, ".continue/config.yaml", "# run setup.sh first\na: 1\n")
     write(tmp_path, ".aider.conf.yml", "auto-commits: true\n")
     assert check_pins(scan_config(tmp_path), pins) == []
+
+
+# ------------------------------------------------- found by the `config` fuzz target
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'a: !!int ""\n',  # IndexError inside PyYAML
+        "a: !!int +\n",
+        'a: !!float ""\n',
+        "a: !!bool maybe\n",  # KeyError
+        "a: !!timestamp x\n",  # AttributeError
+    ],
+)
+def test_a_yaml_tag_on_a_value_it_does_not_fit_is_a_finding_not_a_crash(tmp_path, text):
+    write(tmp_path, ".continue/config.yaml", text)
+    scan = scan_config(tmp_path)
+    assert kinds(scan.findings) == {(".continue/config.yaml", "unparsed")}
+    assert scan.items == {}
+    assert main(["scan-config", str(tmp_path)]) == 1
+
+
+@pytest.mark.parametrize(
+    ("rel", "text"),
+    [
+        (".claude/settings.json", "{}"),
+        (".codex/config.toml", ""),
+        (".codex/config.toml", "# only a comment\n"),
+        (".continue/config.yaml", "{}\n"),
+    ],
+)
+def test_a_config_file_with_no_entries_is_listed_not_skipped(tmp_path, rel, text):
+    write(tmp_path, rel, text)
+    scan = scan_config(tmp_path)
+    assert set(scan.items) == {rel} and scan.findings == []
+    pins = scan.fingerprints
+    os.remove(tmp_path / rel)
+    assert kinds(check_pins(scan_config(tmp_path), pins)) == {(rel, "removed")}
+
+
+def test_an_empty_hooks_or_server_mapping_is_listed_not_skipped(tmp_path):
+    write(tmp_path, ".claude/settings.json", {"hooks": {}})
+    write(tmp_path, ".continue/config.yaml", "mcpServers: {}")
+    scan = scan_config(tmp_path)
+    assert set(scan.items) == {".claude/settings.json#hooks", ".continue/config.yaml#mcpServers"}
+    assert scan.findings == []

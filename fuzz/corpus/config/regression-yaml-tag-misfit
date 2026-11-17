@@ -1,0 +1,4 @@
+a: !!int ""
+b: !!bool maybe
+c: !!timestamp x
+d: !!float ""

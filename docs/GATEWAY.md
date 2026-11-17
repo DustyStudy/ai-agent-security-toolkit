@@ -206,6 +206,7 @@ docker run -d --name agentsec-gateway \
 - An access token keeps the groups its user had at issue time until it expires or is revoked; removing someone from the IdP does not revoke their tokens (run `agentsec token revoke --user`).
 - Tool-call limits (`max_calls`) count per request, not per user over time.
 - Path and URL argument rules are evaluated on the gateway host, which may not match where the client runs the tool.
+- Upstream addresses are not checked: `upstreams` and `mcp_upstreams` URLs come from the operator's config (a client can never supply one), are usually loopback or private by design, and are resolved by the HTTP client on each connection. Whoever controls DNS for an upstream's hostname chooses where its requests and credential go; use an IP literal or `https` for an upstream that is not on loopback.
 - Models that write tool calls as JSON text instead of `tool_calls` are not recognised as tool calls.
 - The whole history is rescanned and re-audited on every turn.
 - With `log_content: false`, prompt and answer strings over 64 characters are stored as a hash and length; shorter ones, such as a short prompt, are stored in full after redaction. Decision fields (`reasons`, `error`, `tools`, `validators`, `signals`, `policy_rev`, `groups`) stay readable. Denial reasons can name a URL's host.

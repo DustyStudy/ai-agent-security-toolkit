@@ -46,6 +46,50 @@ class ExecRule:
     # arguments after it are positional and are not checked as options, unless the "--"
     # comes right after an option (it may then be that option's value).
     allowed_options: list[str] | None = None
+    # Whole-command allowlist. A list means the argument list must equal one of these, token
+    # for token. Use it when the only safe form of a command is one exact spelling, such as an
+    # install that must come from the lock file (see locked_install_rules).
+    exact_args: list[list[str]] | None = None
+
+
+# The lock-file-only form of each package manager's install. Lifecycle scripts are turned off
+# where the tool has a switch for it: they are how a malicious package runs code on install.
+_LOCKED_INSTALLS: dict[str, tuple[str, list[str]]] = {
+    "pip": ("pip", ["install", "--require-hashes", "-r", "{requirements}"]),
+    "uv": ("uv", ["sync", "--locked"]),
+    "npm": ("npm", ["ci", "--ignore-scripts"]),
+    "pnpm": ("pnpm", ["install", "--frozen-lockfile", "--ignore-scripts"]),
+}
+
+
+def locked_install_rules(
+    tools: Sequence[str] = ("pip",), *, requirements: str = "requirements.txt"
+) -> dict[str, ExecRule]:
+    """Rules that let an agent install dependencies only from the project's lock file.
+
+    An agent that runs ``pip install <name>`` installs whatever a README or a tool result
+    named. These rules allow one exact command per tool and nothing else, so a package name,
+    an index URL or another requirements file is refused::
+
+        runner = SafeCommandRunner(locked_install_rules(["pip", "npm"]), cwd_roots=[repo])
+        runner.run("pip-install")   # pip install --require-hashes -r requirements.txt
+        runner.run("npm-install")   # npm ci --ignore-scripts
+
+    Calling ``run`` with no arguments runs that command; any other argument list is denied.
+    This pins what is installed to the lock file. It does not vouch for the lock file: review
+    changes to it. ``pip`` needs every requirement hash-pinned; ``npm`` and ``pnpm`` are batch
+    files on Windows, which the runner refuses.
+    """
+    rules = {}
+    for tool in tools:
+        if tool not in _LOCKED_INSTALLS:
+            raise ValueError(
+                f"no locked install for {tool!r}; choose from {sorted(_LOCKED_INSTALLS)}"
+            )
+        executable, args = _LOCKED_INSTALLS[tool]
+        argv = [a.format(requirements=requirements) for a in args]
+        rules[f"{tool}-install"] = ExecRule(executable=executable, exact_args=[argv])
+    return rules
 
 
 def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
@@ -184,6 +228,14 @@ class SafeCommandRunner:
                     f"allowed_options for {alias!r} must be flags starting with '-' and "
                     "without '=' (values are allowed with --flag=value automatically)"
                 )
+            if rule.exact_args is not None and not (
+                rule.exact_args
+                and all(
+                    isinstance(argv, list) and all(isinstance(a, str) for a in argv)
+                    for argv in rule.exact_args
+                )
+            ):
+                raise ValueError(f"exact_args for {alias!r} must be a non-empty list of argv lists")
             self._resolved[alias] = (path, rule)
         self.cwd_roots = list(cwd_roots)
         self.timeout = timeout
@@ -262,6 +314,11 @@ class SafeCommandRunner:
             raise CommandDenied(f"command {alias!r} is not allowlisted")
         exe, rule = self._resolved[alias]
         args = list(args)
+        if rule.exact_args is not None:
+            if not args and len(rule.exact_args) == 1:
+                args = list(rule.exact_args[0])  # the rule names one command: run it
+            elif args not in rule.exact_args:
+                raise CommandDenied("arguments must match one of the rule's exact_args")
         if len(args) > rule.max_args:
             raise CommandDenied(f"too many arguments (max {rule.max_args})")
         if not all(isinstance(a, str) and "\x00" not in a for a in args):

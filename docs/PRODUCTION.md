@@ -73,6 +73,7 @@ Scanning and output validation scale with text length; the tool guard does not. 
 - [ ] Audit log is on append-only storage, verified on a schedule, and mirrored to the SIEM
 - [ ] Containment fuzz gate (`--max-asr 0` on tool misuse, exfiltration and prompt leak) runs on every change to the agent
 - [ ] Agent runs with least-privilege credentials inside a container or microVM; IMDSv2 with hop limit 1 on cloud hosts
+- [ ] With the gateway: `agentsec probe-isolation --config gateway.yaml --gateway-host <gateway>` exits 0 from a client workstation after each deployment and on a schedule in CI (see [Check that nothing can go around the gateway](GATEWAY.md#check-that-nothing-can-go-around-the-gateway)). The gateway is a control only if model and MCP servers accept connections from it alone
 - [ ] Known limitations from the README have been read and accepted
 
 ## Reporting a vulnerability

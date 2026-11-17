@@ -181,12 +181,30 @@ Limits:
 
 ## Deployment requirements
 
-- **The gateway must be the only route to the model servers.** Ollama has no authentication; bind it to localhost or a network only the gateway can reach. Otherwise users skip the gateway.
+- **The gateway must be the only route to the model servers.** Ollama has no authentication; bind it to localhost or a network only the gateway can reach. Otherwise users skip the gateway. Check it with `probe-isolation` (below).
 - **TLS.** A non-loopback `listen.host` needs `listen.tls`, or `tls_terminated_by_proxy: true` when the auth proxy terminates TLS on the same host or a trusted network.
 - **One process.** Rate limits and the audit chain are per process. Run one replica per audit file.
 - **Shutdown.** On SIGTERM the gateway stops accepting connections and gives requests in flight `limits.shutdown_timeout_s` (default 30, whole seconds) to finish, then closes them. Set the orchestrator's grace period (Kubernetes `terminationGracePeriodSeconds`) a little above it.
 - **Slow and silent connections.** A connection must send a whole request head within `limits.header_timeout_s` (default 10) or it is closed, so sockets that send nothing, or a head a byte at a time, cannot fill `limits.max_connections`. Between requests a kept-alive connection is closed after 5 idle seconds, and `limits.body_timeout_s` bounds the body. A client can still open up to the cap in fresh connections every few seconds: rate-limit connections per address in a proxy or load balancer in front of an internet-facing gateway.
 - **Secrets by reference.** Upstream keys are `env:NAME` or `file:/path`; literals are refused.
+
+### Check that nothing can go around the gateway
+
+Run this after each deployment and on a schedule in CI, from a client workstation or a CI runner on the client network, **not** from the gateway host (from there every upstream is reachable, as it must be):
+
+```bash
+agentsec probe-isolation --config gateway.yaml --gateway-host gateway.internal
+```
+
+It opens a plain TCP connection to the host and port of every `upstreams` and `mcp_upstreams` URL and closes it. It sends no request and never reads `api_key` or `auth`. One line per upstream (`--json` for JSON):
+
+| Status | Meaning | Exit code |
+|---|---|---|
+| `REACHABLE` | The connect succeeded: clients can skip the gateway. Fix the bind address or the firewall. | 1 |
+| `UNCHECKED` | The URL is loopback (the upstream runs on the gateway host) and `--gateway-host` was not given. With it, that port is probed on the gateway host. | 2 |
+| `ISOLATED` | Refused, timed out (`--timeout`, default 3 seconds) or the name did not resolve; the reason is printed. | 0 |
+
+It needs the same files as `serve --check` (the policy or bundle the config names), but no secrets. An `ISOLATED` result holds only for the network the probe ran on, and only if that network works: a runner with no route anywhere also sees timeouts. Run it where clients are, and read the reasons.
 
 ## Container image
 

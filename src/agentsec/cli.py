@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agentsec import __version__
+from agentsec.configscan import check_pins, load_pins, save_pins, scan_config, show
 from agentsec.fuzzer import CORPUS, MUTATORS, FuzzConfig, load_target, run
 from agentsec.fuzzer.harness import SCENARIOS, build_cases
 from agentsec.middleware.audit import verify_file
@@ -117,6 +118,46 @@ def cmd_audit(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     return 1
+
+
+def cmd_scan_config(args: argparse.Namespace) -> int:
+    if args.update_pins and not args.pins:
+        print("error: --update-pins needs --pins FILE", file=sys.stderr)
+        return 2
+    pins_path = args.pins and Path(args.pins)
+    try:
+        scan = scan_config(args.path)
+        findings = list(scan.findings)
+        if pins_path and not (args.update_pins and not pins_path.exists()):
+            findings += check_pins(scan, load_pins(pins_path))
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        # An item id holds names from the scanned files, so it is redacted and escaped too.
+        rows = [{"item": show(f.item), "kind": f.kind, "detail": f.detail} for f in findings]
+        print(json.dumps({"items": len(scan.items), "findings": rows}, indent=2))
+    else:
+        if not pins_path:
+            for item in scan.items.values():
+                print(f"  {item.kind:<12} {show(item.id)}  {item.summary}")
+        for f in findings:
+            print(f"{f.kind.upper():<9} {show(f.item)}: {f.detail}")
+        print(f"{len(scan.items)} item(s), {len(findings)} finding(s)")
+    if not args.update_pins:
+        return 1 if findings else 0
+    if scan.findings:
+        # A flagged entry must not become trusted, and a tree that could not be read in full
+        # would drop the pins of what was missed.
+        print("pins not written: fix the findings above first", file=sys.stderr)
+        return 1
+    try:
+        save_pins(args.pins, scan.fingerprints)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"pinned {len(scan.items)} item(s) to {args.pins}", file=sys.stderr)
+    return 0
 
 
 def cmd_threatmodel(args: argparse.Namespace) -> int:
@@ -269,6 +310,18 @@ def build_parser() -> argparse.ArgumentParser:
     av = a_sub.add_parser("verify", help="Verify a hash-chained JSONL audit log.")
     av.add_argument("file")
     a.set_defaults(func=cmd_audit)
+
+    sc = sub.add_parser(
+        "scan-config",
+        help="Scan and pin agent configuration (MCP servers, hooks, settings, instruction files).",
+    )
+    sc.add_argument("path", nargs="?", default=".", help="Directory or file to scan (default: .).")
+    sc.add_argument("--pins", help="Pin file: report entries added, changed or removed since.")
+    sc.add_argument(
+        "--update-pins", action="store_true", help="Write the current entries to --pins."
+    )
+    sc.add_argument("--json", action="store_true", help="Print findings as JSON.")
+    sc.set_defaults(func=cmd_scan_config)
 
     tm = sub.add_parser("threatmodel", help="STRIDE-for-agents threat modeling.")
     tm_sub = tm.add_subparsers(dest="action", required=True)

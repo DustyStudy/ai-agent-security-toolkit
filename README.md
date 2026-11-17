@@ -151,6 +151,31 @@ Each has its own section in [`docs/SANDBOX.md`](docs/SANDBOX.md), with the limit
 | External commands | `SafeCommandRunner`: no shell, executable and option allowlists, scrubbed environment, timeout. It is **not** an OS sandbox |
 | A central gateway in front of local models and MCP servers (preview) | `agentsec serve`: see [section 5](#5-put-a-gateway-in-front-of-local-models-and-mcp-servers-preview) |
 
+### Scan and pin agent configuration
+
+A coding agent runs commands and takes instructions from files in the working tree: MCP server lists, hooks, settings, and instruction files such as `AGENTS.md`. A malicious package's install script, a cloned repository or a pull request can add a server or a hook there. `agentsec scan-config` lists every such entry, runs the injection and secret scanners over them, and compares them with pins a human reviewed:
+
+```bash
+agentsec scan-config                                        # inventory and content scan; exit 1 on a finding
+agentsec scan-config --pins agent-pins.json --update-pins   # after review: record the current entries
+agentsec scan-config --pins agent-pins.json                 # in CI: exit 1 on anything added, changed or removed
+```
+
+It reads `.mcp.json`, `.claude.json`, `opencode.json`, `.vscode/mcp.json`, and the settings, hook and MCP files under the agent directories (`.claude`, `.cursor`, `.codex`, `.gemini`, `.windsurf`, `.clinerules`, `.amazonq`, `.kiro`, `.continue`, `.roo`, `.opencode`, `.agents`, `.claude-plugin`). Instruction files are `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`, `GEMINI.md`, `SKILL.md`, `.cursorrules`, `.windsurfrules`, `copilot-instructions.md`, `*.instructions.md`, `*.prompt.md`, and Markdown under an agent directory.
+
+What gets its own pinned entry:
+
+- each MCP server, each hook event, and every other top-level setting in a config file;
+- each instruction file, whole;
+- every other file under an agent directory, whole (a hook script, a YAML config);
+- each symlinked directory, by its target. Symlinked directories are not followed.
+
+The pins are the control. The content scan is the same tripwire as elsewhere: a hook that runs `curl ... | sh` holds no injection phrase and no secret, and only shows up as a new entry (a test asserts this).
+
+It fails closed. A config file that does not parse is a finding, which includes JSON with comments or duplicate keys. So is a file or entry too long to scan in full, and two entries that would share one id. `--update-pins` writes nothing while the scan has a finding, so a flagged entry never becomes trusted; there is no way yet to accept a false positive from the injection scanner. Names and values from the scanned files are redacted and escaped before they are printed.
+
+Only `.git` is skipped, because an `AGENTS.md` inside `node_modules` steers an agent that works there. Make and check pins on a clean checkout, or installed packages that ship their own instruction files show up as new entries. Keep the pin file where the agent cannot write, and put it under `CODEOWNERS`. YAML configs are pinned but not parsed. It has been run on test fixtures and this repository, not against every agent's real config layout.
+
 ## 3. Validate output and keep an audit trail
 
 ```python
@@ -240,7 +265,7 @@ Setup, every setting and the failure table are in [docs/GATEWAY.md](docs/GATEWAY
 |---|---|
 | LLM01 Prompt injection | Fuzzer (measure), scanner + spotlighting (reduce), taint policy (contain) |
 | LLM02 Sensitive information disclosure | Secret/PII redaction, protected-string tripwire, audit redaction |
-| LLM03 Supply chain | Threat catalog entries and mitigations (no runtime control here) |
+| LLM03 Supply chain | `agentsec scan-config` pins MCP servers, hooks, settings and instruction files in a repo; `ToolPins` pins MCP tool definitions. Models and packages: catalog entries only |
 | LLM04 Data and model poisoning | Catalog + retrieval-time scanning |
 | LLM05 Improper output handling | `OutputGuard` validators: markup, exfil links, JSON schema |
 | LLM06 Excessive agency | Deny-by-default `Policy`, approval, taint, `SafeCommandRunner` |

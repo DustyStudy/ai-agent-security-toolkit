@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- `agentsec scan-config` (`agentsec.configscan`): lists the agent configuration in a directory (MCP servers, hooks, settings, and instruction files such as `AGENTS.md`, for Claude Code, Cursor, Codex, Gemini and others), runs the injection and secret scanners over it, and with `--pins FILE` exits 1 when an entry was added, changed or removed since the pins were written. This is the path used by packages and repositories that plant an MCP server or a hook for a coding agent.
+
 ## [0.8.2] - 2026-11-17
 
 Two gateway fixes. Connections that do not send a request head within 10 seconds are now closed, and new access token ids start with `tok_`. Websocket upgrade requests, which the gateway never served, are answered as plain HTTP. Nothing else changes for 0.8.1 users.

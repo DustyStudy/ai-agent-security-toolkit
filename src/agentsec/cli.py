@@ -9,7 +9,16 @@ from pathlib import Path
 from typing import Any
 
 from agentsec import __version__
-from agentsec.configscan import check_pins, load_pins, save_pins, scan_config, show
+from agentsec.configscan import (
+    ConfigFinding,
+    check_pins,
+    load_accepted,
+    load_pins,
+    save_pins,
+    scan_config,
+    show,
+    split_accepted,
+)
 from agentsec.fuzzer import CORPUS, MUTATORS, FuzzConfig, load_target, run
 from agentsec.fuzzer.harness import DEFAULT_SCENARIOS, SCENARIOS, build_cases
 from agentsec.middleware.audit import verify_file
@@ -126,35 +135,57 @@ def cmd_scan_config(args: argparse.Namespace) -> int:
     if args.update_pins and not args.pins:
         print("error: --update-pins needs --pins FILE", file=sys.stderr)
         return 2
+    if args.accept and not args.update_pins:
+        print("error: --accept needs --pins FILE and --update-pins", file=sys.stderr)
+        return 2
     pins_path = args.pins and Path(args.pins)
+    accepted: dict[str, str] = {}
+    pin_findings = []
     try:
         scan = scan_config(args.path)
-        findings = list(scan.findings)
         if pins_path and not (args.update_pins and not pins_path.exists()):
-            findings += check_pins(scan, load_pins(pins_path))
+            pin_findings = check_pins(scan, load_pins(pins_path))
+            # Acceptances come from the reviewed pin file only, never from the scanned tree.
+            accepted = load_accepted(pins_path)
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if args.json:
+    flagged = {f.item for f in scan.findings if f.kind == "injection"}
+    for item_id in args.accept or []:
+        if item_id not in flagged or item_id not in scan.items:
+            print(f"error: --accept {show(item_id)}: no injection finding on it", file=sys.stderr)
+            return 2
+        accepted[item_id] = scan.items[item_id].fingerprint
+    blocking, waived = split_accepted(scan, accepted)
+    findings = blocking + pin_findings
+
+    def rows(found: list[ConfigFinding]) -> list[dict[str, str]]:
         # An item id holds names from the scanned files, so it is redacted and escaped too.
-        rows = [{"item": show(f.item), "kind": f.kind, "detail": f.detail} for f in findings]
-        print(json.dumps({"items": len(scan.items), "findings": rows}, indent=2))
+        return [{"item": show(f.item), "kind": f.kind, "detail": f.detail} for f in found]
+
+    if args.json:
+        report = {"items": len(scan.items), "findings": rows(findings), "accepted": rows(waived)}
+        print(json.dumps(report, indent=2))
     else:
         if not pins_path:
             for item in scan.items.values():
                 print(f"  {item.kind:<12} {show(item.id)}  {item.summary}")
         for f in findings:
             print(f"{f.kind.upper():<9} {show(f.item)}: {f.detail}")
-        print(f"{len(scan.items)} item(s), {len(findings)} finding(s)")
+        for f in waived:
+            print(f"ACCEPTED  {show(f.item)}: {f.kind}, {f.detail}")
+        tail = f", {len(waived)} accepted" if waived else ""
+        print(f"{len(scan.items)} item(s), {len(findings)} finding(s){tail}")
     if not args.update_pins:
         return 1 if findings else 0
-    if scan.findings:
+    if blocking:
         # A flagged entry must not become trusted, and a tree that could not be read in full
         # would drop the pins of what was missed.
         print("pins not written: fix the findings above first", file=sys.stderr)
         return 1
     try:
-        save_pins(args.pins, scan.fingerprints)
+        # Only acceptances still in use are kept: one whose entry changed has lapsed.
+        save_pins(args.pins, scan.fingerprints, {f.item: accepted[f.item] for f in waived})
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -367,6 +398,13 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--pins", help="Pin file: report entries added, changed or removed since.")
     sc.add_argument(
         "--update-pins", action="store_true", help="Write the current entries to --pins."
+    )
+    sc.add_argument(
+        "--accept",
+        action="append",
+        metavar="ITEM_ID",
+        help="With --pins and --update-pins: record this entry's injection finding as a reviewed "
+        "false positive, until the entry changes. Repeat for more entries.",
     )
     sc.add_argument("--json", action="store_true", help="Print findings as JSON.")
     sc.set_defaults(func=cmd_scan_config)

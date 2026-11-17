@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Changed
+- `agentsec scan-config` parses YAML config files (`.yaml`, `.yml`) under an agent directory into entries, as it does JSON and TOML: one per top-level key, with `mcpServers`, `mcp_servers`, `servers` and `hooks` listed per member, so a changed server or hook is reported by name. Each entry is run through the injection and secret scanners. It fails closed: a YAML file with a duplicate key, an alias, a tag that is not a standard data tag, a key that is not a string, more than one document, or a top level that is not a mapping (an empty file included) is an `unparsed` finding.
+- **Behaviour change, re-pin needed:** a YAML file used to be pinned whole under its path. Its ids are now `<path>#<key>`, so a check against an older pin file reports the path as `removed` ("pinned as a whole file, now listed per entry: review and re-pin") and each entry as `new`, and exits 1 until you review the entries and run `--update-pins`. A change to a YAML comment alone no longer changes a pin. A YAML file that is now `unparsed` cannot be pinned until it is rewritten.
+
 ## [0.10.0] - 2026-11-17
 
 Two additions: lock-file-only installs for the command runner, and a way to accept a reviewed scanner false positive in `scan-config`. One behaviour change: a `scan-config` pin file with a duplicate key is now refused.

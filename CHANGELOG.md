@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-17
+
+Two gateway fixes. Connections that do not send a request head within 10 seconds are now closed, and new access token ids start with `tok_`. Websocket upgrade requests, which the gateway never served, are answered as plain HTTP. Nothing else changes for 0.8.1 users.
+
 ### Security
 - Gateway `limits.header_timeout_s` (default 10): a connection that has not sent a whole request head by then is closed. The HTTP server only timed out connections that were idle after a response, so sockets that sent nothing, or a request head a byte at a time, stayed open for ever and counted towards `limits.max_connections`: 1000 of them got every other client a 503.
 - Gateway: websocket upgrades are turned off on both listeners. The gateway serves none, but with the `websockets` package installed the HTTP server handed an upgrade request to another protocol, outside the gateway's connection limits.
@@ -211,7 +215,8 @@ Tagged but never released; use 0.4.1.
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.6.0...v0.7.0

@@ -4,13 +4,15 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
-### Added
-- `agentsec scan-workflows` (`agentsec.workflowscan`): reports GitHub Actions jobs that run an AI agent on an event whose text an outsider controls (`issues`, `issue_comment`, `pull_request_target`, `workflow_run`, review and discussion events) with no check on the author, and lists the write permissions and secrets within reach. This is the path where an issue title steers an agent that holds a publish token.
-- Fuzzer: `--scenarios tool_result`, an opt-in third delivery mode. The user asks what is causing an issue and the payload comes back as the result of the agent's own tool, laid out like the tool's record. `AnthropicTarget`, `OllamaTarget` and `OpenAICompatTarget` send it in the tool-result role; `HttpTarget` adds `context_tool` to its request body in this mode only; `AttackInput` has a new `untrusted_tool` field. The default matrix is still 500 cases. CI gates the guarded reference agent at 0% tool misuse, exfiltration and prompt leak for this mode as well. `docs/PROOF.md` has a run of it against Llama 3.1 8B.
-- `agentsec hook` (`agentsec.integrations.claude_code`): a Claude Code `PreToolUse` hook that applies a tool policy and taint tracking to the agent's own shell, file, fetch and MCP tools. A denied call is blocked, a call that needs approval goes to Claude Code's permission prompt, and taint and call counts are kept per session between hook runs. This is the path where an instruction planted in a tool result (a forged error event read through an MCP server) reaches a shell command. `examples/claude-code.policy.yaml` is a starting policy.
+## [0.9.0] - 2026-11-17
+
+Four additions for coding agents, aimed at the ways they are attacked in practice: planted configuration, instructions in tool results, and agents run in CI on text an outsider wrote. Nothing that worked in 0.8.2 changes. One thing to know if you import it: `agentsec.fuzzer.harness.SCENARIOS` now has three entries; the default run still uses two, through the new `DEFAULT_SCENARIOS`.
 
 ### Added
 - `agentsec scan-config` (`agentsec.configscan`): lists the agent configuration in a directory (MCP servers, hooks, settings, and instruction files such as `AGENTS.md`, for Claude Code, Cursor, Codex, Gemini and others), runs the injection and secret scanners over it, and with `--pins FILE` exits 1 when an entry was added, changed or removed since the pins were written. This is the path used by packages and repositories that plant an MCP server or a hook for a coding agent.
+- `agentsec hook` (`agentsec.integrations.claude_code`): a Claude Code `PreToolUse` hook that applies a tool policy and taint tracking to the agent's own shell, file, fetch and MCP tools. A denied call is blocked, a call that needs approval goes to Claude Code's permission prompt, and taint and call counts are kept per session between hook runs. This is the path where an instruction planted in a tool result (a forged error event read through an MCP server) reaches a shell command. `examples/claude-code.policy.yaml` is a starting policy.
+- Fuzzer: `--scenarios tool_result`, an opt-in third delivery mode. The user asks what is causing an issue and the payload comes back as the result of the agent's own tool, laid out like the tool's record. `AnthropicTarget`, `OllamaTarget` and `OpenAICompatTarget` send it in the tool-result role; `HttpTarget` adds `context_tool` to its request body in this mode only; `AttackInput` has a new `untrusted_tool` field. The default matrix is still 500 cases. CI gates the guarded reference agent at 0% tool misuse, exfiltration and prompt leak for this mode as well. `docs/PROOF.md` has a run of it against Llama 3.1 8B.
+- `agentsec scan-workflows` (`agentsec.workflowscan`): reports GitHub Actions jobs that run an AI agent on an event whose text an outsider controls (`issues`, `issue_comment`, `pull_request_target`, `workflow_run`, review and discussion events) with no check on the author, and lists the write permissions and secrets within reach. This is the path where an issue title steers an agent that holds a publish token.
 
 ## [0.8.2] - 2026-11-17
 
@@ -223,7 +225,8 @@ Tagged but never released; use 0.4.1.
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.7.0...v0.8.0

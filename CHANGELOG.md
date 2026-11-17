@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Changed
+- `docs/SANDBOX.md`: the four `locked_install_rules` commands were each run against the real package manager on Windows 11 (pip 26.3, uv 0.12.19, npm 11.19.1, pnpm 12.21.0). All four installed from the lock file, refused a manifest the lock file did not cover, and, for npm and pnpm, ran no install scripts. pip, uv and pnpm's native `pnpm.exe` ran through `SafeCommandRunner`; `npm.cmd` is a batch file and was run directly. No command changed.
+
 ## [0.10.0] - 2026-11-17
 
 Two additions: lock-file-only installs for the command runner, and a way to accept a reviewed scanner false positive in `scan-config`. One behaviour change: a `scan-config` pin file with a duplicate key is now refused.

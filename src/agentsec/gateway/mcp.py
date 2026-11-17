@@ -9,7 +9,9 @@ checked under the identity and group policy of the HTTP request that carried it:
 - :class:`GuardedMCPClient` scans definitions, applies pins, the tool policy and taint, and
   refuses any tool that did not pass a listing first;
 - taint and listing state live per user, shared by all their sessions and upstreams, so
-  they cannot be dropped by opening a new session; a session id is bound to its opener.
+  they cannot be dropped by opening a new session; a session id is bound to its opener;
+- a tool result is scanned for injection, has secrets redacted, and is withheld if it is
+  flagged, too large or impossible to scan, before the client sees it.
 
 Requires the ``mcp`` extra (``pip install "ai-agent-security-toolkit[gateway,mcp]"``).
 """
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, MutableMapping
@@ -26,9 +29,10 @@ from typing import Any
 
 from agentsec.gateway.config import NAMESPACE, GatewayConfig, McpUpstream
 from agentsec.gateway.policyset import GroupPolicy, PolicySet
-from agentsec.integrations.mcp import GuardedMCPClient, ToolPins
+from agentsec.integrations.mcp import GuardedMCPClient, ToolPins, _strings
 from agentsec.middleware.audit import AuditLogger
-from agentsec.middleware.injection import InjectionScanner
+from agentsec.middleware.injection import InjectionScanner, spotlight
+from agentsec.middleware.validators import Action, OutputGuard, Violation
 from agentsec.sandbox.guard import Session, ToolDenied, ToolGuard
 
 _LOG = logging.getLogger("agentsec.gateway.mcp")
@@ -432,7 +436,83 @@ class McpGateway:
             state.audit.log("gateway_mcp_upstream_error", upstream=upstream, error=_reason(e))
             return self._error("upstream error")
         state.audit.log("gateway_mcp_call", tool=name, allowed=True, token_id=caller.token_id)
-        return result
+        return self._screen(result, caller.gp, name, state.audit)
+
+    def _screen(self, result: Any, gp: GroupPolicy, name: str, log: AuditLogger) -> Any:
+        """What the client gets for an upstream result: scanned, redacted, or withheld.
+
+        The model path's rules for ``role: tool`` messages, applied where the result enters the
+        client: ``block_on_injection`` withholds a flagged result, ``spotlight_tool_results``
+        marks text as data, and ``mode: monitor`` records what enforce would have done.
+        """
+        enforce = gp.mode == "enforce"
+        # Secrets and protected strings only, as for tool arguments: PII, links and markup are
+        # what a search or a file read normally returns.
+        guard = gp.argument_guard
+        try:
+            text, as_json, binary = _scannable(result)
+            scan = self._scanner.scan(text)
+            why = ["binary resource cannot be scanned"] if binary else []
+            found: list[Violation] = []
+            if scan.truncated:
+                why.append("result too large to scan")
+            else:
+                found = guard.process(text + "\n" + as_json).violations
+            if scan.flagged and gp.block_on_injection:
+                why.append(f"injection signals: {', '.join(scan.signals)}")
+            if any(v.action == Action.BLOCK for v in found):
+                why.append("output policy")
+            out = result
+            if not (why and enforce):
+                redact = enforce and bool(found)
+                out = self._rewritten(result, guard if redact else None, gp.spotlight_tool_results)
+                clean, clean_json, _ = _scannable(out)
+                # A secret where nothing is rewritten (a key, a URI, _meta) is still there.
+                if redact and guard.process(clean + "\n" + clean_json).violations:
+                    why.append("could not be fully redacted")
+        except Exception as e:  # noqa: BLE001 - fail closed, in monitor mode too: nothing was checked
+            log.log("gateway_mcp_result", tool=name, withheld=True, error=_reason(e), enforced=True)
+            return self._error("tool result withheld: it could not be scanned")
+        log.log(
+            "gateway_mcp_result",
+            tool=name,
+            score=round(scan.score, 2),
+            signals=scan.signals,
+            truncated=scan.truncated,
+            validators=sorted({v.validator for v in found}),
+            withheld=bool(why),
+            reasons=why,
+            enforced=enforce,
+        )
+        if why and enforce:
+            return self._error(f"tool result withheld by policy: {'; '.join(why)}")
+        return out
+
+    def _rewritten(self, result: Any, guard: OutputGuard | None, mark: bool) -> Any:
+        """A copy with secrets redacted (when ``guard`` is given) and text blocks spotlighted."""
+        t = self._types
+
+        def clean(text: str) -> str:
+            return guard.process(text).text if guard else text
+
+        content = []
+        for block in result.content:
+            if isinstance(block, t.TextContent):
+                text = clean(block.text)
+                text = spotlight(text, source="a tool result") if mark else text
+                block = block.model_copy(update={"text": text})
+            elif isinstance(block, t.EmbeddedResource) and isinstance(
+                block.resource, t.TextResourceContents
+            ):
+                resource = block.resource.model_copy(update={"text": clean(block.resource.text)})
+                block = block.model_copy(update={"resource": resource})
+            content.append(block)
+        structured = result.structured_content
+        if guard and structured is not None:
+            # Redacted as JSON text, where "password": "..." is one assignment; a redaction
+            # that breaks the JSON raises, and the result is withheld.
+            structured = json.loads(clean(json.dumps(structured, ensure_ascii=False)))
+        return result.model_copy(update={"content": content, "structured_content": structured})
 
     def _error(self, text: str) -> Any:
         t = self._types
@@ -454,6 +534,20 @@ def require_sdk(installed: str | None = None) -> None:
             f"mcp_upstreams needs the MCP SDK {need} or newer (installed: {raw}); "
             f'pip install -U "mcp>={need}"'
         )
+
+
+def _scannable(result: Any) -> tuple[str, str, bool]:
+    """A result's strings (text, resource text, structuredContent, _meta, keys), the same as
+    JSON, and whether it embeds a binary resource, which nothing here can read."""
+    dump = result.model_dump(mode="json", exclude_none=True)
+    binary = False
+    for block in dump["content"]:
+        if block["type"] in {"image", "audio"}:
+            block.pop("data", None)  # media passes unscanned, like a data: image on the model path
+        elif "blob" in block.get("resource", {}):
+            del block["resource"]["blob"]
+            binary = True
+    return "\n".join(_strings(dump)), json.dumps(dump, ensure_ascii=False), binary
 
 
 def _header(scope: Any, name: bytes) -> str | None:

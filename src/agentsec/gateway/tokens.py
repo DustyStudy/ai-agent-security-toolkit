@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 PREFIX = "agt_"
+ID_PREFIX = "tok_"
 _TOKEN_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 TOUCH_INTERVAL_S = 60.0  # last_used is written at most this often per token
 PRUNE_AFTER_S = 7 * 86400.0  # expired and revoked rows are deleted this long afterwards
@@ -104,7 +105,9 @@ class TokenStore:
         now = self._clock()
         token = PREFIX + secrets.token_urlsafe(32)
         info = TokenInfo(
-            id=secrets.token_hex(8),
+            # The prefix keeps an id that happens to be 16 digits from reading as a payment
+            # card number, which the audit log would redact (about one id in 18,000).
+            id=ID_PREFIX + secrets.token_hex(8),
             user=user,
             groups=groups,
             name=name,

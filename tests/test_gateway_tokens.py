@@ -71,6 +71,18 @@ def test_issue_use_and_revoke(tmp_path):
     assert "revoked" in events(sink, "gateway_auth_failed")[-1]["data"]["reason"]
 
 
+def test_an_all_digit_token_id_is_not_redacted_as_a_card_number(tmp_path, monkeypatch):
+    """16 hex characters are sometimes 16 digits that pass the Luhn check."""
+    monkeypatch.setattr("agentsec.gateway.tokens.secrets.token_hex", lambda n: "6889113356693782")
+    app, sink, _ = gateway(tmp_path)
+    issued = issue(app)[1]
+    assert issued["id"] == "tok_6889113356693782"
+    assert events(sink, "gateway_token_issued")[0]["data"]["token_id"] == issued["id"]
+    call(app, f"/tokens/{issued['id']}", method="DELETE", headers=USER)
+    call(app, body=chat(), headers=bearer(issued["token"]), peer="10.20.30.40")
+    assert issued["id"] in events(sink, "gateway_auth_failed")[-1]["data"]["reason"]
+
+
 def test_only_a_hash_is_stored(tmp_path):
     app, _, _ = gateway(tmp_path)
     token = issue(app)[1]["token"]

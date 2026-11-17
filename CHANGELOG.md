@@ -8,6 +8,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Gateway `limits.header_timeout_s` (default 10): a connection that has not sent a whole request head by then is closed. The HTTP server only timed out connections that were idle after a response, so sockets that sent nothing, or a request head a byte at a time, stayed open for ever and counted towards `limits.max_connections`: 1000 of them got every other client a 503.
 - Gateway: websocket upgrades are turned off on both listeners. The gateway serves none, but with the `websockets` package installed the HTTP server handed an upgrade request to another protocol, outside the gateway's connection limits.
 
+### Fixed
+- Gateway: access token ids start with `tok_`. An id is 16 hex characters, and about one in 18,000 is 16 digits that pass the Luhn check: the audit log then redacted it as a payment card number, so that token's records could not be tied to it. Ids issued before this release keep their form.
+
 ## [0.8.1] - 2026-11-17
 
 One fix that fails closed, and the first published container image. `SafeCommandRunner` now refuses an option-like argument after a `--` that itself comes right after an option (`--stat -- -name`); everything else behaves as in 0.8.0.

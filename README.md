@@ -169,18 +169,20 @@ agentsec scan-config --pins agent-pins.json --update-pins   # after review: reco
 agentsec scan-config --pins agent-pins.json                 # in CI: exit 1 on anything added, changed or removed
 ```
 
-It reads `.mcp.json`, `.claude.json`, `opencode.json`, `.vscode/mcp.json`, and the settings, hook, MCP and YAML (`.yaml`, `.yml`) files under the agent directories (`.claude`, `.cursor`, `.codex`, `.gemini`, `.windsurf`, `.clinerules`, `.amazonq`, `.kiro`, `.continue`, `.roo`, `.opencode`, `.agents`, `.claude-plugin`). Instruction files are `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`, `GEMINI.md`, `SKILL.md`, `.cursorrules`, `.windsurfrules`, `copilot-instructions.md`, `*.instructions.md`, `*.prompt.md`, and Markdown under an agent directory.
+It reads `.mcp.json`, `.claude.json`, `opencode.json`, `opencode.jsonc` (pinned whole), `.vscode/mcp.json`, and the settings, hook, MCP and YAML (`.yaml`, `.yml`) files under the agent directories (`.claude`, `.cursor`, `.codex`, `.gemini`, `.windsurf`, `.clinerules`, `.amazonq`, `.kiro`, `.continue`, `.roo`, `.opencode`, `.agents`, `.claude-plugin`). Instruction files are `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`, `GEMINI.md`, `SKILL.md`, `.cursorrules`, `.windsurfrules`, `copilot-instructions.md`, `*.instructions.md`, `*.prompt.md`, and Markdown under an agent directory.
 
 What gets its own pinned entry:
 
 - each MCP server, each hook event, and every other top-level setting in a JSON, TOML or YAML config file;
 - each instruction file, whole;
 - every other file under an agent directory, whole (a hook script);
-- each symlinked directory, by its target. Symlinked directories are not followed.
+- each symlinked directory, by its target. One that is, or is under, an agent directory is also followed, and the files behind it are listed under the link's name, because that is the path the agent opens. Any other symlinked directory is not followed.
+
+A `#` in a file name is written `%23` in its item id (and `%` as `%25`), so a file cannot be named into the id of a config entry.
 
 The pins are the control. The content scan is the same tripwire as elsewhere: a hook that runs `curl ... | sh` holds no injection phrase and no secret, and only shows up as a new entry (a test asserts this).
 
-It fails closed. A config file that does not parse is a finding, which includes JSON with comments or duplicate keys. A YAML file is a finding when it has a duplicate key, an alias (`*name`), a tag other than the standard data tags, a key that is not a string (`1:`, a bare `on:`), more than one document, or a top level that is not a mapping (an empty file included). So is a file or entry too long to scan in full, and two entries that would share one id. `--update-pins` writes nothing while the scan has a finding, so a flagged entry never becomes trusted. Names and values from the scanned files are redacted and escaped before they are printed.
+It fails closed. A config file that does not parse is a finding, which includes JSON with comments or duplicate keys. A YAML file is a finding when it has a duplicate key, an alias (`*name`), a tag other than the standard data tags, a key that is not a string (`1:`, a bare `on:`), a merge key (`<<`), a scalar that YAML 1.1 and YAML 1.2 parsers read differently (`yes`, `on`, `017`, `0x1F`, `1_000`, `1e3`, a bare date: quote it, or write `true`, `false` or a plain decimal number), more than one document, or a top level that is not a mapping (an empty file included). So is a file or entry too long to scan in full, and two entries that would share one id. `--update-pins` writes nothing while the scan has a finding, so a flagged entry never becomes trusted. Names and values from the scanned files are redacted and escaped before they are printed.
 
 An instruction file that legitimately quotes an injection phrase (a security project's `CLAUDE.md`) is flagged by the heuristic scanner. After reading it, accept that one finding by its item id:
 

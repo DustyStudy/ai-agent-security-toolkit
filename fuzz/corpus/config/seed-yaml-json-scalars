@@ -1,0 +1,12 @@
+model: x
+enabled: true
+retries: 12
+ratio: -1.5
+empty:
+mcpServers:
+  docs:
+    command: npx
+    args: [-y, docs, "017", 'yes']
+hooks:
+  PreToolUse:
+    - run: echo hi

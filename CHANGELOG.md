@@ -4,6 +4,15 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+A second review of `scan-config` (Codex, on the `--accept`, YAML and empty-entry code that had none) found five ways a change could pass a pinned check. All five are fixed. They change what is pinned: if you keep a pin file, expect `new`, `removed`, `changed` or `unparsed` findings on the first check after upgrading where one of the cases below applies, then review and run `--update-pins`.
+
+### Security
+- `agentsec scan-config`: a symlinked agent directory (`.claude` pointing at `payload`) was pinned only by its target, so the settings behind it could be swapped with no finding: under their own path they are not agent configuration. A symlinked directory that is, or is under, an agent directory is now followed and its files are listed under the link's name. Each target is followed once, so a link to its own parent ends. A Windows junction is handled the same way on Python 3.12 and later, and is no longer walked into without bound.
+- `agentsec scan-config`: a file under an agent directory named like an entry id (`settings.json#hooks.PreToolUse`) and holding the JSON that entry was fingerprinted from took over the pin of a deleted hook. A `#` in a path is now `%23` in the item id, and `%` is `%25`.
+- `agentsec scan-config`: a YAML scalar that YAML 1.1 (PyYAML) and YAML 1.2 (most agents) read differently is now `unparsed`. `command: yes` and `command: on` had one fingerprint, as did `017` and `15`, and `1e3` and `"1e3"`. Refused: `yes`/`no`/`on`/`off`, capitalised booleans, octal, hex, binary, `_` in numbers, sexagesimal, `.5`, `+5`, exponents, bare dates, `!!binary`, and the merge key `<<`. Kept: strings, `null`, `true`, `false` and numbers spelled as JSON spells them.
+- `agentsec scan-config`: a TOML date and a string spelling its Python `repr` (`x = 1979-05-27` and `x = "datetime.date(1979, 5, 27)"`) had one fingerprint. An entry that holds a TOML date or time is now hashed so no string can match it; the fingerprint of such an entry changes.
+- `agentsec scan-config`: a project-root `opencode.jsonc`, which OpenCode loads, was not inventoried at all. It is now pinned whole, like any other file under an agent directory.
+
 ## [0.11.0] - 2026-11-17
 
 `scan-config` now parses YAML config files per entry, and a new fuzz target for its parsers found two cases it skipped. Both change what is pinned: if you keep a pin file, expect `new` and `removed` findings on the first check after upgrading, then review and run `--update-pins`.

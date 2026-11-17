@@ -1,0 +1,7 @@
+mcpServers:
+  - name: demo
+    command: yes
+    port: 017
+    wait: 1:30
+    size: 1_000
+    rate: 1e3

@@ -1,0 +1,76 @@
+# Prometheus alert rules for the agentsec gateway. Load with `rule_files:` in prometheus.yml.
+# Thresholds are starting points: tune them to your traffic. See docs/GATEWAY.md.
+groups:
+  - name: agentsec-gateway
+    rules:
+      - alert: AgentsecGatewayNotScraped
+        # The gauge is always emitted, so its absence means the gateway is down or not scraped.
+        expr: absent(agentsec_gateway_policy_info)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: No agentsec gateway metrics for 5 minutes.
+
+      - alert: AgentsecGatewayHigh5xxRate
+        expr: |
+          sum(rate(agentsec_gateway_responses_total{status=~"5.."}[5m]))
+            / sum(rate(agentsec_gateway_responses_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: More than 5% of gateway responses are 5xx.
+          description: The gateway fails closed. Check the audit log disk, the upstream and the policy expiry.
+
+      - alert: AgentsecGatewayDenialSpike
+        # Four times the average of the last hour, and at least one decision every 20 seconds.
+        # The metrics have no enforced label, so decisions in monitor mode count too.
+        expr: |
+          sum(rate(agentsec_gateway_events_total{event=~"gateway_input_blocked|gateway_tool_calls_withheld|gateway_tools_removed|gateway_output_changed|gateway_tool_call_output_violation|gateway_output_violation_after_delivery"}[5m]))
+            > 4 * sum(rate(agentsec_gateway_events_total{event=~"gateway_input_blocked|gateway_tool_calls_withheld|gateway_tools_removed|gateway_output_changed|gateway_tool_call_output_violation|gateway_output_violation_after_delivery"}[1h]))
+          and
+          sum(rate(agentsec_gateway_events_total{event=~"gateway_input_blocked|gateway_tool_calls_withheld|gateway_tools_removed|gateway_output_changed|gateway_tool_call_output_violation|gateway_output_violation_after_delivery"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Policy decisions (blocks, denials and changes) are well above the rate of the last hour.
+          description: The audit log has the user, group, rule and whether it was enforced for each event.
+
+      - alert: AgentsecGatewayAuthFailureSpike
+        expr: sum(rate(agentsec_gateway_events_total{event="gateway_auth_failed"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than one failed authentication per second for 5 minutes.
+
+      - alert: AgentsecGatewayBundleRejected
+        # A counter first appears with the value 1, which increase() does not see: the second
+        # half catches the first rejection after a restart. Known limit: a restart and a first
+        # rejection within 15 minutes of an earlier first rejection look the same and are missed.
+        expr: |
+          sum(increase(agentsec_gateway_events_total{event="gateway_bundle_rejected"}[15m])) > 0
+          or
+          sum(agentsec_gateway_events_total{event="gateway_bundle_rejected"}
+            unless agentsec_gateway_events_total{event="gateway_bundle_rejected"} offset 15m) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A policy bundle was rejected. The gateway is still on the previous policy.
+
+      - alert: AgentsecGatewayPolicyExpiresSoon
+        expr: min(agentsec_gateway_policy_expiry_timestamp_seconds) - time() < 86400
+        labels:
+          severity: warning
+        annotations:
+          summary: The gateway policy expires in under 24 hours. After that every request gets 503.
+
+      - alert: AgentsecGatewayMonitorMode
+        expr: max(agentsec_gateway_monitor_groups) > 0
+        for: 24h
+        labels:
+          severity: info
+        annotations:
+          summary: A policy group has been in monitor mode (not enforcing) for a day.

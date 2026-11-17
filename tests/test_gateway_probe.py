@@ -88,6 +88,16 @@ def test_a_loopback_url_is_not_a_pass_without_the_gateway_host(tmp_path, capsys,
     assert capsys.readouterr().out.count("UNCHECKED") == 2
 
 
+def test_the_unspecified_address_is_this_machine_too(tmp_path, capsys, no_secrets):
+    path = config(tmp_path, closed_port(), closed_port())
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read().replace("http://127.0.0.1:", "http://0.0.0.0:")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    assert probe(path) == 2
+    assert capsys.readouterr().out.count("UNCHECKED") == 2
+
+
 def test_an_invalid_config_exits_2(tmp_path, capsys):
     (tmp_path / "gateway.yaml").write_text("upstreams: {}\n")
     assert probe(str(tmp_path / "gateway.yaml")) == 2

@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import ipaddress
 import socket
 from urllib.parse import urlsplit
 
 from agentsec.gateway.config import GatewayConfig, _is_loopback
+
+
+def _is_unspecified(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_unspecified  # 0.0.0.0, ::
+    except ValueError:
+        return False
 
 
 def probe_isolation(
@@ -24,7 +32,7 @@ def probe_isolation(
         parts = urlsplit(url)
         host = parts.hostname or ""
         port = parts.port or (443 if parts.scheme == "https" else 80)
-        if _is_loopback(host):
+        if _is_loopback(host) or _is_unspecified(host):
             # Loopback here is this machine, not the gateway host: probing it proves nothing.
             if gateway_host is None:
                 rows.append(

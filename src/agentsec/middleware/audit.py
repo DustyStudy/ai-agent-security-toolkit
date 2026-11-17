@@ -392,28 +392,35 @@ def verify_records(records: Iterable[dict[str, Any]]) -> VerifyResult:
     return VerifyResult(True, checked)
 
 
-def verify_file(path: str | Path) -> VerifyResult:
-    """Verify a JSONL audit file. Malformed lines are reported as tampering."""
+def read_records(path: str | Path, bad: list[str]) -> Iterator[Any]:
+    """Yield each JSON line of an audit file. Stops at an unreadable line, noting it in ``bad``."""
+    # One record in memory at a time: a production log can be larger than RAM.
+    lineno = 0
+    try:
+        with Path(path).open(encoding="utf-8") as fh:
+            for lineno, line in enumerate(fh, start=1):  # noqa: B007 - read in the except
+                if not line.strip():
+                    continue
+                try:
+                    yield json.loads(line)
+                except ValueError:  # JSONDecodeError, or an integer too long to convert
+                    bad.append(f"line {lineno} is not valid JSON")
+                    return
+    except UnicodeDecodeError:
+        # The logger only writes ASCII-escaped JSON, so invalid UTF-8 was put there by hand.
+        bad.append(f"line {lineno + 1} is not valid UTF-8")
+
+
+def verify_file(
+    path: str | Path, records: Callable[[Iterator[Any]], Iterator[Any]] | None = None
+) -> VerifyResult:
+    """Verify a JSONL audit file. Malformed lines are reported as tampering.
+
+    ``records`` wraps the record stream, so a caller can read the records in the same pass.
+    """
     bad: list[str] = []
-
-    def records() -> Iterator[dict[str, Any]]:
-        # One record in memory at a time: a production log can be larger than RAM.
-        lineno = 0
-        try:
-            with Path(path).open(encoding="utf-8") as fh:
-                for lineno, line in enumerate(fh, start=1):  # noqa: B007 - read in the except
-                    if not line.strip():
-                        continue
-                    try:
-                        yield json.loads(line)
-                    except json.JSONDecodeError:
-                        bad.append(f"line {lineno} is not valid JSON")
-                        return
-        except UnicodeDecodeError:
-            # The logger only writes ASCII-escaped JSON, so invalid UTF-8 was put there by hand.
-            bad.append(f"line {lineno + 1} is not valid UTF-8")
-
-    result = verify_records(records())
+    stream = read_records(path, bad)
+    result = verify_records(records(stream) if records else stream)
     if result.ok and bad:
         return VerifyResult(False, result.records_checked, None, bad[0])
     return result

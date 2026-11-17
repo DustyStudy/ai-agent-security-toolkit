@@ -6,6 +6,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 A second review of `scan-config` (Codex, on the `--accept`, YAML and empty-entry code that had none) found five ways a change could pass a pinned check. All five are fixed. They change what is pinned: if you keep a pin file, expect `new`, `removed`, `changed` or `unparsed` findings on the first check after upgrading where one of the cases below applies, then review and run `--update-pins`.
 
+### Added
+- `agentsec audit summary <file>`: counts of audit records by event and by decision (`verdict`, or the `allowed` flag of `gateway_mcp_call` and `validation` records), and the ten most-denied tools and actors. `--since`, `--until`, `--actor` and `--event` filter the records and `--json` prints JSON. The hash chain is verified in the same pass: a log that fails gets no summary and exit code 1 unless `--no-verify` is passed, and then the output is marked `UNVERIFIED`. The file is streamed, and values read from the log are stripped of control characters and bounded before printing. `verify_file` takes an optional `records` wrapper for reading the records it verifies, and `agentsec.middleware.audit.read_records` is the file reader it uses.
+
+### Fixed
+- `agentsec audit verify` crashed with a `ValueError` on a line holding an integer too long for Python to convert (more than 4300 digits). Such a line is now reported as `not valid JSON`, like any other malformed line, and the `TAMPERED` message is bounded and stripped of control characters.
+
 ### Security
 - `agentsec scan-config`: a symlinked agent directory (`.claude` pointing at `payload`) was pinned only by its target, so the settings behind it could be swapped with no finding: under their own path they are not agent configuration. A symlinked directory that is, or is under, an agent directory is now followed and its files are listed under the link's name. Each target is followed once, so a link to its own parent ends. A Windows junction is handled the same way on Python 3.12 and later, and is no longer walked into without bound.
 - `agentsec scan-config`: a file under an agent directory named like an entry id (`settings.json#hooks.PreToolUse`) and holding the JSON that entry was fingerprinted from took over the pin of a deleted hook. A `#` in a path is now `%23` in the item id, and `%` is `%25`.

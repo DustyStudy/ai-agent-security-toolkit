@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
+from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +23,9 @@ from agentsec.configscan import (
     split_accepted,
 )
 from agentsec.fuzzer import CORPUS, MUTATORS, FuzzConfig, load_target, run
+from agentsec.fuzzer.formats import clean
 from agentsec.fuzzer.harness import DEFAULT_SCENARIOS, SCENARIOS, build_cases
-from agentsec.middleware.audit import verify_file
+from agentsec.middleware.audit import VerifyResult, read_records, verify_file
 from agentsec.sandbox import Policy, PolicyError, ToolGuard
 from agentsec.threatmodel import (
     SYSTEM_TEMPLATE,
@@ -116,6 +120,8 @@ def cmd_policy(args: argparse.Namespace) -> int:
 
 def cmd_audit(args: argparse.Namespace) -> int:
     try:
+        if args.action == "summary":
+            return _audit_summary(args)
         result = verify_file(args.file)
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -123,12 +129,116 @@ def cmd_audit(args: argparse.Namespace) -> int:
     if result.ok:
         print(f"OK: {result.records_checked} record(s), chain intact")
         return 0
+    _print_tampered(result)
+    return 1
+
+
+def _print_tampered(result: VerifyResult) -> None:
     print(
-        f"TAMPERED: {result.reason} (first bad seq: {result.first_bad_seq}, "
+        f"TAMPERED: {clean(result.reason)} (first bad seq: {clean(str(result.first_bad_seq))}, "
         f"{result.records_checked} valid before it)",
         file=sys.stderr,
     )
-    return 1
+
+
+def _iso(text: str) -> datetime:
+    when = datetime.fromisoformat(text)
+    return when if when.tzinfo else when.replace(tzinfo=UTC)  # the logger writes UTC
+
+
+def _decision(data: dict[str, Any]) -> str | None:
+    """The decision a record carries: the guard's ``verdict``, or the MCP gateway's ``allowed``."""
+    verdict, allowed = data.get("verdict"), data.get("allowed")
+    if isinstance(verdict, str):
+        return verdict
+    if isinstance(allowed, bool):
+        return "allow" if allowed else "deny"
+    return None
+
+
+_TOP = 10
+
+
+def _audit_summary(args: argparse.Namespace) -> int:
+    events: Counter[str] = Counter()
+    decisions: Counter[str] = Counter()
+    denied_tools: Counter[str] = Counter()
+    denied_actors: Counter[str] = Counter()
+    total = 0
+
+    def tally(records: Iterator[Any]) -> Iterator[Any]:
+        nonlocal total
+        for rec in records:
+            # Counted only when the verifier asks for the next record, which it does not do
+            # after one that fails: nothing at or past the first bad record is summarised.
+            yield rec
+            total += 1
+            if not isinstance(rec, dict):
+                continue
+            # Log values are untrusted text: bounded and de-fanged before they are kept.
+            if args.actor not in (None, rec.get("actor")):  # filters match the raw value
+                continue
+            if args.event not in (None, rec.get("event")):
+                continue
+            actor, event = clean(str(rec.get("actor"))), clean(str(rec.get("event")))
+            if args.since or args.until:
+                try:
+                    when = _iso(str(rec.get("ts")))
+                except ValueError:
+                    continue
+                if (args.since and when < args.since) or (args.until and when >= args.until):
+                    continue
+            events[event] += 1
+            data = rec.get("data")
+            if not isinstance(data, dict):
+                continue
+            decision = _decision(data)
+            if decision is None:
+                continue
+            decisions[clean(decision)] += 1
+            if decision == "deny":
+                denied_actors[actor] += 1
+                tool = data.get("tool")
+                if isinstance(tool, str):  # an output validation names no tool
+                    denied_tools[clean(tool)] += 1
+
+    if args.no_verify:
+        bad: list[str] = []
+        for _ in tally(read_records(args.file, bad)):
+            pass
+        if bad:
+            print(f"warning: stopped reading: {bad[0]}", file=sys.stderr)
+    else:
+        result = verify_file(args.file, tally)
+        if not result.ok:
+            _print_tampered(result)
+            print(
+                "No summary: the log failed verification. --no-verify summarises it anyway.",
+                file=sys.stderr,
+            )
+            return 1
+
+    sections = {
+        "events": dict(events.most_common()),
+        "decisions": dict(decisions.most_common()),
+        "denied_tools": dict(denied_tools.most_common(_TOP)),
+        "denied_actors": dict(denied_actors.most_common(_TOP)),
+    }
+    matched = sum(events.values())
+    if args.json:
+        summary = {"verified": not args.no_verify, "records": total, "matched": matched}
+        print(json.dumps({**summary, **sections}, indent=2))
+        return 0
+    status = "UNVERIFIED (--no-verify)" if args.no_verify else "OK: chain intact"
+    print(f"{status}, {total} record(s), {matched} matched")
+    titles = ("By event", "By decision", f"Top {_TOP} denied tools", f"Top {_TOP} denied actors")
+    for title, counts in zip(titles, sections.values(), strict=True):
+        if counts:
+            width = max(map(len, counts))
+            print(f"\n{title}:")
+            for name, n in counts.items():
+                print(f"  {name:<{width}}  {n}")
+    return 0
 
 
 def cmd_scan_config(args: argparse.Namespace) -> int:
@@ -388,6 +498,21 @@ def build_parser() -> argparse.ArgumentParser:
     a_sub = a.add_subparsers(dest="action", required=True)
     av = a_sub.add_parser("verify", help="Verify a hash-chained JSONL audit log.")
     av.add_argument("file")
+    asum = a_sub.add_parser(
+        "summary",
+        help="Count events, decisions and denials in an audit log (verifies the chain first).",
+    )
+    asum.add_argument("file")
+    asum.add_argument("--since", type=_iso, help="ISO timestamp; keep records at or after it")
+    asum.add_argument("--until", type=_iso, help="ISO timestamp; keep records before it")
+    asum.add_argument("--actor", help="keep records of this actor")
+    asum.add_argument("--event", help="keep records of this event type")
+    asum.add_argument("--json", action="store_true", help="print JSON instead of a table")
+    asum.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="summarise a log that fails chain verification; the result is not trustworthy",
+    )
     a.set_defaults(func=cmd_audit)
 
     sc = sub.add_parser(

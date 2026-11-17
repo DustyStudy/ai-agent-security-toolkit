@@ -225,7 +225,10 @@ result = mw.screen_output(model_text)      # redacts secrets/PII, strips externa
 
 ```bash
 agentsec audit verify audit.jsonl           # exit 1 if any record was edited or removed
+agentsec audit summary audit.jsonl          # who was allowed or denied what
 ```
+
+`audit summary` counts records by event and by decision and lists the ten most-denied tools and actors. A decision is a record's `verdict` (`tool_decision`: `allow`, `deny`, `needs_approval`) or its `allowed` flag (`gateway_mcp_call`, `validation`); other gateway refusals such as `gateway_input_blocked` are counted by event only. Narrow it with `--since` and `--until` (ISO timestamps, UTC unless they carry an offset; `--since` is inclusive, `--until` exclusive), `--actor` and `--event`, and pass `--json` for machine-readable output. It verifies the chain in the same pass and, if that fails, prints no summary and exits 1; `--no-verify` summarises the log anyway and marks the output `UNVERIFIED`. The file is streamed, and values from the log are stripped of control characters and cut to 300 characters before they are printed.
 
 The audit log chains records with SHA-256. Editing or deleting a record in the middle breaks verification from that point. It does **not** stop someone with write access from truncating the tail or replacing the whole file; ship records to append-only storage (S3 Object Lock, CloudWatch Logs with a restrictive resource policy) and anchor `AuditLogger.checkpoint()` somewhere the agent host cannot write. Secrets and PII are redacted before hashing, and `log_content=False` stores only hashes and lengths of long fields.
 

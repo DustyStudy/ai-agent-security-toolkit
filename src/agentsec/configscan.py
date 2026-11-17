@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from agentsec.integrations.mcp import _strings
 from agentsec.middleware.injection import InjectionScanner
 from agentsec.middleware.redact import find_sensitive, redact_text
@@ -77,6 +79,8 @@ _CONFIG_IN_AGENT_DIR = frozenset(
         "config.toml",
     }
 )
+_YAML_SUFFIXES = (".yaml", ".yml")
+_YAML_SET = "tag:yaml.org,2002:set"
 # Top-level keys whose members are listed one by one, so a diff names the server or hook event.
 _EXPANDED = {
     "mcpservers": "mcp_server",
@@ -148,9 +152,10 @@ def _classify(parts: tuple[str, ...]) -> str | None:
         name in _CONFIG_ANYWHERE
         or (in_agent_dir and name in _CONFIG_IN_AGENT_DIR)
         or (name == "mcp.json" and len(parts) > 1 and parts[-2].casefold() == ".vscode")
+        or (in_agent_dir and name.endswith(_YAML_SUFFIXES))
     ):
         return "config"
-    # Everything else under an agent directory is pinned whole: a hook script, a YAML config.
+    # Everything else under an agent directory is pinned whole: a hook script, an image.
     return "file" if in_agent_dir else None
 
 
@@ -170,6 +175,43 @@ def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         # the other.
         raise ValueError("duplicate key")
     return out
+
+
+class _YamlLoader(yaml.SafeLoader):
+    """Safe YAML that refuses what would let the scan and the agent read different things."""
+
+    # A !!set has no stable order to fingerprint. With it gone, every tag left builds plain
+    # data and any other tag is an error.
+    yaml_constructors = {
+        tag: build for tag, build in yaml.SafeLoader.yaml_constructors.items() if tag != _YAML_SET
+    }
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        if self.check_event(yaml.AliasEvent):
+            # shortcut: every alias is refused, because nested aliases make a small file expand
+            # without bound. Upgrade to a bounded expansion if real agent configs use aliases.
+            raise ValueError("alias")
+        return super().compose_node(parent, index)
+
+    def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
+        mapping = super().construct_mapping(node, deep)
+        # PyYAML keeps the last duplicate; other parsers keep the first. A key that is not a
+        # string (1, true, null) would share an id and a JSON form with its string spelling.
+        if len(mapping) != len(node.value) or not all(isinstance(k, str) for k in mapping):
+            raise ValueError("duplicate or non-string key")
+        return mapping
+
+
+def _load_yaml(text: str) -> dict[str, Any]:
+    loader = _YamlLoader(text)
+    try:
+        data = loader.get_single_data()
+    finally:
+        loader.dispose()
+    if not isinstance(data, dict):
+        # An empty file, a list or a scalar has no named entries to pin.
+        raise ValueError("top level is not a mapping")
+    return data
 
 
 def _entries(rel: str, data: Any) -> list[tuple[str, str, Any]]:
@@ -238,6 +280,8 @@ def _scan_file(
         strict = raw.decode("utf-8-sig")
         if path.suffix.lower() == ".toml":
             data = tomllib.loads(strict)
+        elif path.suffix.lower() in _YAML_SUFFIXES:
+            data = _load_yaml(strict)
         else:
             data = json.loads(strict, object_pairs_hook=_no_duplicates)
         for item_id, item_kind, keyed in _entries(rel, data):
@@ -249,9 +293,10 @@ def _scan_file(
             # The entry is scanned decoded and with its names: "ghp_..." is a token only
             # after decoding, and a server can be named "ignore all previous instructions".
             _scan_text(scan, item_id, encoded + "\n" + "\n".join(_strings(keyed)), scanner)
-    except (ValueError, RecursionError) as exc:
+    except (ValueError, RecursionError, yaml.YAMLError) as exc:
         # Fails closed: a file the scanner cannot read is one nobody reviewed. That includes
-        # JSON with comments, duplicate keys, invalid UTF-8 and nesting too deep to walk.
+        # JSON with comments, duplicate keys, invalid UTF-8, nesting too deep to walk, and YAML
+        # with an alias, a custom tag or a top level that is not a mapping.
         scan.findings.append(ConfigFinding(rel, "unparsed", f"not valid: {type(exc).__name__}"))
 
 
@@ -307,9 +352,14 @@ def check_pins(scan: ConfigScan, pins: Mapping[str, str]) -> list[ConfigFinding]
             detail = f"{item.kind} differs from its pin: {item.summary}"
             findings.append(ConfigFinding(item.id, "changed", detail))
     # A removed entry matters too: the hook that is gone may have been a guard.
-    findings += [
-        ConfigFinding(i, "removed", "pinned entry is gone") for i in pins if i not in scan.items
-    ]
+    for pinned_id in pins:
+        if pinned_id in scan.items:
+            continue
+        detail = "pinned entry is gone"
+        if any(i.startswith(pinned_id + "#") for i in scan.items):
+            # A YAML config pinned whole by a release that did not parse it.
+            detail = "pinned as a whole file, now listed per entry: review and re-pin"
+        findings.append(ConfigFinding(pinned_id, "removed", detail))
     return findings
 
 

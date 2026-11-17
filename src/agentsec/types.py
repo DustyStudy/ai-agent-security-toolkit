@@ -24,13 +24,15 @@ class AttackInput:
     ``user_message`` is what the (trusted) user typed. ``untrusted_content`` is
     text the attacker controls but the user did not type: a retrieved document,
     web page, email body or tool output. Indirect-injection scenarios put the
-    payload there.
+    payload there. ``untrusted_tool`` names the tool whose result that text is; ``None``
+    means it is a document the user attached.
     """
 
     user_message: str
     untrusted_content: str | None = None
     system_secret: str | None = None
     available_tools: tuple[str, ...] = ()
+    untrusted_tool: str | None = None
 
 
 @dataclass

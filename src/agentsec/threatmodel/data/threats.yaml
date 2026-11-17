@@ -27,7 +27,8 @@ threats:
       - Delimit and label all untrusted content as data (spotlighting); never concatenate it into the instruction channel.
       - Treat every tool result and retrieved chunk as attacker-controlled by default.
       - Taint the session after ingesting untrusted content and gate side-effecting tools.
-    toolkit: [agentsec.middleware.injection.spotlight, agentsec.sandbox.Session]
+      - In a coding agent, apply the tool policy and taint in a hook that runs before each of the agent's own tool calls. The bundled hook supports Claude Code only, holds only while the agent cannot write the hook's state directory, and lets a call through if the hook fails or times out unless it is registered to block on failure.
+    toolkit: [agentsec.middleware.injection.spotlight, agentsec.sandbox.Session, agentsec.integrations.claude_code.handle]
     fuzz: [delimiter_escape, authority_claim, fake_conversation, hidden_instruction]
 
   - id: AG-S-02
@@ -151,7 +152,8 @@ threats:
       - Prefer safetensors; verify hashes/signatures; pin versions; mirror from an internal registry.
       - Scan dependencies in CI and require reviews for prompt/template changes.
       - Pin the agent's own configuration (MCP servers, hooks, instruction files) and review changes to it.
-    toolkit: [agentsec.configscan.scan_config]
+      - Let an agent install dependencies only with the exact lock-file command, so a package name, index URL or requirements file taken from untrusted text is refused. This does not vouch for the lock file; review changes to it.
+    toolkit: [agentsec.configscan.scan_config, agentsec.sandbox.locked_install_rules]
     fuzz: []
 
   # -------------------------------------------------------------- Repudiation
@@ -371,7 +373,8 @@ threats:
     mitre_atlas: [AML.T0051, AML.T0086, AML.T0053]
     mitigations:
       - Remove at least one leg of the trifecta per session; taint after untrusted input and block or approve side-effecting egress.
-    toolkit: [agentsec.sandbox.TaintPolicy, agentsec.sandbox.Session]
+      - Do not run an agent in CI on text an outsider controls (an issue, a comment, a pull request body) in a job that holds secrets or a write token, unless the job checks who the author is. The workflow scan reports such GitHub Actions jobs; it matches agent steps by name, checks only that an author condition is present, not that it is strict enough, and does not follow reusable workflows.
+    toolkit: [agentsec.sandbox.TaintPolicy, agentsec.sandbox.Session, agentsec.workflowscan.scan_workflows]
     fuzz: [tool_misuse, exfiltration]
 
   - id: AG-E-03

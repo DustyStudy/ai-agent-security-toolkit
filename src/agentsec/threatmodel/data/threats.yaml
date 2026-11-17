@@ -150,7 +150,8 @@ threats:
     mitigations:
       - Prefer safetensors; verify hashes/signatures; pin versions; mirror from an internal registry.
       - Scan dependencies in CI and require reviews for prompt/template changes.
-    toolkit: []
+      - Pin the agent's own configuration (MCP servers, hooks, instruction files) and review changes to it.
+    toolkit: [agentsec.configscan.scan_config]
     fuzz: []
 
   # -------------------------------------------------------------- Repudiation

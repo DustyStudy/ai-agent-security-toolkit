@@ -20,7 +20,7 @@ A second review of `scan-config` (Codex, on the `--accept`, YAML and empty-entry
 - `agentsec scan-config`: a project-root `opencode.jsonc`, which OpenCode loads, was not inventoried at all. It is now pinned whole, like any other file under an agent directory.
 
 ### Added
-- A Grafana dashboard (`examples/grafana/agentsec-gateway.json`) and Prometheus alert rules (`examples/grafana/alerts.yaml`) for the gateway's `/metrics`, with a section in `docs/GATEWAY.md` on scraping the loopback admin listener. They use only the existing metrics; a test checks that every metric and event name they reference is one the gateway emits. Neither file has been loaded into Grafana or Prometheus.
+- A Grafana dashboard (`examples/grafana/agentsec-gateway.json`) and Prometheus alert rules (`examples/grafana/alerts.yaml`) for the gateway's `/metrics`, with a section in `docs/GATEWAY.md` on scraping the loopback admin listener. They use only the existing metrics; a test checks that every metric and event name they reference is one the gateway emits. The rules pass `promtool check rules` and the panel queries return data in Grafana 12.1.1; `docs/GATEWAY.md` says what was not checked. The failed-authentication alert counts 401 responses, because `gateway_auth_failed` is not written for a missing trusted header.
 
 ### Changed
 - `test_known_limit_dns_rebinding_between_the_check_and_the_tools_own_lookup` records the DNS-rebinding limit of URL argument rules: the guard resolves the host once and the tool resolves it again. README, `docs/PRODUCTION.md` and `docs/GATEWAY.md` now say where the limit is (the sandbox URL check, not the gateway, which does not check upstream addresses) and what closes it.

@@ -313,20 +313,55 @@ def check_pins(scan: ConfigScan, pins: Mapping[str, str]) -> list[ConfigFinding]
     return findings
 
 
-def save_pins(path: str | Path, pins: Mapping[str, str]) -> None:
-    payload = {"version": PIN_FILE_VERSION, "items": dict(pins)}
+def split_accepted(
+    scan: ConfigScan, accepted: Mapping[str, str]
+) -> tuple[list[ConfigFinding], list[ConfigFinding]]:
+    """The scan's findings as (blocking, accepted).
+
+    ``accepted`` maps an item id to the fingerprint at which a human accepted its ``injection``
+    finding as a false positive. It waives that kind only, and only while the entry still has
+    that fingerprint: a plaintext secret should be removed, and the other kinds mean the entry
+    was not fully read. Take ``accepted`` from the reviewed pin file, never from the scanned tree.
+    """
+    blocking: list[ConfigFinding] = []
+    waived: list[ConfigFinding] = []
+    for f in scan.findings:
+        item = scan.items.get(f.item)
+        ok = f.kind == "injection" and item is not None and accepted.get(f.item) == item.fingerprint
+        (waived if ok else blocking).append(f)
+    return blocking, waived
+
+
+def save_pins(
+    path: str | Path, pins: Mapping[str, str], accepted: Mapping[str, str] | None = None
+) -> None:
+    payload: dict[str, Any] = {"version": PIN_FILE_VERSION, "items": dict(pins)}
+    if accepted:
+        payload["accepted"] = dict(accepted)
     Path(path).write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
     )
 
 
-def load_pins(path: str | Path) -> dict[str, str]:
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+def _load(path: str | Path, key: str) -> dict[str, str]:
+    raw = json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=_no_duplicates)
     if not isinstance(raw, dict) or raw.get("version") != PIN_FILE_VERSION:
         raise ValueError(f"unsupported config pin file (expected version {PIN_FILE_VERSION})")
-    items = raw.get("items")
-    if not isinstance(items, dict) or not all(
-        isinstance(k, str) and isinstance(v, str) for k, v in items.items()
-    ):
-        raise ValueError("config pin file must map item ids to fingerprint strings")
-    return items
+    # "accepted" is optional so a pin file written before it existed still loads. When present
+    # it is validated on every load: a malformed acceptance is never silently ignored.
+    for name in ("items", "accepted"):
+        section = raw.get(name, {} if name == "accepted" else None)
+        if not isinstance(section, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in section.items()
+        ):
+            raise ValueError(f'config pin file "{name}" must map item ids to fingerprint strings')
+    return raw.get(key, {})
+
+
+def load_pins(path: str | Path) -> dict[str, str]:
+    return _load(path, "items")
+
+
+def load_accepted(path: str | Path) -> dict[str, str]:
+    """Accepted injection false positives from a pin file: item id to fingerprint."""
+    return _load(path, "accepted")

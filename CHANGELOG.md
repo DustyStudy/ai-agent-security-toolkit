@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 - `locked_install_rules` and `ExecRule(exact_args=...)` for `SafeCommandRunner`: rules that let an agent install dependencies only from the project's lock file (`pip install --require-hashes -r ...`, `uv sync --locked`, `npm ci --ignore-scripts`, `pnpm install --frozen-lockfile --ignore-scripts`). A package name, an index URL or another requirements file is refused. `exact_args` requires the whole argument list to equal one of the listed ones.
+- `agentsec scan-config --pins FILE --update-pins --accept ITEM_ID`: records a reviewed false positive from the injection scanner in the pin file (`"accepted": {item id: fingerprint}`), so a repository whose instruction file quotes an injection phrase can be pinned. The acceptance lapses when the entry changes. Only `injection` findings can be accepted; `secret`, `unparsed`, `oversized` and `ambiguous` always block. Accepted findings are printed as `ACCEPTED` and listed under `accepted` in `--json`. Pin files without the new key still load; a pin file with a duplicate key is now refused.
 
 ## [0.9.0] - 2026-11-17
 

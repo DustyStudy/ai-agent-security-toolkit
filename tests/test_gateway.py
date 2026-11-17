@@ -463,6 +463,7 @@ def test_serve_caps_connections_and_bounds_shutdown(tmp_path, monkeypatch):
     assert seen["limit_concurrency"] == 50 and seen["timeout_graceful_shutdown"] == 12
     serve(write_config(tmp_path))
     assert seen["limit_concurrency"] == 1000 and seen["timeout_graceful_shutdown"] == 30
+    assert seen["http"].__name__ == "HeaderTimeoutProtocol" and seen["ws"] == "none"
     with pytest.raises(ConfigError, match="positive"):
         write_config(tmp_path, extra="limits: {max_connections: 0}\n")
 

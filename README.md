@@ -180,7 +180,15 @@ What gets its own pinned entry:
 
 The pins are the control. The content scan is the same tripwire as elsewhere: a hook that runs `curl ... | sh` holds no injection phrase and no secret, and only shows up as a new entry (a test asserts this).
 
-It fails closed. A config file that does not parse is a finding, which includes JSON with comments or duplicate keys. So is a file or entry too long to scan in full, and two entries that would share one id. `--update-pins` writes nothing while the scan has a finding, so a flagged entry never becomes trusted; there is no way yet to accept a false positive from the injection scanner. Names and values from the scanned files are redacted and escaped before they are printed.
+It fails closed. A config file that does not parse is a finding, which includes JSON with comments or duplicate keys. So is a file or entry too long to scan in full, and two entries that would share one id. `--update-pins` writes nothing while the scan has a finding, so a flagged entry never becomes trusted. Names and values from the scanned files are redacted and escaped before they are printed.
+
+An instruction file that legitimately quotes an injection phrase (a security project's `CLAUDE.md`) is flagged by the heuristic scanner. After reading it, accept that one finding by its item id:
+
+```bash
+agentsec scan-config --pins agent-pins.json --update-pins --accept CLAUDE.md
+```
+
+This records the entry's fingerprint under `accepted` in the pin file. The finding is then printed as `ACCEPTED` and no longer fails the run. The acceptance holds only while the entry is byte-for-byte what was reviewed: any change makes it `changed` and flagged again. It covers the whole entry at that fingerprint, not one phrase in it, so read the whole entry first. Only `injection` findings can be accepted. A plaintext secret, an unparsed or oversized file and an ambiguous id always block. There is no wildcard, and `--accept` on an id with no injection finding exits 2. Acceptances are read only from the pin file, so they are as trustworthy as the pins: whoever can write that file can accept a finding.
 
 Only `.git` is skipped, because an `AGENTS.md` inside `node_modules` steers an agent that works there. Make and check pins on a clean checkout, or installed packages that ship their own instruction files show up as new entries. Keep the pin file where the agent cannot write, and put it under `CODEOWNERS`. YAML configs are pinned but not parsed. It has been run on test fixtures and this repository, not against every agent's real config layout.
 

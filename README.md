@@ -184,6 +184,17 @@ It fails closed. A config file that does not parse is a finding, which includes 
 
 Only `.git` is skipped, because an `AGENTS.md` inside `node_modules` steers an agent that works there. Make and check pins on a clean checkout, or installed packages that ship their own instruction files show up as new entries. Keep the pin file where the agent cannot write, and put it under `CODEOWNERS`. YAML configs are pinned but not parsed. It has been run on test fixtures and this repository, not against every agent's real config layout.
 
+### Check CI workflows that run an agent
+
+An agent that triages issues or reviews pull requests in CI reads text anyone can write. If its job also holds secrets or a token with write access, an injected instruction can spend them. `agentsec scan-workflows` reads `.github/workflows` and reports each job where three things meet: a trigger an outsider controls in a run that can hold secrets (`issues`, `issue_comment`, `pull_request_target`, `workflow_run`, review and discussion events), a step that runs an agent (Claude Code, Codex, Gemini, Copilot, Aider, Cline, opencode, OpenHands or Cursor, by name in `uses:` or `run:`), and no `if:` that looks at who the author is. The finding lists the job's write permissions and the secrets the workflow references. Exit code 1 on a finding.
+
+```bash
+agentsec scan-workflows            # this repository
+agentsec scan-workflows --json
+```
+
+It is a tripwire for that one pattern. It matches agents by name, so one it does not know is missed. Any `if:` that mentions `author_association` or the actor counts as a gate, including a weak one such as `!= 'NONE'` (a test asserts this), so read the condition yourself. Plain `pull_request` is not reported: a fork's run has no secrets and a read-only token, so the text is untrusted but there is little to spend. It does not follow reusable workflows, and it does not look for `${{ }}` script injection in `run:` steps; use zizmor or actionlint for that. It has been run on test fixtures and this repository's own workflows, not on a corpus of real agent workflows.
+
 ## 3. Validate output and keep an audit trail
 
 ```python

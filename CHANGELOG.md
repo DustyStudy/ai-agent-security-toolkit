@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Security
+- `SafeCommandRunner`: a `--` right after an option no longer ends the `allowed_options` check. With both `--` and an option that takes a separate value allowed, `-W -- -c code` passed the check, and Python then ran `-c`: it read `--` as the value of `-W`. Arguments after such a `--` are still checked, so `git diff --stat -- -name` is now refused while `git diff --stat -- name` and `git diff -- -name` work as before.
+
 ## [0.8.0] - 2026-11-16
 
 A security review of the toolkit: redaction, scan limits and gateway input checks. Fails closed in four places that worked before: the gateway refuses a remote `image_url` in enforce mode and a `/0` network in `identity.trusted_proxies`, `JsonSchemaValidator` refuses `NaN` and `Infinity`, and `agentsec fuzz` exits 2 when every case errored. A JWT directly after a `-` is no longer redacted by the JWT rule. Also new: a container image for the gateway (build it yourself; none is published), a connection cap and a shutdown timeout.

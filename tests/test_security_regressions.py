@@ -46,6 +46,7 @@ from agentsec.sandbox import (
     run_anthropic_tool_uses,
 )
 from agentsec.sandbox.policy import ArgRule, PolicyError
+from agentsec.sandbox.subprocess_runner import check_options
 from agentsec.sandbox.validators import check_arg, check_url
 from agentsec.threatmodel import render_markdown, validate_system
 from agentsec.types import AttackInput, ToolCall
@@ -1383,6 +1384,32 @@ def test_the_fuzz_gate_fails_when_every_case_errored(capsys):
     args = ["fuzz", "--target", "tests.fixtures_target:broken", "--max-cases", "2", "--quiet"]
     assert main([*args, "--max-asr", "0"]) == 2
     assert "nothing was evaluated" in capsys.readouterr().err
+
+
+def test_a_terminator_right_after_an_option_does_not_end_the_option_check():
+    """Python reads "-W -- -c code" as -W with the value "--", then runs -c."""
+    rule = ExecRule(executable=sys.executable, allowed_options=["-W", "--stat", "--"])
+    for argv in (
+        ["-W", "--", "-c", "print('executed')"],
+        ["--stat", "--", "--output=/tmp/x"],
+        ["-W", "--", "ok", "-c", "code"],
+    ):
+        with pytest.raises(CommandDenied, match="allowed_options"):
+            check_options(argv, rule)
+    # A real terminator still ends the check, and plain values after either kind pass.
+    check_options(["--", "-c", "code"], rule)
+    check_options(["HEAD", "--", "-odd-file-name"], rule)
+    check_options(["--stat", "--", "file.txt"], rule)
+    check_options(["-W", "--", "--", "-odd-file-name"], rule)
+
+
+def test_the_runner_refuses_the_unlisted_option_behind_a_swallowed_terminator(tmp_path):
+    runner = SafeCommandRunner(
+        {"py": ExecRule(executable=sys.executable, allowed_options=["-W", "--"])},
+        cwd_roots=[str(tmp_path)],
+    )
+    with pytest.raises(CommandDenied, match="'-c' is not in allowed_options"):
+        runner.run("py", ["-W", "--", "-c", "print('executed')"], cwd=str(tmp_path))
 
 
 def test_verify_file_reports_a_malformed_line_without_loading_the_file(tmp_path):

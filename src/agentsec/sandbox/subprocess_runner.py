@@ -43,7 +43,8 @@ class ExecRule:
     # Option allowlist. None leaves options unchecked (the pre-0.3 behaviour). A list
     # means every argument that starts with "-" must be one of these flags, either
     # exactly or as "--flag=value". Include "--" to let a caller end option parsing;
-    # arguments after it are positional and are not checked as options.
+    # arguments after it are positional and are not checked as options, unless the "--"
+    # comes right after an option (it may then be that option's value).
     allowed_options: list[str] | None = None
 
 
@@ -117,10 +118,19 @@ def check_options(args: list[str], rule: ExecRule) -> None:
         return
     # allowed_subcommands already pins the first argument to an exact value.
     start = 1 if rule.allowed_subcommands is not None else 0
+    after_option = False
     for a in args[start:]:
         if a == "--" and "--" in rule.allowed_options:
-            return
-        if _is_option_like(a) and not _option_allowed(a, rule.allowed_options):
+            if not after_option:
+                return
+            # Right after an option, "--" may be that option's value, not the end of options:
+            # Python reads "-W -- -c code" as -W with the value "--", then -c. The rule does
+            # not say which options take a value, so this "--" ends nothing and the arguments
+            # after it are still checked.
+            after_option = False
+            continue
+        after_option = _is_option_like(a)
+        if after_option and not _option_allowed(a, rule.allowed_options):
             raise CommandDenied(f"option {a!r} is not in allowed_options")
 
 

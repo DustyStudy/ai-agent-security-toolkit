@@ -162,6 +162,24 @@ def cmd_scan_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scan_workflows(args: argparse.Namespace) -> int:
+    from agentsec.workflowscan import scan_workflows
+
+    try:
+        findings = scan_workflows(args.path)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        rows = [{"item": show(f.item), "kind": f.kind, "detail": f.detail} for f in findings]
+        print(json.dumps({"findings": rows}, indent=2))
+    else:
+        for f in findings:
+            print(f"{f.kind.upper()} {show(f.item)}: {f.detail}")
+        print(f"{len(findings)} finding(s)")
+    return 1 if findings else 0
+
+
 def cmd_hook(args: argparse.Namespace) -> int:
     # Every failure must end in exit code 2: any other code lets the tool call through.
     try:
@@ -352,6 +370,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sc.add_argument("--json", action="store_true", help="Print findings as JSON.")
     sc.set_defaults(func=cmd_scan_config)
+
+    sw = sub.add_parser(
+        "scan-workflows",
+        help="Find GitHub Actions jobs that run an AI agent on text an outsider controls.",
+    )
+    sw.add_argument(
+        "path", nargs="?", default=".", help="Repository or workflow file (default: .)."
+    )
+    sw.add_argument("--json", action="store_true", help="Print findings as JSON.")
+    sw.set_defaults(func=cmd_scan_workflows)
 
     hk = sub.add_parser(
         "hook",

@@ -139,6 +139,29 @@ Set `admin: {port: 9090}` (and optionally `host`, which must be a loopback IP su
 
 Labels are event names and status codes only, never users or request content. To scrape from another host, run the scraper as a sidecar or put an authenticating proxy in front; the admin listener itself never leaves loopback.
 
+### Dashboard and alerts
+
+There is no management UI. Use the Prometheus and Grafana you already run:
+
+1. Scrape the admin listener from the same host (or pod):
+
+   ```yaml
+   scrape_configs:
+     - job_name: agentsec-gateway
+       static_configs:
+         - targets: ["127.0.0.1:9090"]
+   ```
+
+2. Import [`examples/grafana/agentsec-gateway.json`](../examples/grafana/agentsec-gateway.json) in Grafana (Dashboards, New, Import) and pick your Prometheus data source. It shows the policy revision, time to policy expiry, groups in monitor mode, responses by status, and audit events by name, with policy decisions (blocks, denials and changes) on their own panel.
+3. Add [`examples/grafana/alerts.yaml`](../examples/grafana/alerts.yaml) to `rule_files`. It alerts on missing metrics, a 5xx share above 5%, a spike in policy decisions, failed authentication, a rejected bundle, a policy that expires within a day, and a group left in monitor mode. The thresholds are starting points.
+
+Limits:
+
+- A counter first appears with the value 1, so `rate()` misses the first event of each name after a restart. The rejected-bundle alert allows for this, except when the gateway restarts within 15 minutes of an earlier first rejection; the rate panels and spike alerts do not.
+- The metrics have no `enforced` label, so the policy-decision panel and the spike alert also count decisions made in monitor mode. The audit log says which were enforced.
+- The dashboard has no instance filter: panels sum over every gateway the data source scrapes.
+- Verified: a test (`tests/test_grafana_examples.py`) checks that both files parse and that every metric and event name in them is one the gateway emits. Not verified: the dashboard has not been loaded into Grafana, and the rules have not been run through `promtool check rules` or evaluated by Prometheus.
+
 ## Failure behaviour
 
 | Failure | Result |

@@ -1,0 +1,85 @@
+# Example tool policy for Claude Code, enforced by `agentsec hook` (docs/SANDBOX.md).
+# Deny-by-default: a tool or an argument not listed here is blocked.
+# Replace /home/me/project with the absolute path of your checkout.
+version: 1
+
+# Once the session has fetched web content or called an MCP tool, shell commands and further
+# fetches go to the human through Claude Code's own permission prompt. `deny` blocks them.
+taint:
+  enabled: true
+  action: approve
+
+tools:
+  Read:
+    description: Read a file in the checkout.
+    # Not marked returns_untrusted: an agent reads files first thing, so every session would be
+    # tainted and every shell command would ask. Set it to true when you work in repositories
+    # you did not write: a planted README is then treated like a fetched web page.
+    args:
+      file_path:
+        type: path
+        required: true
+        roots: [/home/me/project]
+        deny_patterns: ['(^|[\\/])\.env', '\.pem$', '(^|[\\/])id_(rsa|ed25519)']
+      offset: {type: integer, minimum: 0}
+      limit: {type: integer, minimum: 1}
+      pages: {type: string, max_length: 20}
+
+  Edit:
+    description: Edit a file in the checkout.
+    args:
+      file_path: &writable
+        type: path
+        required: true
+        roots: [/home/me/project]
+        # Files that run code or steer the agent later: keep them out of the agent's reach
+        # and pin them with `agentsec scan-config`.
+        deny_patterns:
+          - '[\\/]\.git[\\/]'
+          - '[\\/]\.github[\\/]workflows[\\/]'
+          - '[\\/]\.(claude|cursor|codex|gemini)[\\/]'
+          - '(^|[\\/])\.mcp\.json$'
+      old_string: {type: string, required: true, max_length: 200000}
+      new_string: {type: string, required: true, max_length: 200000}
+      replace_all: {type: boolean}
+
+  Write:
+    description: Create or overwrite a file in the checkout.
+    args:
+      file_path: *writable
+      content: {type: string, required: true, max_length: 1000000}
+
+  Bash:
+    description: Run a shell command.
+    side_effects: true             # can send data anywhere, and can delete the hook's state
+    args:
+      command: {type: string, required: true, max_length: 8000}
+      description: {type: string, max_length: 500}
+      timeout: {type: integer, minimum: 0, maximum: 600000}
+      run_in_background: {type: boolean}
+
+  WebFetch:
+    description: Fetch a web page.
+    returns_untrusted: true        # the page may hold instructions
+    side_effects: true             # the URL itself can carry data out
+    args:
+      url: {type: url, required: true, schemes: [https], block_private: true}
+      prompt: {type: string, required: true, max_length: 4000}
+      offset: {type: integer, minimum: 0}
+
+  WebSearch:
+    description: Search the web.
+    returns_untrusted: true
+    side_effects: true             # the query is sent to the search service
+    args:
+      query: {type: string, required: true, max_length: 500}
+      mode: {type: string, enum: [standard, extended]}
+      allowed_domains: {type: any}   # lists are not validated by the policy
+      blocked_domains: {type: any}
+
+  # MCP tools are named mcp__<server>__<tool>. List each one you allow.
+  mcp__sentry__get_issue_details:
+    description: Read an error event. Anyone who can send your project an event writes this text.
+    returns_untrusted: true
+    args:
+      issue_id: {type: string, required: true, max_length: 100}

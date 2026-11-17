@@ -148,6 +148,7 @@ Each has its own section in [`docs/SANDBOX.md`](docs/SANDBOX.md), with the limit
 | `asyncio` applications (FastAPI, LangGraph) | `aauthorize`, `aexecute`, `awrap`, `arun_anthropic_tool_uses`, `arun_openai_tool_calls`. Same policy, taint, limit and audit behavior as the sync API. [`examples/async_agent_loop.py`](examples/async_agent_loop.py) |
 | LangChain and LangGraph tools | `agentsec.integrations.langchain.guard_tools([...], guard, session)` |
 | MCP servers | `agentsec.integrations.mcp.GuardedMCPClient`: allowlists and pins tool definitions, and drops poisoned or changed ones |
+| A coding agent's own tools (Claude Code) | `agentsec hook`: a `PreToolUse` hook that applies the policy and taint to the shell, file, fetch and MCP tools on the developer's machine. After untrusted content is read, side-effecting calls go to the human or are blocked |
 | External commands | `SafeCommandRunner`: no shell, executable and option allowlists, scrubbed environment, timeout. It is **not** an OS sandbox |
 | A central gateway in front of local models and MCP servers (preview) | `agentsec serve`: see [section 5](#5-put-a-gateway-in-front-of-local-models-and-mcp-servers-preview) |
 

@@ -24,6 +24,7 @@ A second review of `scan-config` (Codex, on the `--accept`, YAML and empty-entry
 
 ### Changed
 - `test_known_limit_dns_rebinding_between_the_check_and_the_tools_own_lookup` records the DNS-rebinding limit of URL argument rules: the guard resolves the host once and the tool resolves it again. README, `docs/PRODUCTION.md` and `docs/GATEWAY.md` now say where the limit is (the sandbox URL check, not the gateway, which does not check upstream addresses) and what closes it.
+- `tests/test_gateway_bypass_regressions.py` pins the gateway against the bypass classes published for AI gateways in 2026: auth fail-open on a bad or repeated credential or a failing verifier, public-route confusion (`/mcp?.well-known`, `/healthz/../mcp`), self-service privilege escalation through `POST /tokens`, and spoofed or repeated identity headers. No gap was found; the gateway code is unchanged.
 
 ## [0.11.0] - 2026-11-17
 

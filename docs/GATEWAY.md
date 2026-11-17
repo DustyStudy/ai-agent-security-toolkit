@@ -161,7 +161,7 @@ Limits:
 - A counter first appears with the value 1, so `rate()` misses the first event of each name after a restart. The rejected-bundle alert allows for this, except when the gateway restarts within 15 minutes of an earlier first rejection; the rate panels and spike alerts do not.
 - The metrics have no `enforced` label, so the policy-decision panel and the spike alert also count decisions made in monitor mode. The audit log says which were enforced.
 - The dashboard has no instance filter: panels sum over every gateway the data source scrapes.
-- Verified: a test (`tests/test_grafana_examples.py`) checks that both files parse and that every metric and event name in them is one the gateway emits. Not verified: the dashboard has not been loaded into Grafana, and the rules have not been run through `promtool check rules` or evaluated by Prometheus.
+- Verified: a test (`tests/test_grafana_examples.py`) checks that both files parse and that every metric and event name in them is one the gateway emits. The rules pass `promtool check rules` (Prometheus 3.5.0) and all seven evaluate without error. With a gateway in `trusted_header` mode under generated traffic, Grafana 12.1.1 loaded the dashboard from a provisioning file and every panel query returned data through its API, except "Policy expires in", which has no data without a bundle that sets `expires`. Not verified: the panels were not looked at in a browser, the dashboard was not imported through the Import dialog, and no alert was taken to firing. The bundle-rejected, policy-expiry, monitor-mode and OIDC cases were not exercised.
 
 ## Failure behaviour
 

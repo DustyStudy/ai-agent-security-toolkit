@@ -10,10 +10,10 @@ Source: <https://genai.owasp.org/2025/12/09/owasp-top-10-for-agentic-application
 
 | Id | Name | Catalog threats | Toolkit controls | Fuzzer categories |
 | --- | --- | --- | --- | --- |
-| ASI01 | Agent Goal Hijack | AG-S-01, AG-E-02, AG-E-04 | `agentsec.fuzzer`, `agentsec.middleware.injection.spotlight`, `agentsec.sandbox.Session`, `agentsec.sandbox.TaintPolicy` | authority_claim, delimiter_escape, exfiltration, fake_conversation, hidden_instruction, instruction_override, multilingual, role_hijack, tool_misuse |
-| ASI02 | Tool Misuse | AG-T-03, AG-I-01, AG-I-05, AG-E-01, AG-E-02 | `agentsec.middleware.redact`, `agentsec.middleware.validators.ExfilLinkValidator`, `agentsec.sandbox.Policy`, `agentsec.sandbox.SafeCommandRunner`, `agentsec.sandbox.Session`, `agentsec.sandbox.TaintPolicy`, `agentsec.sandbox.ToolGuard` | exfiltration, tool_misuse |
+| ASI01 | Agent Goal Hijack | AG-S-01, AG-E-02, AG-E-04 | `agentsec.fuzzer`, `agentsec.integrations.claude_code.handle`, `agentsec.middleware.injection.spotlight`, `agentsec.sandbox.Session`, `agentsec.sandbox.TaintPolicy`, `agentsec.workflowscan.scan_workflows` | authority_claim, delimiter_escape, exfiltration, fake_conversation, hidden_instruction, instruction_override, multilingual, role_hijack, tool_misuse |
+| ASI02 | Tool Misuse | AG-T-03, AG-I-01, AG-I-05, AG-E-01, AG-E-02 | `agentsec.middleware.redact`, `agentsec.middleware.validators.ExfilLinkValidator`, `agentsec.sandbox.Policy`, `agentsec.sandbox.SafeCommandRunner`, `agentsec.sandbox.Session`, `agentsec.sandbox.TaintPolicy`, `agentsec.sandbox.ToolGuard`, `agentsec.workflowscan.scan_workflows` | exfiltration, tool_misuse |
 | ASI03 | Identity & Privilege Abuse | AG-S-03, AG-E-01, AG-E-05 | `agentsec.sandbox.Policy`, `agentsec.sandbox.ToolGuard` | tool_misuse |
-| ASI04 | Agentic Supply Chain Vulnerabilities | AG-S-02, AG-T-05 | `agentsec.configscan.scan_config`, `agentsec.integrations.mcp.GuardedMCPClient`, `agentsec.integrations.mcp.ToolPins`, `agentsec.sandbox.Policy` | hidden_instruction |
+| ASI04 | Agentic Supply Chain Vulnerabilities | AG-S-02, AG-T-05 | `agentsec.configscan.scan_config`, `agentsec.integrations.mcp.GuardedMCPClient`, `agentsec.integrations.mcp.ToolPins`, `agentsec.sandbox.Policy`, `agentsec.sandbox.locked_install_rules` | hidden_instruction |
 | ASI05 | Unexpected Code Execution | AG-T-04, AG-E-03 | `agentsec.middleware.validators.DangerousContentValidator`, `agentsec.middleware.validators.JsonSchemaValidator`, `agentsec.sandbox.SafeCommandRunner` | tool_misuse |
 | ASI06 | Memory & Context Poisoning | AG-T-01, AG-T-02 | `agentsec.middleware.audit.AuditLogger`, `agentsec.middleware.injection.InjectionScanner` | context_manipulation, hidden_instruction, instruction_override |
 | ASI07 | Insecure Inter-Agent Communication | AG-S-02 | `agentsec.integrations.mcp.GuardedMCPClient`, `agentsec.integrations.mcp.ToolPins`, `agentsec.sandbox.Policy` | hidden_instruction |
@@ -29,14 +29,14 @@ Only techniques referenced by the catalog are listed; ATLAS has many more.
 
 | Id | Name | Catalog threats | Toolkit controls | Fuzzer categories |
 | --- | --- | --- | --- | --- |
-| AML.T0010 | AI Supply Chain Compromise | AG-T-05 | `agentsec.configscan.scan_config` | - |
-| AML.T0010.005 | AI Agent Tool | AG-T-05 | `agentsec.configscan.scan_config` | - |
+| AML.T0010 | AI Supply Chain Compromise | AG-T-05 | `agentsec.configscan.scan_config`, `agentsec.sandbox.locked_install_rules` | - |
+| AML.T0010.005 | AI Agent Tool | AG-T-05 | `agentsec.configscan.scan_config`, `agentsec.sandbox.locked_install_rules` | - |
 | AML.T0011.002 | Poisoned AI Agent Tool | AG-S-02 | `agentsec.integrations.mcp.GuardedMCPClient`, `agentsec.integrations.mcp.ToolPins`, `agentsec.sandbox.Policy` | hidden_instruction |
 | AML.T0034 | Cost Harvesting | AG-D-01 | `agentsec.sandbox.Policy` | - |
 | AML.T0034.002 | Agentic Resource Consumption | AG-D-01 | `agentsec.sandbox.Policy` | - |
 | AML.T0050 | Command and Scripting Interpreter | AG-E-03 | `agentsec.sandbox.SafeCommandRunner` | tool_misuse |
-| AML.T0051 | LLM Prompt Injection | AG-S-01, AG-E-02 | `agentsec.middleware.injection.spotlight`, `agentsec.sandbox.Session`, `agentsec.sandbox.TaintPolicy` | authority_claim, delimiter_escape, exfiltration, fake_conversation, hidden_instruction, tool_misuse |
-| AML.T0053 | AI Agent Tool Invocation | AG-T-03, AG-E-01, AG-E-02 | `agentsec.sandbox.Policy`, `agentsec.sandbox.SafeCommandRunner`, `agentsec.sandbox.Session`, `agentsec.sandbox.TaintPolicy`, `agentsec.sandbox.ToolGuard` | exfiltration, tool_misuse |
+| AML.T0051 | LLM Prompt Injection | AG-S-01, AG-E-02 | `agentsec.integrations.claude_code.handle`, `agentsec.middleware.injection.spotlight`, `agentsec.sandbox.Session`, `agentsec.sandbox.TaintPolicy`, `agentsec.workflowscan.scan_workflows` | authority_claim, delimiter_escape, exfiltration, fake_conversation, hidden_instruction, tool_misuse |
+| AML.T0053 | AI Agent Tool Invocation | AG-T-03, AG-E-01, AG-E-02 | `agentsec.sandbox.Policy`, `agentsec.sandbox.SafeCommandRunner`, `agentsec.sandbox.Session`, `agentsec.sandbox.TaintPolicy`, `agentsec.sandbox.ToolGuard`, `agentsec.workflowscan.scan_workflows` | exfiltration, tool_misuse |
 | AML.T0054 | LLM Jailbreak | AG-E-04 | `agentsec.fuzzer` | instruction_override, multilingual, role_hijack |
 | AML.T0056 | Extract LLM System Prompt | AG-I-02 | `agentsec.middleware.validators.ProtectedStringValidator` | prompt_leak |
 | AML.T0057 | LLM Data Leakage | AG-I-01, AG-I-03 | `agentsec.middleware.validators.ExfilLinkValidator` | exfiltration |
@@ -46,9 +46,9 @@ Only techniques referenced by the catalog are listed; ATLAS has many more.
 | AML.T0080 | AI Agent Context Poisoning | AG-T-02 | `agentsec.middleware.audit.AuditLogger` | context_manipulation |
 | AML.T0080.000 | Memory | AG-T-02 | `agentsec.middleware.audit.AuditLogger` | context_manipulation |
 | AML.T0083 | Credentials from AI Agent Configuration | AG-E-05 | - | - |
-| AML.T0086 | Exfiltration via AI Agent Tool Invocation | AG-I-01, AG-E-02 | `agentsec.middleware.validators.ExfilLinkValidator`, `agentsec.sandbox.Session`, `agentsec.sandbox.TaintPolicy` | exfiltration, tool_misuse |
+| AML.T0086 | Exfiltration via AI Agent Tool Invocation | AG-I-01, AG-E-02 | `agentsec.middleware.validators.ExfilLinkValidator`, `agentsec.sandbox.Session`, `agentsec.sandbox.TaintPolicy`, `agentsec.workflowscan.scan_workflows` | exfiltration, tool_misuse |
 | AML.T0098 | AI Agent Tool Credential Harvesting | AG-E-05 | - | - |
 | AML.T0109 | AI Supply Chain Rug Pull | AG-S-02 | `agentsec.integrations.mcp.GuardedMCPClient`, `agentsec.integrations.mcp.ToolPins`, `agentsec.sandbox.Policy` | hidden_instruction |
 | AML.T0110 | AI Agent Tool Poisoning | AG-S-02 | `agentsec.integrations.mcp.GuardedMCPClient`, `agentsec.integrations.mcp.ToolPins`, `agentsec.sandbox.Policy` | hidden_instruction |
-| AML.T0115 | Publish Poisoned AI Artifacts | AG-T-05 | `agentsec.configscan.scan_config` | - |
+| AML.T0115 | Publish Poisoned AI Artifacts | AG-T-05 | `agentsec.configscan.scan_config`, `agentsec.sandbox.locked_install_rules` | - |
 | AML.T0118 | Autonomous AI Agent Communication | AG-S-02 | `agentsec.integrations.mcp.GuardedMCPClient`, `agentsec.integrations.mcp.ToolPins`, `agentsec.sandbox.Policy` | hidden_instruction |

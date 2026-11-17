@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Changed
+- Threat catalog and framework crosswalk: the coding-agent controls from 0.9.0 and 0.10.0 are now listed against the threats they address, each with its known limits. `agentsec hook` is under AG-S-01 (untrusted content impersonates an instruction source), `agentsec scan-workflows` under AG-E-02 (untrusted input chained to a privileged action) and `locked_install_rules` under AG-T-05 (dependency supply chain), next to `scan-config`, which was already there. No threat was added and no framework mapping changed; `docs/threat-model/frameworks.md` and the example threat model are regenerated.
+
 ## [0.10.0] - 2026-11-17
 
 Two additions: lock-file-only installs for the command runner, and a way to accept a reviewed scanner false positive in `scan-config`. One behaviour change: a `scan-config` pin file with a duplicate key is now refused.

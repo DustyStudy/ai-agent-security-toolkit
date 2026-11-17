@@ -592,6 +592,21 @@ def test_dns_check_is_on_by_default_without_a_host_allowlist():
     assert not check_url("https://x.example/", ArgRule(type="url", hosts=["x.example"]), loopback)
 
 
+def test_known_limit_dns_rebinding_between_the_check_and_the_tools_own_lookup():
+    """The guard resolves a URL's host once and hands the tool the URL, not the address.
+
+    The tool's HTTP client resolves the name again, so a DNS answer that changes in between
+    reaches an address nothing checked. Closing this needs the tool to dial a checked address.
+    """
+    answers = iter([["93.184.216.34"], ["169.254.169.254"]])
+    rebinding = lambda host: next(answers)  # noqa: E731
+    rule = ArgRule(type="url")
+    assert not check_url("https://rebind.example/", rule, rebinding)  # the guard's lookup: public
+    # The tool's own lookup gets the metadata address. The same check would refuse it, but
+    # no check runs at connect time.
+    assert check_url("https://rebind.example/", rule, rebinding)
+
+
 def test_policy_accepts_unset_resolve_dns_and_lints_risky_settings():
     policy = Policy.from_dict(
         {

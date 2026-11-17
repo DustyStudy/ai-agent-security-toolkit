@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -81,6 +82,14 @@ _CONFIG_IN_AGENT_DIR = frozenset(
 )
 _YAML_SUFFIXES = (".yaml", ".yml")
 _YAML_SET = "tag:yaml.org,2002:set"
+_YAML_MERGE = "tag:yaml.org,2002:merge"
+# What YAML 1.2 reads as a number where PyYAML (YAML 1.1) reads a string: 1e3, 0o17, 08.
+_YAML12_NUMBER = re.compile(
+    r"[-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?|0o[0-7]+|0x[0-9a-fA-F]+"
+)
+# A Windows junction is treated as a symlink. Python 3.11 cannot tell, and walks it as a
+# directory: its files are still listed, under the junction's name.
+_isjunction = getattr(os.path, "isjunction", lambda _path: False)
 # Top-level keys whose members are listed one by one, so a diff names the server or hook event.
 _EXPANDED = {
     "mcpservers": "mcp_server",
@@ -148,6 +157,9 @@ def _classify(parts: tuple[str, ...]) -> str | None:
         or (in_agent_dir and name.endswith((".md", ".mdc")))
     ):
         return "instructions"
+    if name == "opencode.jsonc":
+        # OpenCode loads it from a project root. Pinned whole: its comments are not JSON.
+        return "file"
     if (
         name in _CONFIG_ANYWHERE
         or (in_agent_dir and name in _CONFIG_IN_AGENT_DIR)
@@ -193,7 +205,29 @@ class _YamlLoader(yaml.SafeLoader):
             raise ValueError("alias")
         return super().compose_node(parent, index)
 
+    def construct_object(self, node: Any, deep: bool = False) -> Any:
+        value = super().construct_object(node, deep)
+        if isinstance(node, yaml.ScalarNode) and value is not None:
+            # PyYAML reads YAML 1.1 and most agents read 1.2: `yes` and `on` are both True here
+            # and two different strings there, `017` is 15 here and 17 there. Only a scalar
+            # both read alike is kept: a string, or a bool or number spelled as JSON spells it.
+            if isinstance(value, str):
+                same = node.style is not None or not _YAML12_NUMBER.fullmatch(value)
+            else:
+                try:
+                    plain = json.loads(node.value)
+                except ValueError:
+                    same = False
+                else:
+                    same = type(plain) is type(value) and plain == value
+            if not same:
+                raise ValueError("scalar that YAML 1.1 and 1.2 read differently")
+        return value
+
     def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
+        if any(key.tag == _YAML_MERGE for key, _ in node.value):
+            # PyYAML merges `<<: {a: 1}` into the mapping; a YAML 1.2 parser keeps a key "<<".
+            raise ValueError("merge key")
         mapping = super().construct_mapping(node, deep)
         # PyYAML keeps the last duplicate; other parsers keep the first. A key that is not a
         # string (1, true, null) would share an id and a JSON form with its string spelling.
@@ -294,7 +328,12 @@ def _scan_file(
             # repr, not str, for TOML dates: the date 1979-05-27 and the string "1979-05-27"
             # must not share a fingerprint.
             encoded = json.dumps(keyed, sort_keys=True, ensure_ascii=False, default=repr)
-            fingerprint = _sha256(encoded.encode("utf-8"))
+            # The repr alone would give that date and a string spelling its repr one
+            # fingerprint, so an entry holding such a value is hashed with a second form that
+            # leaves it out. A raw NUL never appears in JSON, so the join is unambiguous.
+            typed = json.dumps(keyed, sort_keys=True, ensure_ascii=False, default=lambda _: None)
+            hashed = encoded if typed == encoded else encoded + "\0" + typed
+            fingerprint = _sha256(hashed.encode("utf-8"))
             scan._add(ConfigItem(item_id, item_kind, fingerprint, show(encoded)))
             # The entry is scanned decoded and with its names: "ghp_..." is a token only
             # after decoding, and a server can be named "ignore all previous instructions".
@@ -306,13 +345,20 @@ def _scan_file(
         scan.findings.append(ConfigFinding(rel, "unparsed", f"not valid: {type(exc).__name__}"))
 
 
+def _item_path(path: Path, root: Path) -> str:
+    # "#" starts the entry key in an id, so it is escaped in a path: a file named
+    # "settings.json#hooks.X" would otherwise take over the id, and the pin, of that entry.
+    return path.relative_to(root).as_posix().replace("%", "%25").replace("#", "%23")
+
+
 def scan_config(root: str | Path, scanner: InjectionScanner | None = None) -> ConfigScan:
     """Find and scan agent configuration under ``root`` (a directory, or one file).
 
     Item ids use paths relative to ``root`` with forward slashes, so a pin file made on one
     machine checks out on another. Only ``.git`` is skipped: an ``AGENTS.md`` inside
-    ``node_modules`` steers an agent that works there. Symlinked directories are not followed;
-    each is listed as an item, fingerprinted by its target.
+    ``node_modules`` steers an agent that works there. Each symlinked directory is listed as
+    an item, fingerprinted by its target. One that is, or is under, an agent directory is also
+    followed, because the agent reads through it; any other is not.
     """
     scanner = scanner or InjectionScanner()
     root = Path(root)
@@ -322,7 +368,7 @@ def scan_config(root: str | Path, scanner: InjectionScanner | None = None) -> Co
     if root.is_file():
         kind = _classify((*_context(root.parent), root.name))
         if kind:
-            _scan_file(scan, root, root.name, kind, scanner)
+            _scan_file(scan, root, _item_path(root, root.parent), kind, scanner)
         return scan
 
     def unreadable(exc: OSError) -> None:
@@ -330,20 +376,32 @@ def scan_config(root: str | Path, scanner: InjectionScanner | None = None) -> Co
         scan.findings.append(ConfigFinding(rel, "unparsed", "cannot list directory"))
 
     context = _context(root)
-    for directory, subdirs, names in os.walk(root, onerror=unreadable):
-        subdirs[:] = sorted(d for d in subdirs if d != ".git")
-        for name in subdirs:
-            link = Path(directory, name)
-            if link.is_symlink():
-                rel = link.relative_to(root).as_posix()
+    followed: set[str] = set()
+    pending = [root]
+    while pending:
+        for directory, subdirs, names in os.walk(pending.pop(), onerror=unreadable):
+            subdirs[:] = sorted(d for d in subdirs if d != ".git")
+            for name in list(subdirs):
+                link = Path(directory, name)
+                if not (link.is_symlink() or _isjunction(link)):
+                    continue
+                subdirs.remove(name)  # os.walk would descend a junction, loop or not
                 target = os.readlink(link)
+                rel = _item_path(link, root)
                 scan._add(ConfigItem(rel, "symlink", _sha256(target.encode()), show(target)))
-        for name in sorted(names):
-            path = Path(directory, name)
-            rel = path.relative_to(root).as_posix()
-            kind = _classify((*context, *rel.split("/")))
-            if kind:
-                _scan_file(scan, path, rel, kind, scanner)
+                # The agent opens its settings through the link, wherever the file is, so the
+                # target is scanned under the link's name. Each target is followed once, or a
+                # link to its own parent would never end.
+                real = os.path.realpath(link)
+                in_agent_dir = _classify((*context, *link.relative_to(root).parts, "x"))
+                if in_agent_dir and real not in followed:
+                    followed.add(real)
+                    pending.append(link)
+            for name in sorted(names):
+                path = Path(directory, name)
+                kind = _classify((*context, *path.relative_to(root).parts))
+                if kind:
+                    _scan_file(scan, path, _item_path(path, root), kind, scanner)
     return scan
 
 

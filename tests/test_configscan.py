@@ -134,6 +134,7 @@ def test_injection_in_a_server_definition_or_its_name_is_flagged_on_that_server(
         ".venv/lib/CLAUDE.md",
         "sub/agents.md",  # case-insensitive file systems open this as AGENTS.md
         "opencode.json",
+        "opencode.jsonc",  # pinned whole
     ],
 )
 def test_instruction_and_config_locations_an_agent_loads_are_inventoried(tmp_path, name):
@@ -141,17 +142,64 @@ def test_instruction_and_config_locations_an_agent_loads_are_inventoried(tmp_pat
     assert {i.split("#")[0] for i in scan_config(tmp_path).items} == {name}
 
 
-def test_symlinked_agent_directory_is_an_item_not_a_blind_spot(tmp_path):
-    write(tmp_path, "payload/settings.json", {"hooks": {"SessionStart": []}})
+def link_dir(link: Path, target: Path) -> None:
     try:
-        os.symlink("payload", tmp_path / ".claude", target_is_directory=True)
+        os.symlink(target, link, target_is_directory=True)
     except OSError:
-        pytest.skip("cannot create symlinks here")
+        if os.name != "nt":
+            pytest.skip("cannot create symlinks here")
+        import _winapi  # a junction needs no privilege on Windows
+
+        _winapi.CreateJunction(str(target), str(link))
+
+
+def test_symlinked_agent_directory_is_an_item_and_its_target_is_scanned(tmp_path):
+    write(tmp_path, "payload/settings.json", {"hooks": {"PreToolUse": ["guard"]}})
+    link_dir(tmp_path / ".claude", tmp_path / "payload")
     scan = scan_config(tmp_path)
     assert scan.items[".claude"].kind == "symlink"
-    assert kinds(check_pins(scan, {})) == {(".claude", "new")}
+    assert set(scan.items) == {".claude", ".claude/settings.json#hooks.PreToolUse"}
+    # The link is unchanged, and the file behind it is not under an agent directory by its
+    # own path: the guard hook is swapped for another without touching ".claude".
+    write(tmp_path, "payload/settings.json", {"hooks": {"SessionStart": ["id"]}})
+    assert kinds(check_pins(scan_config(tmp_path), scan.fingerprints)) == {
+        (".claude/settings.json#hooks.PreToolUse", "removed"),
+        (".claude/settings.json#hooks.SessionStart", "new"),
+    }
     # Scanning the link itself keeps the name the agent sees.
     assert set(scan_config(tmp_path / ".claude").items) == {"settings.json#hooks.SessionStart"}
+
+
+def test_a_symlink_loop_under_an_agent_directory_ends(tmp_path):
+    write(tmp_path, ".claude/settings.json", {"model": "x"})
+    link_dir(tmp_path / ".claude/loop", tmp_path)
+    link_dir(tmp_path / ".claude/again", tmp_path)
+    items = scan_config(tmp_path).items
+    assert items[".claude/loop"].kind == items[".claude/again"].kind == "symlink"
+    # The shared target is listed once through a link, and never through a link inside itself.
+    assert ".claude/settings.json#model" in items
+    assert max(i.count(".claude") for i in items) == 2
+
+
+def test_a_file_named_like_an_entry_cannot_take_over_its_pin(tmp_path):
+    hook = [{"matcher": "Bash", "hooks": [{"type": "command", "command": "exit 2"}]}]
+    settings = write(tmp_path, ".claude/settings.json", {"hooks": {"PreToolUse": hook}})
+    pins = scan_config(tmp_path).fingerprints
+    # The guard hook is deleted, and a file whose name is the hook's id and whose bytes are
+    # the JSON the hook was fingerprinted from is left in its place.
+    settings.unlink()
+    decoy = json.dumps({"hooks": {"PreToolUse": hook}}, sort_keys=True)
+    try:
+        write(tmp_path, ".claude/settings.json#hooks.PreToolUse", decoy)
+    except OSError:
+        pytest.skip("cannot create this file name here")
+    assert kinds(check_pins(scan_config(tmp_path), pins)) == {
+        (".claude/settings.json#hooks.PreToolUse", "removed"),
+        (".claude/settings.json%23hooks.PreToolUse", "new"),
+    }
+    # The escape is itself escaped, so a file cannot be named into another file's id either.
+    write(tmp_path, ".claude/a%23b", "x")
+    assert ".claude/a%2523b" in scan_config(tmp_path).items
 
 
 def test_two_entries_with_one_id_cannot_hide_a_changed_server(tmp_path):
@@ -173,6 +221,14 @@ def test_toml_date_and_string_have_different_fingerprints(tmp_path):
     write(tmp_path, ".codex/config.toml", "x = 1979-05-27\n")
     pins = scan_config(tmp_path).fingerprints
     write(tmp_path, ".codex/config.toml", 'x = "1979-05-27"\n')
+    assert kinds(check_pins(scan_config(tmp_path), pins)) == {(".codex/config.toml#x", "changed")}
+    # Nor may a string that spells the date's repr, which is what the date is hashed from.
+    write(tmp_path, ".codex/config.toml", 'x = "datetime.date(1979, 5, 27)"\n')
+    assert kinds(check_pins(scan_config(tmp_path), pins)) == {(".codex/config.toml#x", "changed")}
+    # Swapping which of two values is the date keeps both reprs and must still show.
+    write(tmp_path, ".codex/config.toml", 'x = [1979-05-27, "datetime.date(1979, 5, 28)"]\n')
+    pins = scan_config(tmp_path).fingerprints
+    write(tmp_path, ".codex/config.toml", 'x = ["datetime.date(1979, 5, 27)", 1979-05-28]\n')
     assert kinds(check_pins(scan_config(tmp_path), pins)) == {(".codex/config.toml#x", "changed")}
 
 
@@ -633,12 +689,45 @@ def test_yaml_entries_are_scanned_and_shown_redacted(tmp_path):
     assert token not in scan.items[".continue/config.yaml#env"].summary
 
 
-def test_a_yaml_date_and_string_have_different_fingerprints(tmp_path):
-    write(tmp_path, ".continue/config.yaml", "x: 1979-05-27\n")
-    pins = scan_config(tmp_path).fingerprints
-    write(tmp_path, ".continue/config.yaml", 'x: "1979-05-27"\n')
-    changed = {(".continue/config.yaml#x", "changed")}
-    assert kinds(check_pins(scan_config(tmp_path), pins)) == changed
+@pytest.mark.parametrize(
+    "value",
+    [
+        "yes",  # YAML 1.1 reads yes and on as one True; YAML 1.2 reads two strings
+        "on",
+        "No",
+        "017",  # 15 in YAML 1.1, 17 in YAML 1.2
+        "0x1F",
+        "1_000",
+        "1:30",  # 90 in YAML 1.1
+        "1e3",  # a string in YAML 1.1, 1000.0 in YAML 1.2
+        "0o17",
+        "08",
+        ".5",
+        "+5",
+        "True",
+        "1979-05-27",  # a date to PyYAML and js-yaml, a string to a YAML 1.2 core parser
+        "!!binary aGk=",
+        "!!int '017'",
+        "{<<: {command: evil}}",  # merged by YAML 1.1, a key named "<<" in YAML 1.2
+    ],
+)
+def test_a_yaml_scalar_that_yaml_11_and_12_read_differently_is_refused(tmp_path, value):
+    write(tmp_path, ".continue/config.yaml", f"mcpServers:\n  - name: demo\n    command: {value}\n")
+    scan = scan_config(tmp_path)
+    assert kinds(scan.findings) == {(".continue/config.yaml", "unparsed")}
+    assert scan.items == {}
+
+
+def test_yaml_scalars_every_parser_reads_alike_are_kept(tmp_path):
+    text = "a: true\nb: 12\nc: -1.5\nd: 'yes'\ne: \"017\"\nf: null\ng:\nh: 1.0.0\ni: v1\nj: ~\n"
+    write(tmp_path, ".continue/config.yaml", text)
+    data = {"a": True, "b": 12, "c": -1.5, "d": "yes", "e": "017", "f": None, "g": None}
+    write(tmp_path, ".continue/mcp.json", data | {"h": "1.0.0", "i": "v1", "j": None})
+    scan = scan_config(tmp_path)
+    assert scan.findings == []
+    for key in "abcdefghij":  # each is read as the JSON value of the same spelling
+        yaml_item = scan.items[f".continue/config.yaml#{key}"]
+        assert yaml_item.fingerprint == scan.items[f".continue/mcp.json#{key}"].fingerprint
 
 
 def test_a_yaml_file_pinned_whole_by_an_older_release_must_be_re_pinned(tmp_path, capsys):

@@ -6,11 +6,69 @@ Design and limits: docs/design/GATEWAY.md.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
+from typing import Any
 
 from agentsec.gateway.app import Gateway, HttpError, UpstreamError, http_transport
 from agentsec.gateway.config import ConfigError, GatewayConfig, Upstream, load_config
+
+
+def header_timeout_protocol(timeout_s: float) -> type[asyncio.Protocol]:
+    """uvicorn's h11 protocol, closing a connection that does not send a request head in time.
+
+    uvicorn only times out a connection that is idle after a response. One that never sends
+    a request, or sends a request head a byte at a time, stays open for ever and counts
+    towards ``limits.max_connections``: enough of them get everyone else a 503. The body is
+    not covered here; ``limits.body_timeout_s`` bounds that once the head has arrived.
+    """
+    from uvicorn.protocols.http.h11_impl import H11Protocol
+
+    class HeaderTimeoutProtocol(H11Protocol):
+        _head_timer: asyncio.TimerHandle | None = None
+
+        def _in_flight(self) -> bool:
+            return self.cycle is not None and not self.cycle.response_complete
+
+        def _arm(self) -> None:
+            # One deadline for the whole head: more bytes do not push it back.
+            if self._head_timer is None:
+                self._head_timer = self.loop.call_later(timeout_s, self._head_timed_out)
+
+        def _disarm(self) -> None:
+            if self._head_timer is not None:
+                self._head_timer.cancel()
+                self._head_timer = None
+
+        def _head_timed_out(self) -> None:
+            self._head_timer = None
+            if not self._in_flight() and not self.transport.is_closing():
+                self.transport.close()
+
+        def connection_made(self, transport: Any) -> None:
+            super().connection_made(transport)
+            self._arm()
+
+        def data_received(self, data: bytes) -> None:
+            super().data_received(data)
+            if self._in_flight():
+                self._disarm()
+            else:
+                self._arm()  # between requests on a kept-alive connection, a new head began
+
+        def on_response_complete(self) -> None:
+            # Idle now: uvicorn's own keep-alive timer takes over until the next byte.
+            self._disarm()
+            super().on_response_complete()
+            if not self._in_flight() and self.conn.trailing_data[0]:
+                self._arm()  # part of the next head arrived with the last request
+
+        def connection_lost(self, exc: Exception | None) -> None:
+            self._disarm()
+            super().connection_lost(exc)
+
+    return HeaderTimeoutProtocol
 
 
 def serve(config: GatewayConfig) -> None:
@@ -32,6 +90,7 @@ def serve(config: GatewayConfig) -> None:
                 proxy_headers=False,
                 server_header=False,
                 http="h11",
+                ws="none",
                 lifespan="off",
                 log_level="warning",
             )
@@ -58,7 +117,12 @@ def serve(config: GatewayConfig) -> None:
         # replace it with a client-supplied X-Forwarded-For and defeat that check.
         proxy_headers=False,
         server_header=False,
-        http="h11",  # the strict pure-Python parser: ambiguous framing is rejected
+        # The strict pure-Python h11 parser (ambiguous framing is rejected), with a deadline
+        # for the request head.
+        http=header_timeout_protocol(config.header_timeout_s),
+        # The gateway serves no websockets. Left on, uvicorn hands an upgrade request to
+        # another protocol object, outside the head deadline and the rest of this setup.
+        ws="none",
         lifespan="off",
         workers=1,  # one audit chain per process; see docs/design/GATEWAY.md
         # Unauthenticated connections are otherwise unbounded: above the cap uvicorn answers
@@ -78,6 +142,7 @@ __all__ = [
     "HttpError",
     "Upstream",
     "UpstreamError",
+    "header_timeout_protocol",
     "http_transport",
     "load_config",
     "serve",

@@ -162,7 +162,7 @@ Labels are event names and status codes only, never users or request content. To
 - **TLS.** A non-loopback `listen.host` needs `listen.tls`, or `tls_terminated_by_proxy: true` when the auth proxy terminates TLS on the same host or a trusted network.
 - **One process.** Rate limits and the audit chain are per process. Run one replica per audit file.
 - **Shutdown.** On SIGTERM the gateway stops accepting connections and gives requests in flight `limits.shutdown_timeout_s` (default 30, whole seconds) to finish, then closes them. Set the orchestrator's grace period (Kubernetes `terminationGracePeriodSeconds`) a little above it.
-- **Idle connections.** `limits.max_connections` bounds the work the gateway accepts, not the sockets a client can hold open: a connection that never sends a request stays open and counts towards the cap. Put a proxy or load balancer with header and idle timeouts in front of an internet-facing gateway.
+- **Slow and silent connections.** A connection must send a whole request head within `limits.header_timeout_s` (default 10) or it is closed, so sockets that send nothing, or a head a byte at a time, cannot fill `limits.max_connections`. Between requests a kept-alive connection is closed after 5 idle seconds, and `limits.body_timeout_s` bounds the body. A client can still open up to the cap in fresh connections every few seconds: rate-limit connections per address in a proxy or load balancer in front of an internet-facing gateway.
 - **Secrets by reference.** Upstream keys are `env:NAME` or `file:/path`; literals are refused.
 
 ## Container image

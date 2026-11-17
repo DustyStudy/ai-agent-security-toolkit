@@ -2,3 +2,5 @@
 b2e2ebb925a160b3868f9dc93da1c15d22841878:tests/test_security_regressions.py:gitlab-pat:691
 # Fake api_key in an audit redaction test, since split like the other fixtures.
 3bc7ed9b777511239b42e518ab767e17a50a97eb:tests/test_security_regressions.py:generic-api-key:1314
+# RFC 6455 sample nonce in a websocket-upgrade test, since built at runtime.
+f8751d35f3bb82a02809fca83d6bf1f83739befa:tests/test_gateway_serve.py:generic-api-key:137

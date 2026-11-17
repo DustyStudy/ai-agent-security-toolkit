@@ -54,6 +54,7 @@ limits:
   requests_per_min: 60     # per user, per gateway process
   concurrent_requests: 4   # per user
   max_connections: 1000    # all clients together, before authentication; above it, 503
+  header_timeout_s: 10     # a connection that has not sent a whole request head by then is closed
   shutdown_timeout_s: 30   # on SIGTERM, requests in flight get this long to finish
 
 upstreams:                 # "model" in a request selects one of these by name; clients never pass a URL

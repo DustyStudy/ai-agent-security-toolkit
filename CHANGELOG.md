@@ -4,8 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-17
+
+One fix that fails closed, and the first published container image. `SafeCommandRunner` now refuses an option-like argument after a `--` that itself comes right after an option (`--stat -- -name`); everything else behaves as in 0.8.0.
+
 ### Added
-- The gateway image is published to `ghcr.io/dustystudy/ai-agent-security-toolkit:<version>` on each release tag (`.github/workflows/image.yml`), with a build provenance attestation that `gh attestation verify` checks against the workflow and the tag. `linux/amd64` only, no `latest` tag, and the workflow does not replace a published version tag. The first published image will be the release after 0.8.0.
+- The gateway image is published to `ghcr.io/dustystudy/ai-agent-security-toolkit:<version>` on each release tag (`.github/workflows/image.yml`), with a build provenance attestation that `gh attestation verify` checks against the workflow and the tag. `linux/amd64` only, no `latest` tag, and the workflow does not replace a published version tag. This release is the first with a published image.
 
 ### Security
 - `SafeCommandRunner`: a `--` right after an option no longer ends the `allowed_options` check. With both `--` and an option that takes a separate value allowed, `-W -- -c code` passed the check, and Python then ran `-c`: it read `--` as the value of `-W`. Arguments after such a `--` are still checked, so `git diff --stat -- -name` is now refused while `git diff --stat -- name` and `git diff -- -name` work as before.
@@ -200,7 +204,8 @@ Tagged but never released; use 0.4.1.
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.5.0...v0.6.0

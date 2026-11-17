@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agentsec.configscan import ConfigScan
 from agentsec.sandbox import Decision, Verdict
 from fuzz import targets
 from fuzz.targets import TARGETS, Reader
@@ -42,7 +43,7 @@ def test_the_runner_lists_every_target_and_compiles():
     assert "import atheris" in source
     assert set(TARGETS) == {
         "cef", "url", "url_private", "path", "redact", "scan", "policy", "guard", "audit",
-        "exec_options",
+        "exec_options", "config",
     }  # fmt: skip
 
 
@@ -117,3 +118,10 @@ def test_audit_target_detects_a_verifier_that_misses_tampering(monkeypatch):
 def test_exec_options_target_detects_a_runner_that_skips_the_option_check(monkeypatch):
     monkeypatch.setattr(targets, "check_options", lambda args, rule: None)
     _fails_within("exec_options")
+
+
+def test_config_target_detects_a_scan_that_skips_files_or_crashes(monkeypatch):
+    monkeypatch.setattr(targets, "scan_config", lambda root: ConfigScan())
+    _fails_within("config")
+    monkeypatch.setattr(targets, "scan_config", lambda root: [][0])
+    _fails_within("config", exc=IndexError)

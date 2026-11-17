@@ -1,0 +1,6 @@
+model = "x"
+# comment
+[mcp_servers.docs]
+command = "npx"
+args = ["-y", "docs"]
+when = 1979-05-27

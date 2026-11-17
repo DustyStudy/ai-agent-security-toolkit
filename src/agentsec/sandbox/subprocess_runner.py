@@ -77,8 +77,8 @@ def locked_install_rules(
 
     Calling ``run`` with no arguments runs that command; any other argument list is denied.
     This pins what is installed to the lock file. It does not vouch for the lock file: review
-    changes to it. ``pip`` needs every requirement hash-pinned; ``npm`` and ``pnpm`` are batch
-    files on Windows, which the runner refuses.
+    changes to it. ``pip`` needs every requirement hash-pinned; ``npm.cmd`` and the ``pnpm.cmd``
+    shim are batch files on Windows, which the runner refuses (pnpm's native ``pnpm.exe`` runs).
     """
     rules = {}
     for tool in tools:

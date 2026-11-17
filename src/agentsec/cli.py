@@ -11,7 +11,7 @@ from typing import Any
 from agentsec import __version__
 from agentsec.configscan import check_pins, load_pins, save_pins, scan_config, show
 from agentsec.fuzzer import CORPUS, MUTATORS, FuzzConfig, load_target, run
-from agentsec.fuzzer.harness import SCENARIOS, build_cases
+from agentsec.fuzzer.harness import DEFAULT_SCENARIOS, SCENARIOS, build_cases
 from agentsec.middleware.audit import verify_file
 from agentsec.sandbox import Policy, PolicyError, ToolGuard
 from agentsec.threatmodel import (
@@ -32,14 +32,16 @@ def _csv(value: str | None) -> list[str] | None:
 def cmd_fuzz(args: argparse.Namespace) -> int:
     config = FuzzConfig(
         seed=args.seed,
-        scenarios=_csv(args.scenarios) or list(SCENARIOS),
+        scenarios=_csv(args.scenarios) or list(DEFAULT_SCENARIOS),
         mutators=_csv(args.mutators),
         categories=_csv(args.categories),
         max_cases=args.max_cases,
     )
     if args.list:
         cases = build_cases(config)
-        print(f"{len(CORPUS)} payloads x {len(MUTATORS)} mutators x {len(SCENARIOS)} scenarios")
+        print(
+            f"{len(CORPUS)} payloads x {len(MUTATORS)} mutators x {len(config.scenarios)} scenarios"
+        )
         print(f"selected: {len(cases)} cases")
         print("mutators:", ", ".join(MUTATORS))
         return 0
@@ -297,7 +299,10 @@ def build_parser() -> argparse.ArgumentParser:
         "anthropic:MODEL | ollama:MODEL | openai-compat:URL#model=NAME[&token=env:VAR][&stream=1] "
         "| guarded:<model target> | package.module:callable",
     )
-    f.add_argument("--scenarios", help=f"comma list from {list(SCENARIOS)} (default: all)")
+    f.add_argument(
+        "--scenarios",
+        help=f"comma list from {list(SCENARIOS)} (default: {','.join(DEFAULT_SCENARIOS)})",
+    )
     f.add_argument("--mutators", help=f"comma list from {list(MUTATORS)} (default: all)")
     f.add_argument("--categories", help="comma list of payload categories (default: all)")
     f.add_argument("--seed", type=int, default=0)

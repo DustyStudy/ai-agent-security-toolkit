@@ -203,7 +203,10 @@ class GuardedAgent:
         if inp.untrusted_content:
             screens.append(
                 mw.screen_input(
-                    inp.untrusted_content, source="document", untrusted=True, session=session
+                    inp.untrusted_content,
+                    source=inp.untrusted_tool or "document",
+                    untrusted=True,
+                    session=session,
                 )
             )
         if any(s.blocked for s in screens):

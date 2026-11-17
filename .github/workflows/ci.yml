@@ -260,6 +260,12 @@ jobs:
           --categories tool_misuse,exfiltration,prompt_leak
           --max-asr 0 --quiet --json fuzz.json
 
+      - name: Containment regression - the same, with the payload delivered as a tool result
+        run: >
+          agentsec fuzz --target builtin:guarded --scenarios tool_result
+          --categories tool_misuse,exfiltration,prompt_leak
+          --max-asr 0 --quiet
+
       - name: Baseline sanity - naive reference agent must be fully compromised
         run: |
           agentsec fuzz --target builtin:naive --quiet --json naive.json

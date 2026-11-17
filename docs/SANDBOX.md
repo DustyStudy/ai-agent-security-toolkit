@@ -115,6 +115,30 @@ runner.run("git", ["diff", "--output=/tmp/x"])                     # CommandDeni
 
 Every argument that starts with `-` must then be a listed flag, exactly or as `--flag=value`. Short options with an attached value (`-ofile`) and look-alikes (`--stats`) are refused. List `--` to let a caller end option parsing; arguments after it are not checked as options, so put `--` in your own argv before untrusted values. A `--` that comes right after an option does not end the check: the program may read it as that option's value (Python reads `-W -- -c code` as `-W` with the value `--`, then `-c`), so the arguments after it are still checked as options. Put a positional argument or nothing before `--` when a value after it starts with `-`. Leaving `allowed_options` unset keeps the old behavior (options unchecked). The check knows the POSIX `-` convention only; Windows programs that take `/flag` options need an `arg_pattern` or `deny_args` instead. `deny_args` is only a backstop: it also catches a denied short flag inside a cluster (`-Ic` for `-c`), but a list of what is forbidden cannot anticipate every spelling a program accepts.
 
+**Installs from the lock file only.** An agent that runs `pip install <name>` installs whatever a README or a tool result named. `locked_install_rules` returns rules that allow one exact command per package manager and nothing else:
+
+```python
+from agentsec.sandbox import SafeCommandRunner, locked_install_rules
+
+runner = SafeCommandRunner(
+    locked_install_rules(["pip", "uv"], requirements="requirements/requirements-runtime.txt"),
+    cwd_roots=["/srv/repo"],
+    inherit_env=["PATH"],
+)
+runner.run("pip-install")                 # pip install --require-hashes -r requirements/requirements-runtime.txt
+runner.run("uv-install")                  # uv sync --locked
+runner.run("pip-install", ["install", "left-pad"])   # CommandDenied
+```
+
+| Tool | The one command allowed |
+|---|---|
+| `pip` | `pip install --require-hashes -r <requirements>` |
+| `uv` | `uv sync --locked` |
+| `npm` | `npm ci --ignore-scripts` |
+| `pnpm` | `pnpm install --frozen-lockfile --ignore-scripts` |
+
+It is built on `ExecRule(exact_args=[[...]])`, which requires the whole argument list to equal one of the listed ones; use it directly for any command with a single safe spelling. This pins what is installed to the lock file; it does not vouch for the lock file, so review changes to it. `pip` and `uv` still run build scripts of source distributions the lock file names. On Windows `npm` and `pnpm` are batch files, which the runner refuses. The preset's commands have not been run against the real package managers by the tests, which check the rules and the denial logic.
+
 The child gets an empty environment unless you pass `env`. Tools that need a few host variables (git on Windows needs `PATH` and `SystemRoot`) can name them: `SafeCommandRunner(..., inherit_env=["PATH", "SystemRoot"])`. Nothing is inherited by default, so secrets in the agent's environment never reach the command.
 
 ## Path arguments

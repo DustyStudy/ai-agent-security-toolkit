@@ -8,7 +8,12 @@ from agentsec.sandbox.adapters import (
 )
 from agentsec.sandbox.guard import Decision, Session, ToolDenied, ToolGuard, Verdict
 from agentsec.sandbox.policy import ArgRule, Policy, PolicyError, TaintPolicy, ToolRule
-from agentsec.sandbox.subprocess_runner import CommandDenied, ExecRule, SafeCommandRunner
+from agentsec.sandbox.subprocess_runner import (
+    CommandDenied,
+    ExecRule,
+    SafeCommandRunner,
+    locked_install_rules,
+)
 
 __all__ = [
     "ArgRule",
@@ -26,6 +31,7 @@ __all__ = [
     "Verdict",
     "arun_anthropic_tool_uses",
     "arun_openai_tool_calls",
+    "locked_install_rules",
     "run_anthropic_tool_uses",
     "run_openai_tool_calls",
 ]

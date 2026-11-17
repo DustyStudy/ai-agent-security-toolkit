@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- `locked_install_rules` and `ExecRule(exact_args=...)` for `SafeCommandRunner`: rules that let an agent install dependencies only from the project's lock file (`pip install --require-hashes -r ...`, `uv sync --locked`, `npm ci --ignore-scripts`, `pnpm install --frozen-lockfile --ignore-scripts`). A package name, an index URL or another requirements file is refused. `exact_args` requires the whole argument list to equal one of the listed ones.
+
 ## [0.9.0] - 2026-11-17
 
 Four additions for coding agents, aimed at the ways they are attacked in practice: planted configuration, instructions in tool results, and agents run in CI on text an outsider wrote. Nothing that worked in 0.8.2 changes. One thing to know if you import it: `agentsec.fuzzer.harness.SCENARIOS` now has three entries; the default run still uses two, through the new `DEFAULT_SCENARIOS`.

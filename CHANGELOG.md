@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- The gateway image is published to `ghcr.io/dustystudy/ai-agent-security-toolkit:<version>` on each release tag (`.github/workflows/image.yml`), with a build provenance attestation that `gh attestation verify` checks against the workflow and the tag. `linux/amd64` only, no `latest` tag, and the workflow does not replace a published version tag. The first published image will be the release after 0.8.0.
+
 ## [0.8.0] - 2026-11-16
 
 A security review of the toolkit: redaction, scan limits and gateway input checks. Fails closed in four places that worked before: the gateway refuses a remote `image_url` in enforce mode and a `/0` network in `identity.trusted_proxies`, `JsonSchemaValidator` refuses `NaN` and `Infinity`, and `agentsec fuzz` exits 2 when every case errored. A JWT directly after a `-` is no longer redacted by the JWT rule. Also new: a container image for the gateway (build it yourself; none is published), a connection cap and a shutdown timeout.

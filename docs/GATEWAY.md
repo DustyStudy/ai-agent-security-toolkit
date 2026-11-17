@@ -167,7 +167,17 @@ Labels are event names and status codes only, never users or request content. To
 
 ## Container image
 
-The repository's `Dockerfile` builds the gateway from the hash-pinned locks (`requirements/requirements-gateway.txt`) on a digest-pinned `python:3.13-slim`. No image is published yet: build it yourself.
+The repository's `Dockerfile` builds the gateway from the hash-pinned locks (`requirements/requirements-gateway.txt`) on a digest-pinned `python:3.13-slim`. Each release after 0.8.0 is also published to `ghcr.io/dustystudy/ai-agent-security-toolkit`, tagged with the version (there is no `latest`) and for `linux/amd64` only. With `VERSION` set to a release, such as `0.8.1`:
+
+```bash
+docker pull ghcr.io/dustystudy/ai-agent-security-toolkit:$VERSION
+gh attestation verify oci://ghcr.io/dustystudy/ai-agent-security-toolkit:$VERSION \
+  --repo DustyStudy/ai-agent-security-toolkit \
+  --signer-workflow DustyStudy/ai-agent-security-toolkit/.github/workflows/image.yml \
+  --source-ref refs/tags/v$VERSION
+```
+
+The second command checks that the image was built by this repository's image workflow, running on that release tag. `--repo` alone would accept an attestation from any workflow or branch in the repository. It prints the digest it verified: run the image by that digest. The workflow does not replace a version tag once it is published. 0.8.0 itself has no published image. To build one yourself instead:
 
 ```bash
 docker build -t agentsec-gateway .

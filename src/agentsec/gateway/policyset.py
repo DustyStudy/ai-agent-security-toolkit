@@ -96,7 +96,7 @@ class PolicySet:
     expires: datetime | None = None
     numeric_revision: int | None = None  # bundles only: refuses rollbacks on reload
     # MCP upstream name -> {namespaced tool: fingerprint}. An upstream with pins only offers
-    # tools whose definition matches its pin; without pins, definitions are only scanned.
+    # tools whose definition matches its pin; without pins, the gateway pins each tool on first use.
     mcp_pins: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
     def resolve(self, user_groups: Iterable[str]) -> GroupPolicy | None:

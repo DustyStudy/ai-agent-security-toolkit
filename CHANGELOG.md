@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-17
+
+`scan-config` now parses YAML config files per entry, and a new fuzz target for its parsers found two cases it skipped. Both change what is pinned: if you keep a pin file, expect `new` and `removed` findings on the first check after upgrading, then review and run `--update-pins`.
+
 ### Added
 - A `config` fuzz target for the `scan-config` parsers (`fuzz/targets.py`, seeds in `fuzz/corpus/config/`). It writes the input bytes as a JSON, a TOML and a YAML config file under an agent directory and checks that `scan_config` never raises, lists every file or reports it as `unparsed` or `oversized`, finishes within a time bound, and gives the same fingerprints and findings on a second scan. It runs with the other targets in the test suite and in the CI fuzz job. It found the crash and the skipped entries described below.
 
@@ -249,7 +253,8 @@ Tagged but never released; use 0.4.1.
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.1...v0.8.2

@@ -67,6 +67,37 @@ pins.save("mcp-pins.json")
 
 The adapter imports nothing from `mcp`. It uses only `list_tools()` and `call_tool()` and reads both the 1.x (`inputSchema`, `isError`) and 2.x (`input_schema`, `is_error`) spellings. It is tested against fakes of both shapes and, in CI, against the real SDK 2.x over its in-memory transport (`pip install "ai-agent-security-toolkit[mcp]"`). It has not been run against a remote MCP server. The scan is a heuristic tripwire, so pinning and human review of tool descriptions still matter.
 
+## Claude Code hook
+
+The gateway enforces policy on the calls it makes. A coding agent's shell, file and fetch tools run on the developer's machine and never pass through it, so text planted in a tool result (a forged error event, a fetched web page) can lead straight to a shell command. `agentsec hook` puts the same policy and taint in front of those tools, as a Claude Code `PreToolUse` hook:
+
+```json
+{"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{
+  "type": "command", "onFailure": "block",
+  "command": "agentsec hook --policy /etc/agentsec/claude-code.policy.yaml --state-dir /var/lib/agentsec/hook --audit /var/log/agentsec/hook.jsonl"
+}]}]}}
+```
+
+Start from [`examples/claude-code.policy.yaml`](../examples/claude-code.policy.yaml). Tool names are Claude Code's (`Bash`, `Read`, `Edit`, `Write`, `WebFetch`, `mcp__<server>__<tool>`), and arguments are the tool's input fields.
+
+| Policy result | What the hook does |
+|---|---|
+| Allowed | Prints nothing. Claude Code's own permission rules and prompts still apply; the hook never approves a call for the user. |
+| Denied (not in the policy, a bad argument, a limit, taint with `action: deny`) | Exit code 2: the call is blocked and the model is shown the reason. |
+| Needs approval (`require_approval`, or taint with `action: approve`) | Answers `ask`, so the human decides in Claude Code's permission prompt, with the reason. |
+
+- **What taints is the policy's choice.** The example marks web fetches, web searches and MCP tools `returns_untrusted`, and not `Read`: an agent reads files first thing, so every session would be tainted. A planted file in a repository you did not write is therefore not covered until you set `returns_untrusted: true` on `Read`.
+- **Taint.** A call to a tool marked `returns_untrusted` taints the session when the hook lets it through, not when it returns. One hook event is then enough, and a missing `PostToolUse` registration cannot turn taint off. A call the human then declines has still tainted the session. To clear it, start a new session.
+- **State.** Every hook run is a new process, so taint and call counts are kept in one append-only file per session under `--state-dir`. Runs are serialised with a file lock, so parallel tool calls cannot pass a call limit together or fork the audit chain.
+- **Fails closed, if you register it that way.** A missing or invalid policy, unreadable input and corrupt state all exit 2. Claude Code lets a call through when a hook times out or exits with any other code, which is why the registration above sets `"onFailure": "block"`.
+
+Limits:
+
+- The agent runs as the same user as the hook. A shell command can delete the state file or edit the policy, and a test asserts that deleting the state clears the taint. Keep the policy, the state directory and the settings file that registers the hook outside every path the policy lets the agent write, mark shell access `side_effects`, and pin the registration with `agentsec scan-config`. A managed settings file the user cannot edit is stronger.
+- Path rules are checked when the hook runs; the tool opens the path afterwards, so the race described under [Path arguments](#path-arguments) applies and the resolved path is not handed to the tool.
+- A shell command is one string. The policy can bound and pattern-match it, but cannot tell what it does; taint, not `deny_patterns`, is the control for the shell.
+- Tested against hook input built from Claude Code's documented format, not against a live Claude Code session. Whether a subagent's calls carry the parent's `session_id` was not checked; if they do not, a subagent's taint stays in the subagent. Other agents' hook formats (Cursor, Codex) are not supported.
+
 ## Command runner
 
 `SafeCommandRunner` runs external commands with no shell, an executable/argument allowlist, a scrubbed environment, a pinned working directory, a timeout, and an output cap. It is **not** an OS sandbox. Put it inside a container or microVM for untrusted code.

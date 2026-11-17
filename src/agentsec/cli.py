@@ -160,6 +160,31 @@ def cmd_scan_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hook(args: argparse.Namespace) -> int:
+    # Every failure must end in exit code 2: any other code lets the tool call through.
+    try:
+        from agentsec.integrations.claude_code import handle
+
+        event = json.loads(sys.stdin.buffer.read())
+        if not isinstance(event, dict):
+            raise ValueError("hook input must be a JSON object")
+        policy = Policy.from_yaml(args.policy)
+        result = handle(event, policy, args.state_dir, audit=args.audit)
+        # Written and flushed inside the try: an "ask" that never reaches Claude Code would
+        # otherwise read as "no decision", and a flush error at exit is not exit code 2.
+        if result.stdout:
+            print(result.stdout, flush=True)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr, flush=True)
+        return result.exit_code
+    except Exception as exc:
+        try:
+            print(f"agentsec hook: blocked, {type(exc).__name__}: {exc}", file=sys.stderr)
+        except OSError:
+            pass  # stderr is gone; the exit code still blocks
+        return 2
+
+
 def cmd_threatmodel(args: argparse.Namespace) -> int:
     if args.action == "init":
         out = Path(args.output) if args.output else None
@@ -322,6 +347,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sc.add_argument("--json", action="store_true", help="Print findings as JSON.")
     sc.set_defaults(func=cmd_scan_config)
+
+    hk = sub.add_parser(
+        "hook",
+        help="Claude Code PreToolUse hook: apply a tool policy and taint tracking (reads stdin).",
+    )
+    hk.add_argument("--policy", required=True, help="Tool policy (YAML).")
+    hk.add_argument(
+        "--state-dir", required=True, help="Directory for per-session taint and call counts."
+    )
+    hk.add_argument("--audit", help="Append decisions to this hash-chained audit log.")
+    hk.set_defaults(func=cmd_hook)
 
     tm = sub.add_parser("threatmodel", help="STRIDE-for-agents threat modeling.")
     tm_sub = tm.add_subparsers(dest="action", required=True)

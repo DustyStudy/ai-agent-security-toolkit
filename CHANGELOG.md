@@ -5,6 +5,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ## [Unreleased]
 
 ### Added
+- `agentsec hook` (`agentsec.integrations.claude_code`): a Claude Code `PreToolUse` hook that applies a tool policy and taint tracking to the agent's own shell, file, fetch and MCP tools. A denied call is blocked, a call that needs approval goes to Claude Code's permission prompt, and taint and call counts are kept per session between hook runs. This is the path where an instruction planted in a tool result (a forged error event read through an MCP server) reaches a shell command. `examples/claude-code.policy.yaml` is a starting policy.
+
+### Added
 - `agentsec scan-config` (`agentsec.configscan`): lists the agent configuration in a directory (MCP servers, hooks, settings, and instruction files such as `AGENTS.md`, for Claude Code, Cursor, Codex, Gemini and others), runs the injection and secret scanners over it, and with `--pins FILE` exits 1 when an entry was added, changed or removed since the pins were written. This is the path used by packages and repositories that plant an MCP server or a hook for a coding agent.
 
 ## [0.8.2] - 2026-11-17

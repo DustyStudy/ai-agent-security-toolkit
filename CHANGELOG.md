@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Changed
+- `test_known_limit_dns_rebinding_between_the_check_and_the_tools_own_lookup` records the DNS-rebinding limit of URL argument rules: the guard resolves the host once and the tool resolves it again. README, `docs/PRODUCTION.md` and `docs/GATEWAY.md` now say where the limit is (the sandbox URL check, not the gateway, which does not check upstream addresses) and what closes it.
+
 ## [0.11.0] - 2026-11-17
 
 `scan-config` now parses YAML config files per entry, and a new fuzz target for its parsers found two cases it skipped. Both change what is pinned: if you keep a pin file, expect `new` and `removed` findings on the first check after upgrading, then review and run `--update-pins`.

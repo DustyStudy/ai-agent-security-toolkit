@@ -97,6 +97,11 @@ _EXPANDED = {
     "servers": "mcp_server",
     "hooks": "hook",
 }
+# shortcut: only a handler whose own command line names `agentsec hook` is recognised, not a
+# wrapper script that runs it. Upgrade if wrappers turn out to be how people register it.
+_AGENTSEC_HOOK = re.compile(r"agentsec\S*\s+hook\b")
+# Claude Code runs a hook group on every tool when its matcher is omitted, "" or "*".
+_MATCH_ALL = ("", "*", ".*")
 
 
 @dataclass(frozen=True)
@@ -112,7 +117,8 @@ class ConfigItem:
 @dataclass(frozen=True)
 class ConfigFinding:
     item: str
-    # injection | secret | oversized | unparsed | ambiguous | new | changed | removed
+    # injection | secret | oversized | unparsed | ambiguous | unguarded | failopen | new |
+    # changed | removed
     kind: str
     detail: str
 
@@ -273,6 +279,42 @@ def _entries(rel: str, data: Any) -> list[tuple[str, str, Any]]:
     return out
 
 
+def _check_agentsec_hook(scan: ConfigScan, rel: str, data: Any) -> None:
+    """Flag an ``agentsec hook`` registration, in Claude Code's settings format, that leaves
+    tool calls ungated: a matcher or ``if`` filter narrower than every tool, or no
+    ``"onFailure": "block"``, without which a hook that times out or crashes lets the call run.
+    A file that does not register the hook has nothing to check: it may be registered elsewhere.
+    """
+    hooks = data.get("hooks") if isinstance(data, Mapping) else None
+    groups = hooks.get("PreToolUse") if isinstance(hooks, Mapping) else None
+    narrow: list[str] = []
+    covered = failopen = False
+    for group in groups if isinstance(groups, list) else []:
+        handlers = group.get("hooks") if isinstance(group, Mapping) else None
+        for handler in handlers if isinstance(handlers, list) else []:
+            if not isinstance(handler, Mapping):
+                continue
+            args = handler.get("args")
+            parts = [handler.get("command", ""), *(args if isinstance(args, list) else [])]
+            if not _AGENTSEC_HOOK.search(" ".join(map(str, parts))):
+                continue
+            matcher = group.get("matcher", "")
+            if matcher in _MATCH_ALL and "if" not in handler:
+                covered = True
+            else:
+                narrow.append(f"matcher {show(json.dumps(matcher, default=repr), 60)}")
+                if "if" in handler:
+                    narrow[-1] += f" if {show(json.dumps(handler['if'], default=repr), 60)}"
+            failopen = failopen or handler.get("onFailure") != "block"
+    item = f"{rel}#hooks.PreToolUse"
+    if narrow and not covered:
+        detail = f'agentsec hook does not see every tool ({"; ".join(narrow)}): use matcher "*"'
+        scan.findings.append(ConfigFinding(item, "unguarded", detail))
+    if failopen:
+        detail = 'agentsec hook lacks "onFailure": "block": a timeout or crash lets the call run'
+        scan.findings.append(ConfigFinding(item, "failopen", detail))
+
+
 def _scan_text(
     scan: ConfigScan, item: str, text: str, scanner: InjectionScanner, *, injection: bool = True
 ) -> None:
@@ -324,6 +366,7 @@ def _scan_file(
             data = _load_yaml(strict)
         else:
             data = json.loads(strict, object_pairs_hook=_no_duplicates)
+        _check_agentsec_hook(scan, rel, data)
         for item_id, item_kind, keyed in _entries(rel, data):
             # repr, not str, for TOML dates: the date 1979-05-27 and the string "1979-05-27"
             # must not share a fingerprint.

@@ -10,7 +10,9 @@ that hook. It evaluates the call against a :class:`~agentsec.sandbox.Policy` and
 * allowed: says nothing, so the agent's normal permission prompts still apply;
 * denied: exit code 2, which blocks the call and shows the model the reason;
 * needs approval (``require_approval``, or taint with ``action: approve``): asks the human
-  through the agent's own permission prompt.
+  through the agent's own permission prompt. With ``block_approvals`` (``--block-approvals``)
+  it is exit code 2 instead: for runs with nobody to answer, and for Claude Code versions
+  where a hook's ``ask`` was reported to displace a ``permissions.deny`` rule.
 
 Each invocation is a new process, so the session's taint flag and call counts are kept in an
 append-only file per session under ``state_dir``. A call to a tool marked ``returns_untrusted``
@@ -105,6 +107,7 @@ def handle(
     state_dir: str | Path,
     *,
     audit: str | Path | None = None,
+    block_approvals: bool = False,
 ) -> HookResult:
     """Decide one hook event. Raises on malformed input; the caller must turn that into BLOCK.
 
@@ -135,6 +138,10 @@ def handle(
         )
         if decision.verdict == Verdict.DENY:
             return HookResult(BLOCK, stderr=f"agentsec policy: {decision.message()}")
+        if block_approvals and decision.verdict == Verdict.APPROVE:
+            # Blocked like a denial, so not counted and not tainted: the tool does not run.
+            reason = f"agentsec policy: {decision.message()} (approval is blocked)"
+            return HookResult(BLOCK, stderr=reason)
         # Counted and tainted now, before the human answers a prompt and before the tool runs.
         untrusted = guard.policy.tools[name].returns_untrusted
         with path.open("a", encoding="utf-8") as fh:

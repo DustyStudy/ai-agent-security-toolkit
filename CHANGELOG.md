@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 A second review of `scan-config` (Codex, on the `--accept`, YAML and empty-entry code that had none) found five ways a change could pass a pinned check. All five are fixed. They change what is pinned: if you keep a pin file, expect `new`, `removed`, `changed` or `unparsed` findings on the first check after upgrading where one of the cases below applies, then review and run `--update-pins`.
 
 ### Added
+- Claude Code hook hardening. `agentsec scan-config` reports an `agentsec hook` registration whose matcher or `if` filter does not cover every tool as `unguarded`, and one without `"onFailure": "block"` as `failopen`; like other findings they exit 1 and stop `--update-pins`. `agentsec hook --block-approvals` turns a call that needs approval into a block (exit code 2) instead of `ask`, for runs with nobody to answer and for Claude Code versions where `ask` was reported to displace a `permissions.deny` rule. The default mapping is unchanged.
 - `agentsec audit summary <file>`: counts of audit records by event and by decision (`verdict`, or the `allowed` flag of `gateway_mcp_call` and `validation` records), and the ten most-denied tools and actors. `--since`, `--until`, `--actor` and `--event` filter the records and `--json` prints JSON. The hash chain is verified in the same pass: a log that fails gets no summary and exit code 1 unless `--no-verify` is passed, and then the output is marked `UNVERIFIED`. The file is streamed, and values read from the log are stripped of control characters and bounded before printing. `verify_file` takes an optional `records` wrapper for reading the records it verifies, and `agentsec.middleware.audit.read_records` is the file reader it uses.
 
 ### Fixed
@@ -26,6 +27,7 @@ A second review of `scan-config` (Codex, on the `--accept`, YAML and empty-entry
 
 ### Changed
 - `test_known_limit_dns_rebinding_between_the_check_and_the_tools_own_lookup` records the DNS-rebinding limit of URL argument rules: the guard resolves the host once and the tool resolves it again. README, `docs/PRODUCTION.md` and `docs/GATEWAY.md` now say where the limit is (the sandbox URL check, not the gateway, which does not check upstream addresses) and what closes it.
+- `tests/test_gateway_bypass_regressions.py` pins the gateway against the bypass classes published for AI gateways in 2026: auth fail-open on a bad or repeated credential or a failing verifier, public-route confusion (`/mcp?.well-known`, `/healthz/../mcp`), self-service privilege escalation through `POST /tokens`, and spoofed or repeated identity headers. No gap was found; the gateway code is unchanged.
 
 ## [0.11.0] - 2026-11-17
 

@@ -330,7 +330,9 @@ def cmd_hook(args: argparse.Namespace) -> int:
         if not isinstance(event, dict):
             raise ValueError("hook input must be a JSON object")
         policy = Policy.from_yaml(args.policy)
-        result = handle(event, policy, args.state_dir, audit=args.audit)
+        result = handle(
+            event, policy, args.state_dir, audit=args.audit, block_approvals=args.block_approvals
+        )
         # Written and flushed inside the try: an "ask" that never reaches Claude Code would
         # otherwise read as "no decision", and a flush error at exit is not exit code 2.
         if result.stdout:
@@ -553,6 +555,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--state-dir", required=True, help="Directory for per-session taint and call counts."
     )
     hk.add_argument("--audit", help="Append decisions to this hash-chained audit log.")
+    hk.add_argument(
+        "--block-approvals",
+        action="store_true",
+        help="Block (exit code 2) a call that needs approval instead of answering 'ask'.",
+    )
     hk.set_defaults(func=cmd_hook)
 
     tm = sub.add_parser("threatmodel", help="STRIDE-for-agents threat modeling.")

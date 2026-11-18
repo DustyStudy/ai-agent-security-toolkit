@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -90,6 +91,7 @@ class GatewayConfig:
     shutdown_timeout_s: float = 30.0  # on SIGTERM, how long requests in flight may finish
     mcp_upstreams: dict[str, McpUpstream] = field(default_factory=dict)
     mcp_session_idle_s: float = 3600.0
+    mcp_require_pins: bool = False  # set: every mcp_upstream needs reviewed pins, or no start
     tokens: TokenSettings | None = None  # set: users may mint access tokens (POST /tokens)
 
 
@@ -117,6 +119,7 @@ _TOP = {
     "limits",
     "upstreams",
     "mcp_upstreams",
+    "mcp",
     "tokens",
     "audit",
 }
@@ -160,6 +163,7 @@ _SECTIONS: dict[str, set[str]] = {
     "audit": {"file", "log_content", "cef_file"},
     "upstream": {"url", "model", "api_key"},
     "mcp_upstream": {"url", "auth", "pins"},
+    "mcp": {"require_pins"},
     "tokens": {"store", "default_ttl_days", "max_ttl_days", "max_per_user"},
     "bundle": {"dir", "public_key_file", "min_revision", "reload_interval_s", "state_file"},
 }
@@ -283,6 +287,11 @@ def _mcp_upstreams(data: dict[str, Any], base: Path) -> tuple[dict[str, McpUpstr
 
 
 MAX_TOKEN_TTL_DAYS = 90
+
+
+def unpinned(policies: PolicySet, mcp_upstreams: Iterable[str]) -> list[str]:
+    """MCP upstreams with no reviewed pins: their tools are only pinned on first use."""
+    return sorted(n for n in mcp_upstreams if n not in policies.mcp_pins)
 
 
 def _tokens(data: dict[str, Any], base: Path) -> TokenSettings | None:
@@ -486,6 +495,12 @@ def load_config(path: str | Path) -> GatewayConfig:
         )
     else:
         policies = _single_policy(data, base, mcp_pins)
+    require_pins = _typed(
+        _section(data, "mcp").get("require_pins", False), bool, "mcp.require_pins"
+    )
+    if require_pins and (missing := unpinned(policies, mcp_upstreams)):
+        where = "the bundle's mcp_pins" if bundle else "mcp_upstreams.<name>.pins"
+        raise ConfigError(f"mcp.require_pins: no pins for {missing} (set {where})")
     audit = _section(data, "audit")
     audit_file = _typed(audit.get("file"), str, "audit.file")
     cef_file = audit.get("cef_file")
@@ -525,5 +540,6 @@ def load_config(path: str | Path) -> GatewayConfig:
         shutdown_timeout_s=_positive(limits, "shutdown_timeout_s", 30.0, float),
         mcp_upstreams=mcp_upstreams,
         mcp_session_idle_s=_positive(limits, "mcp_session_idle_s", 3600.0, float),
+        mcp_require_pins=require_pins,
         tokens=_tokens(data, base),
     )

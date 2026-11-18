@@ -39,7 +39,9 @@ groups:
           description: The audit log has the user, group, rule and whether it was enforced for each event.
 
       - alert: AgentsecGatewayAuthFailureSpike
-        expr: sum(rate(agentsec_gateway_events_total{event="gateway_auth_failed"}[5m])) > 1
+        # The 401 status covers every identity mode. gateway_auth_failed is written only for a
+        # rejected OIDC or access token; a missing trusted header is a gateway_rejected event.
+        expr: sum(rate(agentsec_gateway_responses_total{status="401"}[5m])) > 1
         for: 5m
         labels:
           severity: warning

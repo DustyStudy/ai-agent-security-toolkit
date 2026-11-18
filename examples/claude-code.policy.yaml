@@ -1,6 +1,16 @@
 # Example tool policy for Claude Code, enforced by `agentsec hook` (docs/SANDBOX.md).
 # Deny-by-default: a tool or an argument not listed here is blocked.
 # Replace /home/me/project with the absolute path of your checkout.
+#
+# Register it in Claude Code's settings on every tool (matcher "*") and failing closed
+# ("onFailure": "block"); `agentsec scan-config` flags a registration that does neither:
+#
+#   {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{
+#     "type": "command", "onFailure": "block",
+#     "command": "agentsec hook --policy /etc/agentsec/claude-code.policy.yaml --state-dir /var/lib/agentsec/hook"
+#   }]}]}}
+#
+# Add --block-approvals to the command to block, not ask, when a call needs approval.
 version: 1
 
 # Once the session has fetched web content or called an MCP tool, shell commands and further

@@ -183,7 +183,7 @@ Limits:
 
 ## Deployment requirements
 
-- **The gateway must be the only route to the model servers.** Ollama has no authentication; bind it to localhost or a network only the gateway can reach. Otherwise users skip the gateway.
+- **The gateway must be the only route to the model servers.** Ollama has no authentication; bind it to localhost or a network only the gateway can reach. Otherwise users skip the gateway. Check it with `probe-isolation` (below).
 - **Origin and Host checks.** Both listeners refuse, with a 403 before authentication, what a web page can send but a real client does not. This stops DNS rebinding (a page whose hostname is re-pointed at `127.0.0.1`) and cross-site requests. Each refusal is a `gateway_rejected` audit event with code `origin_not_allowed` or `host_not_allowed`.
   - `Origin`: a request that carries one is refused unless it is listed in `listen.allowed_origins` (exact origins such as `https://chat.corp.example`, no wildcards, default empty). Clients that are not browsers send no `Origin` and are unaffected. A browser app that calls the gateway, same-origin or not, must be listed. The admin listener refuses every `Origin`.
   - `Host`: its name must be one of `listen.allowed_hosts` (names such as `gateway.corp.example`, without a port, no wildcards). The port in `Host` is not compared: the name is what a rebinding page cannot fake, and a forwarded port differs from the configured one. Unset with a loopback `listen.host`, the list is `localhost`, `127.0.0.1`, `[::1]` and `listen.host`. Unset with a non-loopback `listen.host`, the `Host` header is **not checked** and a warning is logged at startup: set the list to the name your proxy forwards. The admin listener always requires a loopback name. A request with no `Host` header at all (HTTP/1.0, which no browser sends) is served.
@@ -193,6 +193,24 @@ Limits:
 - **Shutdown.** On SIGTERM the gateway stops accepting connections and gives requests in flight `limits.shutdown_timeout_s` (default 30, whole seconds) to finish, then closes them. Set the orchestrator's grace period (Kubernetes `terminationGracePeriodSeconds`) a little above it.
 - **Slow and silent connections.** A connection must send a whole request head within `limits.header_timeout_s` (default 10) or it is closed, so sockets that send nothing, or a head a byte at a time, cannot fill `limits.max_connections`. Between requests a kept-alive connection is closed after 5 idle seconds, and `limits.body_timeout_s` bounds the body. A client can still open up to the cap in fresh connections every few seconds: rate-limit connections per address in a proxy or load balancer in front of an internet-facing gateway.
 - **Secrets by reference.** Upstream keys are `env:NAME` or `file:/path`; literals are refused.
+
+### Check that nothing can go around the gateway
+
+Run this after each deployment and on a schedule in CI, from a client workstation or a CI runner on the client network, **not** from the gateway host (from there every upstream is reachable, as it must be):
+
+```bash
+agentsec probe-isolation --config gateway.yaml --gateway-host gateway.internal
+```
+
+It opens a plain TCP connection to the host and port of every `upstreams` and `mcp_upstreams` URL and closes it. It sends no request and never reads `api_key` or `auth`. One line per upstream (`--json` for JSON):
+
+| Status | Meaning | Exit code |
+|---|---|---|
+| `REACHABLE` | The connect succeeded: clients can skip the gateway. Fix the bind address or the firewall. | 1 |
+| `UNCHECKED` | The URL is loopback (the upstream runs on the gateway host) and `--gateway-host` was not given. With it, that port is probed on the gateway host. | 2 |
+| `ISOLATED` | Refused, timed out (`--timeout`, default 3 seconds) or the name did not resolve; the reason is printed. | 0 |
+
+It needs the same files as `serve --check` (the policy or bundle the config names), but no secrets. An `ISOLATED` result holds only for the network the probe ran on, and only if that network works: a runner with no route anywhere also sees timeouts. Run it where clients are, and read the reasons.
 
 ## Container image
 

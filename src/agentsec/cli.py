@@ -393,6 +393,28 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_probe_isolation(args: argparse.Namespace) -> int:
+    from agentsec.gateway.config import ConfigError, load_config
+    from agentsec.gateway.probe import probe_isolation
+
+    try:
+        rows = probe_isolation(load_config(args.config), args.timeout, args.gateway_host)
+    except (ConfigError, PolicyError, OSError, ValueError) as e:  # ValueError: a bad port or host
+        print(f"invalid gateway config: {e}", file=sys.stderr)
+        return 2
+    status = Counter(str(r["status"]) for r in rows)
+    if args.json:
+        print(json.dumps({"upstreams": rows}, indent=2))
+    else:
+        for r in rows:
+            print(f"{str(r['status']).upper()} {r['kind']} {r['name']} "
+                  f"{r['host']}:{r['port']}: {r['detail']}")  # fmt: skip
+        print(f"{status['reachable']} reachable, {status['isolated']} isolated, "
+              f"{status['unchecked']} unchecked")  # fmt: skip
+    # Reachable is the finding; unchecked is not a pass either.
+    return 1 if status["reachable"] else 2 if status["unchecked"] else 0
+
+
 def cmd_bundle(args: argparse.Namespace) -> int:
     from agentsec.gateway.bundle import BundleError, load_bundle, load_public_key, sign_bundle
     from agentsec.gateway.config import ConfigError, resolve_secret
@@ -579,6 +601,21 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--config", required=True, help="gateway YAML config")
     sv.add_argument("--check", action="store_true", help="validate the config and exit")
     sv.set_defaults(func=cmd_serve)
+
+    pi = sub.add_parser(
+        "probe-isolation",
+        help="From a client or CI runner (not the gateway host): check that the gateway's "
+        "upstreams refuse direct TCP connections. Exit 1 if any is reachable.",
+    )
+    pi.add_argument("--config", required=True, help="gateway YAML config")
+    pi.add_argument("--timeout", type=float, default=3.0, help="seconds per connect (default 3)")
+    pi.add_argument(
+        "--gateway-host",
+        help="the gateway's address as clients see it: upstreams with a loopback URL are "
+        "probed there (without it they are unchecked, exit 2)",
+    )
+    pi.add_argument("--json", action="store_true", help="print JSON instead of lines")
+    pi.set_defaults(func=cmd_probe_isolation)
 
     b = sub.add_parser("bundle", help="Sign or verify a gateway policy bundle.")
     b_sub = b.add_subparsers(dest="action", required=True)

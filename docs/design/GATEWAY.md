@@ -54,6 +54,7 @@ The gateway sees every prompt, holds upstream credentials and decides policy, so
 | **Policy tampering or rollback** | Bundles are Ed25519-signed and carry a monotonic `revision`; an older revision is refused. The public key is the only trust anchor in config. |
 | **Confused deputy on MCP** (the gateway's upstream credentials used on behalf of any user) | Per-group tool policy is evaluated before every upstream call; audit records name the user. Upstream credentials come from secret references, never from config literals. |
 | **Indirect injection or secrets in an MCP tool result** | The result is scanned (text blocks, resource text, `structuredContent`, `_meta`) before the client sees it; a flagged result is withheld or spotlighted per group, secrets are redacted, and an oversized, binary or unreadable result is withheld. A heuristic scan, so taint still applies to every result. |
+| **MCP rug pull** (an approved upstream changes a tool's description or schema after review) | Signed or configured `ToolPins` per upstream; `mcp.require_pins: true` refuses to start, or to reload a bundle, with an unpinned upstream. Without pins the gateway pins each tool in memory on first listing (trust on first use, until restart), names the unpinned upstreams in `gateway_start`, and blocks a later change like a pin mismatch. |
 | **Admin surface exposure** | Metrics and readiness are on a separate admin listener bound to `127.0.0.1`. There is no remote admin API; reload uses a signal or a file watch. |
 | **Gateway compromise** | Non-root, read-only filesystem container; no shell needed at runtime; egress only to upstreams, IdP JWKS and the SIEM. The audit file is append-only storage outside the container (PRODUCTION.md applies). |
 
@@ -246,7 +247,7 @@ CLI: `agentsec serve --config gateway.yaml`, `agentsec gateway check-config`, `a
 | Client disconnects mid-stream | Cancel upstream; audit `client_disconnected` | Avoid wasted compute and orphaned streams |
 | Violation found after release (streaming) | Terminate stream, no `[DONE]`, high-severity audit | Cannot recall bytes; make it visible |
 | Tool needs approval | Denied | No human loop in the model path |
-| MCP upstream tool definition changed | Dropped from listing (`ToolPins`), finding audited | Existing rug-pull defence |
+| MCP upstream tool definition changed | Dropped from listing (`ToolPins`, or the first listing this process saw when the upstream has no pins), finding audited | Existing rug-pull defence |
 | MCP tool result flagged, too large or unscannable | MCP error result instead of the content; audited | Fail closed |
 | MCP upstream down | Its tools are omitted from `tools/list`; calls return an MCP error | Isolate one bad upstream |
 | Body too large / malformed JSON | 413 / 400 | Validate at the boundary |

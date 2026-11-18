@@ -236,6 +236,7 @@ class McpGateway:
         self._connector = connector
         self._clock = clock
         self._states: dict[str, _State] = {}
+        self._first_seen: dict[str, ToolPins] = {}  # per upstream without reviewed pins
         # MCP session id -> (the user who opened it, last seen). Kept until the SDK would have
         # expired the session too, so an id never becomes usable by someone else while alive.
         self._owners: dict[str, tuple[str, float]] = {}
@@ -372,12 +373,17 @@ class McpGateway:
             raw = await conn.open(timeout)
             state.prune(rev)
             pins = caller.policies.mcp_pins.get(name)
+            # No reviewed pins: trust on first use, shared by every user until the process ends,
+            # so a definition that changes after its first clean listing is blocked like a pin
+            # mismatch. shortcut: these pins only grow (an upstream that keeps renaming tools
+            # leaks memory); cap them if such an upstream turns up.
+            first_seen = self._first_seen.setdefault(name, ToolPins())
             client = GuardedMCPClient(
                 _Namespaced(raw, name),
                 ToolGuard(caller.gp.policy, audit=state.audit),  # this request's rules only
                 state.session,  # one session across upstreams: what one returns taints the rest
-                pins=None if pins is None else ToolPins(pins),
-                pin_new=False,  # with pins, an unpinned tool is a finding, never trusted on sight
+                pins=first_seen if pins is None else ToolPins(pins),
+                pin_new=pins is None,  # with pins, an unpinned tool is a finding, never trusted
                 scanner=self._scanner,
             )
             state.connections[key] = conn

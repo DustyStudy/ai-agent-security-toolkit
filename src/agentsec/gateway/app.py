@@ -15,6 +15,7 @@ import ipaddress
 import json
 import logging
 import math
+import re
 import threading
 import time
 import urllib.error
@@ -35,7 +36,7 @@ from agentsec.gateway.bundle import (
     load_bundle,
     write_state,
 )
-from agentsec.gateway.config import GatewayConfig, Upstream, unpinned
+from agentsec.gateway.config import GatewayConfig, Upstream, loopback_hosts, unpinned
 from agentsec.gateway.holdback import Holdback
 from agentsec.gateway.metrics import CountingSink, Metrics
 from agentsec.gateway.oidc import OidcVerifier, TokenRejected, fetch_jwks
@@ -327,6 +328,11 @@ class Gateway:
         self._tokens = (
             None if config.tokens is None else TokenStore(config.tokens.store, clock=wall_clock)
         )
+        self._origins = frozenset(config.allowed_origins)
+        # None: a non-loopback bind with no listen.allowed_hosts; the Host header is not checked.
+        self._hosts = frozenset(config.allowed_hosts) or loopback_hosts(config.host)
+        # The admin listener is for scrapers and probes on this host: no Origin is ever allowed.
+        self._admin_hosts = loopback_hosts(config.admin_host)
         self._mcp = None
         if config.mcp_upstreams:
             try:
@@ -360,7 +366,8 @@ class Gateway:
             path, method = scope["path"], scope["method"]
             if path == "/healthz" and method == "GET":
                 await self._json(send, 200, {"status": "ok"}, request_id)
-                return
+                return  # exempt: a container probe sends the pod address as Host
+            _check_origin_host(scope, self._origins, self._hosts)
             user, groups, token_id = await self._identify(scope, request_id)
             _TOKEN_ID.set(token_id)  # recorded on this request's audit records
             # A reload reads and verifies files: off the event loop.
@@ -554,6 +561,12 @@ class Gateway:
         if scope["type"] != "http":
             return
         request_id = uuid.uuid4().hex
+        try:
+            _check_origin_host(scope, frozenset(), self._admin_hosts)
+        except HttpError as e:
+            self._log_rejection(e, request_id)
+            await self._error(send, e, request_id)
+            return
         path, method = scope["path"], scope["method"]
         if method != "GET" or path not in {"/healthz", "/readyz", "/metrics"}:
             await self._error(send, HttpError(404, "not found", "not_found"), request_id)
@@ -1315,6 +1328,30 @@ def _merge_tool_call(calls: dict[int, dict[str, Any]], tc: Any) -> None:
         call["function"]["name"] = fn["name"]  # sent once; a repeat must not grow the name
     if isinstance(fn.get("arguments"), str):
         call["function"]["arguments"] += fn["arguments"]
+
+
+_HOST = re.compile(r"(\[[^\]]*\]|[^:]*)(:[0-9]*)?")  # a name or [IPv6], then an optional port
+
+
+def _check_origin_host(scope: Scope, origins: frozenset[str], hosts: frozenset[str] | None) -> None:
+    """Refuse cross-site browser requests and DNS rebinding (a page whose name points here).
+
+    A browser sends ``Origin`` on cross-site requests and always sends ``Host``, which under
+    rebinding is the attacker's name. Clients that are not browsers send no ``Origin``.
+    """
+    headers = scope.get("headers", [])
+    origin = [v for k, v in headers if k.lower() == b"origin"]
+    if origin and (len(origin) > 1 or origin[0].decode("latin-1").lower() not in origins):
+        raise HttpError(403, "origin not allowed", "origin_not_allowed")
+    host = [v for k, v in headers if k.lower() == b"host"]
+    # No Host header is HTTP/1.0, which no browser speaks, so it cannot be a rebinding page.
+    if hosts is None or not host:
+        return
+    # The port is not compared: under rebinding the name is the attacker's, and a forwarded
+    # port (ssh -L, docker -p) differs from the one in the config.
+    name = _HOST.fullmatch(host[0].decode("latin-1").lower())
+    if len(host) > 1 or name is None or name.group(1) not in hosts:
+        raise HttpError(403, "host not allowed", "host_not_allowed")
 
 
 def _bearer(scope: Scope) -> str | None:

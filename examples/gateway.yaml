@@ -8,6 +8,9 @@ listen:
   # tls:
   #   cert_file: /etc/agentsec/tls/server.crt
   #   key_file: /etc/agentsec/tls/server.key
+  # DNS rebinding and cross-site requests (see docs/GATEWAY.md, "Origin and Host checks").
+  allowed_origins: []      # a request with an Origin header outside this list gets a 403
+  # allowed_hosts: [gateway.corp.example]   # Host names clients use; default: loopback names
 
 # admin:                   # /healthz, /readyz and /metrics (Prometheus); no auth, so loopback only
 #   host: 127.0.0.1

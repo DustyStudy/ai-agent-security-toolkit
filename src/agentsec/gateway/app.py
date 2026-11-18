@@ -36,7 +36,7 @@ from agentsec.gateway.bundle import (
     load_bundle,
     write_state,
 )
-from agentsec.gateway.config import GatewayConfig, Upstream, loopback_hosts
+from agentsec.gateway.config import GatewayConfig, Upstream, loopback_hosts, unpinned
 from agentsec.gateway.holdback import Holdback
 from agentsec.gateway.metrics import CountingSink, Metrics
 from agentsec.gateway.oidc import OidcVerifier, TokenRejected, fetch_jwks
@@ -352,6 +352,8 @@ class Gateway:
             holdback_groups=[
                 g.group for g in config.policies.groups if g.stream_mode == "holdback"
             ],
+            # No reviewed pins: these upstreams' tools are trusted as first listed.
+            unpinned_mcp_upstreams=unpinned(config.policies, config.mcp_upstreams),
         )
 
     # ------------------------------------------------------------------ ASGI
@@ -658,6 +660,9 @@ class Gateway:
                         f"revision {new.numeric_revision} is not above the current "
                         f"{current.numeric_revision} (rollback refused)"
                     )
+                missing = unpinned(new, self.config.mcp_upstreams)
+                if self.config.mcp_require_pins and missing:
+                    raise BundleError(f"mcp.require_pins: no pins for {missing}")
                 if bundle.state_file is not None:
                     # Persist before enforcing: if this fails, the old bundle stays in force.
                     write_state(bundle.state_file, new)
@@ -674,6 +679,7 @@ class Gateway:
                 "gateway_bundle_loaded",
                 policy_rev=new.revision,
                 groups=[g.group for g in new.groups],
+                unpinned_mcp_upstreams=missing,
             )
         finally:
             self._reload_lock.release()

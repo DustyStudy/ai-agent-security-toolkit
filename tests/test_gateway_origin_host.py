@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 
 import pytest
 
@@ -99,16 +98,12 @@ def test_healthz_on_the_main_listener_is_exempt(tmp_path):
     assert call(app, "/healthz", method="GET", headers=headers)[0] == 200
 
 
-def test_a_non_loopback_bind_without_allowed_hosts_warns_and_skips_the_host_check(tmp_path, caplog):
+def test_non_loopback_bind_requires_allowed_hosts(tmp_path):
     listen = "listen:\n  host: 0.0.0.0\n  tls_terminated_by_proxy: true\n"
-    with caplog.at_level(logging.WARNING, logger="agentsec.gateway"):
-        app, _ = gateway(tmp_path, extra=listen)
-    assert "listen.allowed_hosts is not set" in caplog.text
-    assert call(app, body=chat(), headers=[*USER, (b"host", b"gateway.corp.example")])[0] == 200
-    assert call(app, body=chat(), headers=[*USER, (b"origin", b"https://evil.example")])[0] == 403
-    caplog.clear()
+    with pytest.raises(ConfigError, match="listen.allowed_hosts"):
+        gateway(tmp_path, extra=listen)
     app, _ = gateway(tmp_path, extra=listen + "  allowed_hosts: [gateway.corp.example]\n")
-    assert "allowed_hosts" not in caplog.text
+    assert call(app, body=chat(), headers=[*USER, (b"host", b"gateway.corp.example")])[0] == 200
     assert call(app, body=chat(), headers=[*USER, (b"host", b"evil.example:8443")])[0] == 403
 
 

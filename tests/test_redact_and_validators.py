@@ -76,13 +76,13 @@ def test_oversized_text_is_scanned_as_a_bounded_prefix():
     padded = ("x " * 100) + key
     assert find_sensitive(padded, max_scan_chars=100) == []
 
-    # ...but redact_text still returns the full original text, just unredacted past the cutoff.
+    # Redaction withholds the entire field, including credentials spanning the cutoff.
     out, findings = redact_text(padded, max_scan_chars=100)
-    assert out == padded and findings == []
+    assert out == "[REDACTED:scan_limit]" and findings[0].kind == "scan_limit"
 
-    # A secret within the scanned prefix is still found and redacted as normal.
+    # No prefix is disclosed, even when it contains a recognized credential.
     out2, findings2 = redact_text(key + " " + ("x " * 100), max_scan_chars=100)
-    assert key not in out2 and findings2[0].kind == "aws_access_key_id"
+    assert out2 == out and findings2[0].kind == "scan_limit"
 
 
 def test_secret_validator_redacts_but_delivers():

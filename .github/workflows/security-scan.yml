@@ -19,12 +19,10 @@ permissions:
 # This repository only allows GitHub-owned actions plus harden-runner and
 # scorecard-action, so the scanners are installed as CLIs instead of
 # third-party actions: gitleaks and trivy as checksum-verified release
-# binaries, checkov from the hash-pinned requirements/requirements-security-tools.txt.
+# binaries. Findings at high or critical severity fail the scan.
 env:
   GITLEAKS_VERSION: "8.30.1"
   GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
-  TRIVY_VERSION: "0.74.0"
-  TRIVY_SHA256: 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
 
 jobs:
   gitleaks:
@@ -51,10 +49,11 @@ jobs:
       - name: Scan full history for secrets
         run: ./gitleaks git . --redact --verbose
 
-  checkov:
+  misconfiguration:
+    # Branch protection requires this exact historical check name. Trivy now performs the scan.
     name: Misconfiguration (Checkov)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -65,15 +64,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.12"
-
-      - name: Install checkov (hash-pinned)
-        run: python -m pip install --require-hashes -r requirements/requirements-security-tools.txt
-
-      - name: Run checkov (blocking)
-        run: checkov -d . --quiet --compact
+      - name: Check configuration with Trivy
+        run: |
+          bash scripts/install-trivy.sh
+          "$RUNNER_TEMP/trivy" config --severity MEDIUM,HIGH,CRITICAL --exit-code 1 .
 
   trivy:
     name: Vulnerabilities and misconfiguration (Trivy)
@@ -94,14 +88,12 @@ jobs:
 
       - name: Install trivy
         run: |
-          curl -sSLo trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
-          echo "${TRIVY_SHA256}  trivy.tgz" | sha256sum -c -
-          tar xzf trivy.tgz trivy
+          bash scripts/install-trivy.sh
 
       - name: Run trivy filesystem scan
         run: |
-          ./trivy fs . --scanners vuln,misconfig --severity HIGH,CRITICAL --ignore-unfixed \
-            --skip-dirs .git --format sarif --output trivy-results.sarif --exit-code 0
+          "$RUNNER_TEMP/trivy" fs . --scanners vuln,misconfig --severity HIGH,CRITICAL \
+            --file-patterns 'pip:requirements/requirements-.*\.txt' --skip-dirs .git --format sarif --output trivy-results.sarif --exit-code 1
 
       # Tracks the major tag like the repo's CodeQL workflow does; GitHub
       # gates some code-scanning features on it.

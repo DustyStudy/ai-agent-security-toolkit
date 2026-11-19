@@ -236,3 +236,14 @@ def test_summary_strips_control_characters_and_bounds_values(tmp_path, capsys):
     )
     assert json.loads(_summary(capsys, str(path), "--json", "--event", "ev ent")[1])["matched"] == 0
     assert all(len(key) <= 300 for key in got["denied_tools"])
+
+
+def test_credentials_are_removed_from_metadata_and_structured_fields():
+    sink = MemorySink()
+    token = "agt_" + "x" * 43
+    logger = AuditLogger(sink, actor=token, session_id=token)
+    logger.log(token, password=["sample-private-value"], headers={"Cookie": "sid=private"})
+    serialized = json.dumps([sink.records, logger.checkpoint()])
+    for private in (token, "sample-private-value", "sid=private"):
+        assert private not in serialized
+    assert verify_records(sink.records).ok

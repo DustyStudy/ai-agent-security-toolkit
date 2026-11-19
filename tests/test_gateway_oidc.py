@@ -79,6 +79,7 @@ def test_valid_rsa_and_ec_tokens_identify_the_user():
         pytest.param(lambda: token(aud="other-app"), id="wrong-audience"),
         pytest.param(lambda: token(exp=int(time.time()) - 3600), id="expired"),
         pytest.param(lambda: token(nbf=int(time.time()) + 3600), id="not-yet-valid"),
+        pytest.param(lambda: token(sub=" alice"), id="ambiguous-user"),
         pytest.param(lambda: token(sub=None), id="no-sub"),
         pytest.param(lambda: token(exp=None), id="no-exp"),
         pytest.param(lambda: token(OTHER_KEY), id="signed-by-another-key"),
@@ -382,3 +383,9 @@ def test_jwks_fetch_has_a_total_deadline():
             fetch_jwks(f"http://127.0.0.1:{server.server_address[1]}/jwks", timeout=0.3)
     finally:
         server.shutdown()
+
+
+def test_jwk_must_permit_verification():
+    keys = {"keys": [jwk(RSA_KEY, "rsa1", key_ops=["encrypt"])]}
+    with pytest.raises(TokenRejected):
+        verifier(Fetcher(keys)).verify(token())

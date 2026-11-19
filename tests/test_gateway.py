@@ -437,11 +437,10 @@ def test_unsafe_or_unknown_config_is_refused(tmp_path, extra, match):
         write_config(tmp_path, extra=extra)
 
 
-def test_a_credential_over_plain_http_is_warned_about(tmp_path, caplog):
-    write_config(
-        tmp_path, extra="upstreams:\n  far: {url: 'http://llm.internal/v1', api_key: 'env:K'}\n"
-    )
-    assert "upstreams.far sends its credential over plain HTTP" in caplog.text
+@pytest.mark.parametrize("section", ["upstreams", "mcp_upstreams"])
+def test_remote_cleartext_upstream_is_refused(tmp_path, section):
+    with pytest.raises(ConfigError, match="requires https"):
+        write_config(tmp_path, extra=f"{section}:\n  far: {{url: 'http://service.internal/api'}}\n")
 
 
 def test_upstream_api_key_must_be_a_reference(tmp_path):

@@ -91,7 +91,7 @@ def test_a_loopback_url_is_not_a_pass_without_the_gateway_host(tmp_path, capsys,
 def test_the_unspecified_address_is_this_machine_too(tmp_path, capsys, no_secrets):
     path = config(tmp_path, closed_port(), closed_port())
     with open(path, encoding="utf-8") as fh:
-        text = fh.read().replace("http://127.0.0.1:", "http://0.0.0.0:")
+        text = fh.read().replace("http://127.0.0.1:", "https://0.0.0.0:")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
     assert probe(path) == 2

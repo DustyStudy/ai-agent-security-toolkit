@@ -1,2 +1,0 @@
-# Security scanners run by .github/workflows/security-scan.yml.
-checkov==3.3.20

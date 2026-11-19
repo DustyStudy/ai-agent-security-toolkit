@@ -133,9 +133,12 @@ agentsec fuzz --categories tool_misuse,exfiltration \
 Set `admin: {port: 9090}` (and optionally `host`, which must be a loopback IP such as `127.0.0.1` or `::1`, not `localhost`, and a port other than `listen.port`). If the admin port cannot be bound, the gateway does not start. to start a second listener with no authentication:
 
 - `GET /healthz`: liveness.
-- `GET /readyz`: 200 with the policy revision and any groups in monitor mode; 503 once the policy has expired. It also checks for a new bundle, so a gateway with no traffic still reloads.
+- `GET /readyz`: 200 with the policy revision and any groups in monitor mode; 503 once the policy has expired, and 503 with `status: audit_unwritable` when the audit file cannot be opened for append. (A full disk is not detected by the probe: it shows in the write-failure counter.) It also checks for a new bundle, so a gateway with no traffic still reloads.
 - `GET /metrics`: Prometheus text.
   - `agentsec_gateway_events_total{event}`: every audit event written, counted only once the record is on disk. Blocks and denials are events such as `gateway_tool_calls_withheld`, `gateway_tools_removed`, `gateway_input_blocked`, `gateway_output_changed`, `gateway_auth_failed` and `gateway_bundle_rejected`.
+  - `agentsec_gateway_audit_write_failures_total`: records the local audit file refused. Any increase is lost evidence or failed requests.
+  - `agentsec_gateway_siem_backlog_records`: records written to the audit file but not yet delivered to the `cef_file` feed. The gateway keeps undelivered records in memory and redelivers them oldest first on the next record or scrape, so the SIEM sees every record once, in order, after an outage. A restart drops the backlog (the audit file keeps it). Always 0 without `cef_file`.
+  - `agentsec_gateway_siem_last_delivery_age_seconds`: seconds since the last successful delivery while a backlog exists; 0 otherwise.
   - `agentsec_gateway_responses_total{status}`: responses sent by the main listener.
   - `agentsec_gateway_policy_info{policy_rev}`, `agentsec_gateway_monitor_groups`, `agentsec_gateway_policy_expiry_timestamp_seconds`.
 
@@ -213,6 +216,23 @@ It opens a plain TCP connection to the host and port of every `upstreams` and `m
 
 It needs the same files as `serve --check` (the policy or bundle the config names), but no secrets. An `ISOLATED` result holds only for the network the probe ran on, and only if that network works: a runner with no route anywhere also sees timeouts. Run it where clients are, and read the reasons.
 
+### Pilot rollout
+
+- **Sensitive workloads: keep `output.stream_mode: buffer`** (the default). The whole answer is validated before anyone sees text. `holdback` shows text early and can only end the stream if the final check finds something in what was already sent.
+- **Rollout gate: every model and tool server must be unreachable from an employee workstation.** Each gateway policy applies only to traffic that passes through the gateway. From a typical workstation, for each upstream host and port in `gateway.yaml` (replace the example), the expected result is a failure or timeout, never an HTTP response:
+
+  ```bash
+  curl -sS -m 5 -o /dev/null -w '%{http_code}
+' http://ollama.internal:11434/api/tags   # expected: curl error (refused/timeout), no status code
+  ```
+
+  ```powershell
+  Test-NetConnection ollama.internal -Port 11434 -InformationLevel Quiet   # expected: False
+  ```
+
+  `agentsec probe-isolation` (above) does this for every upstream at once. Also confirm the gateway itself is reachable. Do not widen the pilot until every upstream returns the failing result.
+- **Audit delivery:** alert on the three audit signals in `examples/grafana/alerts.yaml` before the pilot starts.
+
 ## Container image
 
 The repository's `Dockerfile` builds the gateway from the hash-pinned locks (`requirements/requirements-gateway.txt`) on a digest-pinned `python:3.13-alpine`. The release workflow scans the built image for high and critical vulnerabilities before pushing it to the registry. Each release from 0.8.1 on is also published to `ghcr.io/dustystudy/ai-agent-security-toolkit`, tagged with the version (there is no `latest`) and for `linux/amd64` only. With `VERSION` set to a release, such as `0.8.1`:
@@ -249,7 +269,7 @@ docker run -d --name agentsec-gateway \
 
 - MCP taint is per user and lasts until the user has been idle for `limits.mcp_session_idle_s` (default 1 hour): one tainted session taints that user's other MCP sessions too.
 - Holdback cannot take back text it released: a secret or protected string longer than `holdback_chars`, or a rule that needs the whole answer, is only caught by the final check, which then cuts the stream short.
-- `/readyz` does not probe the upstreams or the audit file; a failed audit write shows as 503 responses and stops the event counters.
+- `/readyz` does not probe the upstreams. It checks that the audit file can be opened for append, not that the disk has room; a failed write shows as 503 responses, `agentsec_gateway_audit_write_failures_total` and stopped event counters.
 - Without `bundle.state_file`, rollback protection across restarts relies on `min_revision` and `expires`.
 - An access token keeps the groups its user had at issue time until it expires or is revoked; removing someone from the IdP does not revoke their tokens (run `agentsec token revoke --user`).
 - Tool-call limits (`max_calls`) count per request, not per user over time.

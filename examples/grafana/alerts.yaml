@@ -76,3 +76,24 @@ groups:
           severity: info
         annotations:
           summary: A policy group has been in monitor mode (not enforcing) for a day.
+
+      - alert: AgentsecGatewayAuditWriteFailing
+        # Not covered by the 5xx alert for records written outside a request.
+        expr: sum(increase(agentsec_gateway_audit_write_failures_total[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: The gateway could not write to its audit file.
+          description: Check disk space, permissions and the volume. /readyz on the admin listener returns 503 while the file cannot be opened for append.
+
+      - alert: AgentsecGatewaySiemBacklog
+        # Records are safe in the local audit file; the SIEM copy is behind. Age is 0 with no backlog.
+        expr: |
+          max(agentsec_gateway_siem_backlog_records) > 0
+            and max(agentsec_gateway_siem_last_delivery_age_seconds) > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: The SIEM feed (audit.cef_file) has been behind for over 5 minutes.
+          description: Records are redelivered in order once the sink works again, but only while the gateway runs; a restart drops the backlog (the audit file keeps every record).

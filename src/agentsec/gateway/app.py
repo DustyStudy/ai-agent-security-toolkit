@@ -40,6 +40,7 @@ from agentsec.gateway.config import GatewayConfig, Upstream, loopback_hosts, unp
 from agentsec.gateway.holdback import Holdback
 from agentsec.gateway.metrics import CountingSink, Metrics
 from agentsec.gateway.oidc import OidcVerifier, TokenRejected, fetch_jwks
+from agentsec.gateway.outbound import attachments, scrub
 from agentsec.gateway.policyset import GroupPolicy, PolicySet
 from agentsec.gateway.tokens import (
     TokenError,
@@ -820,6 +821,7 @@ class Gateway:
             log.log("gateway_input_blocked", reasons=blocked, enforced=enforce)
             if enforce:
                 raise HttpError(400, "request blocked by input policy", "input_blocked")
+        self._screen_outbound(req, upstream, log)
 
         if stream and gp.stream_mode == "holdback":
             req["model"], req["stream"] = upstream.model, True
@@ -1156,6 +1158,28 @@ class Gateway:
                     reasons += [f"{m['role']}[{i}]: {r}" for r in screen.reasons]
             m["content"] = _replace_texts(m["content"], out)
         return reasons
+
+    def _screen_outbound(self, req: dict[str, Any], upstream: Upstream, log: AuditLogger) -> None:
+        """Per-upstream policy on secrets in the whole request; independent of monitor/enforce."""
+        mode = upstream.outbound_on_secret
+        if mode == "off":
+            return
+        # Attachments cannot be scanned for secrets, so they are refused whenever the policy is on.
+        found = [(p, "attachment") for p in attachments(req["messages"])]
+        clean = req
+        if not found:
+            clean = scrub(req, "request", found)
+        if not found:
+            return
+        kinds = sorted({k for _, k in found})
+        where = [p for p, _ in found][:20]
+        if mode == "block" or "attachment" in kinds:
+            log.log(
+                "gateway_outbound_blocked", upstream=upstream.name, kinds=kinds, locations=where
+            )
+            raise HttpError(400, "request blocked by outbound policy", "outbound_blocked")
+        log.log("gateway_outbound_redacted", upstream=upstream.name, kinds=kinds, locations=where)
+        req.update(clean)
 
     def _check_response(
         self,

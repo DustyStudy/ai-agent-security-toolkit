@@ -31,6 +31,7 @@ class Upstream:
     url: str  # base URL ending before /chat/completions, e.g. https://models.internal/v1
     model: str  # the model name the upstream expects
     api_key_ref: str | None = None  # "env:NAME" or "file:/path"; never a literal
+    outbound_on_secret: str = "off"  # noqa: S105  # off | block | redact: secrets in the request sent here
 
     def api_key(self) -> str | None:
         """Resolved on every call, so a rotated secret file is picked up without a restart."""
@@ -169,7 +170,8 @@ _SECTIONS: dict[str, set[str]] = {
         "shutdown_timeout_s",
     },
     "audit": {"file", "log_content", "cef_file"},
-    "upstream": {"url", "model", "api_key"},
+    "upstream": {"url", "model", "api_key", "outbound"},
+    "outbound": {"on_secret"},
     "mcp_upstream": {"url", "auth", "pins"},
     "mcp": {"require_pins"},
     "tokens": {
@@ -518,7 +520,11 @@ def load_config(path: str | Path) -> GatewayConfig:
         ):
             raise ConfigError(f"upstreams.{name}.api_key must be 'env:NAME' or 'file:/path'")
         _require_secure_upstream(f"upstreams.{name}", url)
+        on_secret = _section(u, "outbound").get("on_secret", "off")
+        if on_secret not in ("off", "block", "redact"):
+            raise ConfigError(f"upstreams.{name}.outbound.on_secret must be off, block or redact")
         upstreams[str(name)] = Upstream(
+            outbound_on_secret=on_secret,
             name=str(name),
             url=url.rstrip("/"),
             model=_typed(u.get("model", name), str, f"upstreams.{name}.model"),

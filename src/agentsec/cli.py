@@ -469,6 +469,37 @@ def cmd_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_token_offboard(args: argparse.Namespace) -> int:
+    """Exit 0: nothing overdue; 1: bad input; 3: a revocation is pending past its deadline."""
+    from agentsec.gateway import offboard
+    from agentsec.gateway.config import ConfigError, load_config
+
+    try:
+        settings = []
+        for path in args.config:
+            tokens = load_config(path).tokens
+            if tokens is None:
+                raise ConfigError(f"{path} has no tokens section")
+            settings.append(tokens)
+        text = (
+            sys.stdin.read()
+            if args.events == "-"
+            else (Path(args.events).read_text(encoding="utf-8") if args.events else "")
+        )
+        events = offboard.parse_events(text) if text.strip() else []
+        deadline = args.deadline_s or min(t.offboarding_deadline_s for t in settings)
+        out = offboard.run(args.ledger, [t.store for t in settings], events, deadline_s=deadline)
+        if args.metrics_file:
+            Path(args.metrics_file).write_text(offboard.metrics_text(out), encoding="utf-8")
+    except (ConfigError, offboard.OffboardError, OSError, ValueError) as e:
+        print(f"token offboard failed: {e}", file=sys.stderr)
+        return 1
+    print(f"revoked {out.revoked} token(s); {len(out.pending)} pending, {len(out.overdue)} overdue")
+    for ev in offboard.audit_events(out):
+        print(json.dumps(ev), file=sys.stderr)
+    return 3 if out.overdue else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agentsec", description="Security toolkit for LLM agents.")
     p.add_argument("--version", action="version", version=f"agentsec {__version__}")
@@ -639,6 +670,21 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--id", help="the token id")
     tr.add_argument("--user", help="revoke all of this user's tokens")
     t.set_defaults(func=cmd_token)
+    to = t_sub.add_parser(
+        "offboard",
+        help="Revoke tokens of IdP-disabled users or removed groups on every gateway; retry; alert.",
+    )
+    to.add_argument(
+        "--config", action="append", required=True, help="a gateway config; repeat per gateway"
+    )
+    to.add_argument("--ledger", required=True, help="SQLite file of pending and done revocations")
+    to.add_argument(
+        "--events",
+        help='JSON file, or - for stdin: {"disabled_users": [], "removed_groups": []}; omit to only retry',
+    )
+    to.add_argument("--deadline-s", type=float, help="override tokens.offboarding_deadline_s")
+    to.add_argument("--metrics-file", help="write Prometheus textfile metrics here")
+    to.set_defaults(func=cmd_token_offboard)
     return p
 
 

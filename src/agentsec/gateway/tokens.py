@@ -52,6 +52,9 @@ class TokenSettings:
     default_ttl_s: float = 7 * 86400.0
     max_ttl_s: float = 30 * 86400.0
     max_per_user: int = 20
+    offboarding_deadline_s: float = (
+        3600.0  # `token offboard` exits 3 for a revocation pending longer
+    )
 
 
 @dataclass(frozen=True)
@@ -167,6 +170,16 @@ class TokenStore:
                 "UPDATE tokens SET revoked = ? WHERE user = ? AND revoked IS NULL",
                 (self._clock(), user),
             ).rowcount
+
+    def revoke_group(self, user: str, group: str) -> int:
+        """Revoke the user's live tokens that were issued with ``group``."""
+        with self._lock, self._db:
+            rows = self._db.execute(
+                "SELECT id, groups FROM tokens WHERE user = ? AND revoked IS NULL", (user,)
+            ).fetchall()
+            ids = [(self._clock(), i) for i, g in rows if group in json.loads(g)]
+            self._db.executemany("UPDATE tokens SET revoked = ? WHERE id = ?", ids)
+            return len(ids)
 
     # ---------------------------------------------------------------- lookups
     def verify(self, token: str) -> TokenInfo:

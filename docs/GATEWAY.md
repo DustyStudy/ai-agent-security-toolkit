@@ -95,6 +95,7 @@ tokens:
   default_ttl_days: 7
   max_ttl_days: 30                     # at most 90
   max_per_user: 20
+  offboarding_deadline_s: 3600   # `agentsec token offboard` alerts past this
 ```
 
 ```bash
@@ -113,6 +114,9 @@ curl -X POST https://llm-gateway.corp.example/tokens \
 - **Revoke.** Users list and revoke their own with `GET /tokens` and `DELETE /tokens/<id>`. Admins run `agentsec token list --config gateway.yaml [--user U]` and `agentsec token revoke --config gateway.yaml --id ID` (or `--user U` for all of a user's tokens, for example when someone leaves). There is no command to issue a token outside SSO. Expired and revoked tokens leave the store 7 days afterwards; the audit log keeps the record of them.
 - **Storage.** Only a SHA-256 hash is stored; a token is 256 random bits, so the hash cannot be reversed. On POSIX the store is created owner-only. Back it up like any credential store; losing it only means users mint new tokens.
 - **Audit.** Issue and revoke through the API are audited; `gateway_request` and `gateway_mcp_call` records carry the `token_id` used, never the token. Revocations from the CLI are recorded in the store (the audit chain belongs to the gateway process).
+- **Offboarding.** `agentsec token offboard --config gw1.yaml [--config gw2.yaml ...] --ledger offboard.db [--events FILE|-]` revokes tokens when the identity provider disables a user or removes one from a group. The events are one JSON document, chosen because every IdP automation (an Okta Workflow or event hook, an Entra Logic App or lifecycle workflow, a Keycloak event listener) can post a flat payload from a script: `{"disabled_users": ["a@example.com"], "removed_groups": [{"user": "b@example.com", "group": "admins"}]}`. A disabled user loses every live token; for a removed group, only that user's tokens issued with that group are revoked (a token without it keeps working, as it never carried the access). Repeat `--config` for every gateway: each config's `tokens.store` is revoked, and the command touches only token stores, so run it where those files are reachable. The toolkit has no IdP client; the automation supplies the document.
+  - **Ledger.** Each (event, store) pair is a row in the SQLite `--ledger` that stays pending until that store accepts the revocation, so a store that is down is retried on the next run (run it from cron or a timer, with no `--events`, as well as from the IdP automation). Replays are safe; if a finished event arrives again, for a user who was re-enabled and then disabled, it is applied again. A pending row is not dropped when its config is no longer passed.
+  - **Alert.** A row pending longer than `tokens.offboarding_deadline_s` (default 3600; `--deadline-s` overrides) makes the command exit 3 and print one `offboarding_overdue` JSON line per row on stderr. `--metrics-file` writes `agentsec_offboarding_pending` and `agentsec_offboarding_overdue` for node_exporter's textfile collector; alert on `agentsec_offboarding_overdue > 0` or on the exit code. Exit 1 means bad input or config. The gateway's audit chain is not written (it belongs to the gateway process). Tokens stay valid until the command runs, so the real exposure is the time to your automation plus the deadline.
 
 ## Testing the gateway with the fuzzer
 
@@ -272,7 +276,7 @@ docker run -d --name agentsec-gateway \
 - Holdback cannot take back text it released: a secret or protected string longer than `holdback_chars`, or a rule that needs the whole answer, is only caught by the final check, which then cuts the stream short.
 - `/readyz` does not probe the upstreams. It checks that the audit file can be opened for append, not that the disk has room; a failed write shows as 503 responses, `agentsec_gateway_audit_write_failures_total` and stopped event counters.
 - Without `bundle.state_file`, rollback protection across restarts relies on `min_revision` and `expires`.
-- An access token keeps the groups its user had at issue time until it expires or is revoked; removing someone from the IdP does not revoke their tokens (run `agentsec token revoke --user`).
+- An access token keeps the groups its user had at issue time until it expires or is revoked. The gateway never learns of an IdP change by itself: tokens are revoked only when `agentsec token offboard` runs (see **Offboarding** in the token section), so access lasts until your automation calls it and every store accepts the revocation.
 - Tool-call limits (`max_calls`) count per request, not per user over time.
 - Path and URL argument rules are evaluated on the gateway host, which may not match where the client runs the tool.
 - Upstream addresses are not checked: `upstreams` and `mcp_upstreams` URLs come from the operator's config (a client can never supply one), are usually loopback or private by design, and are resolved by the HTTP client on each connection. Whoever controls DNS for an upstream's hostname chooses where its requests and credential go; use an IP literal or `https` for an upstream that is not on loopback.

@@ -180,3 +180,66 @@ def test_serve_refuses_to_run_when_the_admin_port_is_taken(tmp_path):  # uvicorn
 
 def test_label_values_are_escaped():
     assert _label('a"b\\c\nd') == 'a\\"b\\\\c\\nd'
+
+
+# --------------------------------------------------------------------- audit delivery
+
+
+class FlakySiem:
+    def __init__(self):
+        self.up = True
+        self.got: list[dict] = []
+
+    def write(self, record):
+        if not self.up:
+            raise OSError("siem down")
+        self.got.append(record)
+
+    def last_record(self):
+        return None
+
+
+def test_siem_outage_and_recovery_are_visible_and_lossless(tmp_path):
+    now = [1000.0]
+    config = dataclasses.replace(write_config(tmp_path), cef_file=str(tmp_path / "cef.log"))
+    app = Gateway(config, transport=FakeUpstream())
+    siem, delivery = FlakySiem(), app.metrics.delivery
+    delivery._sink, delivery._clock, delivery._last_ok = siem, lambda: now[0], now[0]
+
+    def signals():
+        text = admin(app, "/metrics")[1]
+        return (
+            metric(text, "agentsec_gateway_siem_backlog_records"),
+            metric(text, "agentsec_gateway_siem_last_delivery_age_seconds"),
+        )
+
+    assert call(app, body=chat())[0] == 200
+    assert signals() == (0, 0)
+    siem.up = False
+    now[0] += 60
+    assert call(app, body=chat())[0] == 200  # the request is not affected
+    held = delivery.backlog
+    assert held >= 1
+    now[0] += 60
+    backlog, age = signals()
+    assert backlog == held and age == 120
+    assert call(app, body=chat())[0] == 200
+    now[0] += 30
+    assert signals()[0] > held and signals()[1] == 150  # backlog rises, age grows
+    siem.up = True
+    assert signals() == (0, 0)  # a scrape alone redelivers
+    local = [json.loads(ln)["seq"] for ln in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    assert [r["seq"] for r in siem.got] == local[-len(siem.got) :]  # in order, no gaps
+    assert siem.got[-1]["seq"] == local[-1]
+    assert [r["seq"] for r in siem.got] == sorted({r["seq"] for r in siem.got})
+
+
+def test_readyz_fails_and_counter_rises_when_the_audit_file_is_unwritable(tmp_path):
+    app = Gateway(write_config(tmp_path), transport=FakeUpstream())
+    assert admin(app, "/readyz")[0] == 200
+    (tmp_path / "audit.jsonl").unlink()
+    (tmp_path / "audit.jsonl").mkdir()  # opening a directory for append raises OSError
+    status, body = admin(app, "/readyz")
+    assert status == 503 and "audit_unwritable" in body
+    assert call(app, body=chat())[0] >= 500
+    assert metric(admin(app, "/metrics")[1], "agentsec_gateway_audit_write_failures_total") >= 1

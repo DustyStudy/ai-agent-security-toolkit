@@ -21,8 +21,10 @@ import logging
 import os
 import sys
 import threading
+import time
 import uuid
 import weakref
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -101,6 +103,11 @@ class FileSink:
             fh.flush()
             if self._fsync:
                 os.fsync(fh.fileno())
+
+    def check_writable(self) -> None:
+        """Raise OSError if the file cannot be opened for append (a /readyz probe, no record)."""
+        with self._lock, self.path.open("a", encoding="utf-8"):
+            pass
 
     @property
     def chain_key(self) -> str:
@@ -182,6 +189,50 @@ class TeeSink:
     @property
     def chain_key(self) -> str | None:
         return getattr(self._primary, "chain_key", None)
+
+
+class RetrySink:
+    """Delivers records to a secondary sink in order, keeping the ones it could not deliver.
+
+    ``write`` never raises. Undelivered records wait in ``backlog`` and go out, oldest first,
+    on the next ``write`` or ``flush``. shortcut: the backlog is in memory and unbounded, so a
+    restart loses it (the local file still has every record); bound it if outages run for hours.
+    """
+
+    def __init__(self, sink: AuditSink, clock: Callable[[], float] = time.time) -> None:
+        self._sink = sink
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._pending: deque[dict[str, Any]] = deque()
+        self._last_ok = clock()
+
+    def write(self, record: dict[str, Any]) -> None:
+        with self._lock:
+            self._pending.append(record)
+        self.flush()
+
+    def flush(self) -> None:
+        with self._lock:
+            while self._pending:
+                try:
+                    self._sink.write(self._pending[0])
+                except Exception:  # noqa: BLE001 - keep the record and retry on the next flush
+                    _LOG.exception("secondary audit sink %s failed", type(self._sink).__name__)
+                    return
+                self._pending.popleft()
+                self._last_ok = self._clock()
+
+    @property
+    def backlog(self) -> int:
+        return len(self._pending)
+
+    @property
+    def last_delivery_age(self) -> float:
+        """Seconds since the last delivery; since start-up if there has been none."""
+        return self._clock() - self._last_ok
+
+    def last_record(self) -> dict[str, Any] | None:
+        return None
 
 
 def _canonical(obj: Any) -> bytes:

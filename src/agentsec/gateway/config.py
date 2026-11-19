@@ -172,7 +172,13 @@ _SECTIONS: dict[str, set[str]] = {
     "upstream": {"url", "model", "api_key"},
     "mcp_upstream": {"url", "auth", "pins"},
     "mcp": {"require_pins"},
-    "tokens": {"store", "default_ttl_days", "max_ttl_days", "max_per_user"},
+    "tokens": {
+        "store",
+        "default_ttl_days",
+        "max_ttl_days",
+        "max_per_user",
+        "offboarding_deadline_s",
+    },
     "bundle": {"dir", "public_key_file", "min_revision", "reload_interval_s", "state_file"},
 }
 
@@ -327,6 +333,7 @@ def _tokens(data: dict[str, Any], base: Path) -> TokenSettings | None:
         default_ttl_s=default * 86400,
         max_ttl_s=longest * 86400,
         max_per_user=_positive(section, "max_per_user", 20),
+        offboarding_deadline_s=_positive(section, "offboarding_deadline_s", 3600.0, float),
     )
 
 

@@ -296,3 +296,98 @@ def test_a_huge_ttl_is_a_validation_error(tmp_path):
 
     asyncio.run(app(scope, receive, send))
     assert sent[0]["status"] == 400
+
+
+# ---------------------------------------------------------------- offboarding
+def _two_gateways(tmp_path):
+    """Two configs with their own token stores, each holding tokens for alice and bob."""
+    cfgs, stores = [], []
+    for name in ("gw1", "gw2"):
+        d = tmp_path / name
+        d.mkdir()
+        write_config(d, TOKENS)
+        cfgs.append(str(d / "gateway.yaml"))
+        s = TokenStore(d / "tokens.db")
+        s.issue("alice", ("dev",), "a", 3600, 5)
+        s.issue("bob", ("dev", "admins"), "b1", 3600, 5)
+        s.issue("bob", ("dev",), "b2", 3600, 5)
+        s.close()
+        stores.append(d / "tokens.db")
+    return cfgs, stores
+
+
+def _live(path, user):
+    s = TokenStore(path)
+    try:
+        return [t.groups for t in s.list(user=user) if t.revoked is None]
+    finally:
+        s.close()
+
+
+def test_offboard_revokes_on_every_store_and_alerts_on_stuck_store(tmp_path, monkeypatch, capsys):
+    from agentsec.gateway import offboard
+
+    cfgs, stores = _two_gateways(tmp_path)
+    ledger = tmp_path / "ledger.db"
+    events = tmp_path / "ev.json"
+    events.write_text(
+        json.dumps(
+            {"disabled_users": ["alice"], "removed_groups": [{"user": "bob", "group": "admins"}]}
+        )
+    )
+    args = ["token", "offboard", "--ledger", str(ledger), "--events", str(events)]
+    for c in cfgs:
+        args += ["--config", c]
+    assert cli(args) == 0
+    for s in stores:
+        assert _live(s, "alice") == []
+        assert _live(s, "bob") == [("dev",)]  # only the token issued with "admins" is gone
+    assert "revoked 4 token(s); 0 pending" in capsys.readouterr().out
+
+    # A store that fails stays pending, is retried, and trips the alert past the deadline.
+    clock = Clock()
+    stuck = str(stores[1])
+    real = offboard.TokenStore
+
+    def flaky(path):
+        if str(path) == stuck:
+            raise OSError("disk offline")
+        return real(path)
+
+    ev = [("user", "bob", "")]
+    out = offboard.run(
+        ledger, [str(stores[0]), stuck], ev, deadline_s=600, clock=clock, open_store=flaky
+    )
+    assert len(out.pending) == 1 and out.overdue == []
+    clock.now += 601
+    out = offboard.run(
+        ledger, [str(stores[0]), stuck], [], deadline_s=600, clock=clock, open_store=flaky
+    )
+    assert [p.store for p in out.overdue] == [stuck] and "disk offline" in (
+        out.overdue[0].error or ""
+    )
+    assert "agentsec_offboarding_overdue 1" in offboard.metrics_text(out)
+    assert offboard.audit_events(out)[0]["event"] == "offboarding_overdue"
+    assert _live(stores[1], "bob") != []  # still active on the failing store
+    # Store recovers: the next run (no events) finishes the revocation idempotently.
+    out = offboard.run(ledger, [], [], deadline_s=600, clock=clock)
+    assert out.pending == [] and _live(stores[1], "bob") == []
+
+
+def test_offboard_cli_exit_codes_and_input_validation(tmp_path, capsys):
+    cfgs, _ = _two_gateways(tmp_path)
+    base = ["token", "offboard", "--config", cfgs[0], "--ledger", str(tmp_path / "l.db")]
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"disabled_users": "alice"}')
+    assert cli([*base, "--events", str(bad)]) == 1
+    assert cli(base) == 0  # no events: retry only
+    # An unopenable store (a directory) is pending; deadline 1ns makes it overdue at once.
+    (tmp_path / "gw1" / "tokens.db").unlink()
+    (tmp_path / "gw1" / "tokens.db").mkdir()
+    ev = tmp_path / "ev.json"
+    ev.write_text('{"disabled_users": ["alice"]}')
+    assert cli([*base, "--events", str(ev)]) == 0  # pending, inside the default deadline
+    late = ["--deadline-s", "0.000001", "--metrics-file", str(tmp_path / "m.prom")]
+    assert cli([*base, *late]) == 3  # a retry later: still failing and now past the deadline
+    assert "agentsec_offboarding_overdue 1" in (tmp_path / "m.prom").read_text()
+    assert "offboarding_overdue" in capsys.readouterr().err

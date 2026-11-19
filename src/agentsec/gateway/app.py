@@ -49,7 +49,7 @@ from agentsec.gateway.tokens import (
     looks_like_token,
 )
 from agentsec.integrations.mcp import scan_tool_definitions
-from agentsec.middleware.audit import AuditLogger, AuditSink, FileSink, TeeSink
+from agentsec.middleware.audit import AuditLogger, AuditSink, FileSink, RetrySink, TeeSink
 from agentsec.middleware.cef import CefSink
 from agentsec.middleware.injection import InjectionScanner
 from agentsec.middleware.pipeline import AgentMiddleware
@@ -301,14 +301,19 @@ class Gateway:
         self.config = config
         self._transport = transport
         self._stream_transport = stream_transport
+        delivery: RetrySink | None = None
+        self._audit_probe: Callable[[], None] | None = None
         if sink is None:
             sink = FileSink(config.audit_file)
+            self._audit_probe = sink.check_writable
             if config.cef_file:
                 # The hash-chained file is the record; CEF is a copy for the SIEM, and TeeSink
                 # carries on (and logs) if that copy fails.
                 cef = open(config.cef_file, "a", encoding="utf-8")  # noqa: SIM115 - lives with the app
-                sink = TeeSink(sink, CefSink(cef))
+                delivery = RetrySink(CefSink(cef))
+                sink = TeeSink(sink, delivery)
         self.metrics = Metrics()
+        self.metrics.delivery = delivery
         sink = CountingSink(sink, self.metrics)  # counts a record only once it was written
         # The chain head is read once here; bind() gives each request a logger on that chain.
         self._audit = AuditLogger(
@@ -580,6 +585,7 @@ class Gateway:
             await asyncio.to_thread(self._maybe_reload)
         except Exception:  # noqa: BLE001 - _maybe_reload logs its own failures
             _LOG.exception("bundle reload from the admin listener failed")
+        await asyncio.to_thread(self.metrics.flush)  # redeliver a SIEM backlog even with no traffic
         policies = self._policies
         if path == "/metrics":
             body = self.metrics.render(policies).encode()
@@ -596,13 +602,23 @@ class Gateway:
             await send({"type": "http.response.body", "body": body})
             return
         expired = policies.expires is not None and datetime.now(UTC) >= policies.expires
+        audit_ok = True
+        if self._audit_probe is not None:
+            try:
+                await asyncio.to_thread(self._audit_probe)
+            except OSError:
+                audit_ok = False
         payload = {
-            "status": "policy_expired" if expired else "ready",
+            "status": "policy_expired"
+            if expired
+            else "audit_unwritable"
+            if not audit_ok
+            else "ready",
             "policy_rev": policies.revision,
             # Shown so a group left in monitor mode is not forgotten.
             "monitor_groups": [g.group for g in policies.groups if g.mode == "monitor"],
         }
-        await self._json(send, 503 if expired else 200, payload, request_id)
+        await self._json(send, 503 if expired or not audit_ok else 200, payload, request_id)
 
     # ------------------------------------------------------------ policy
     def _group_policy(self, groups: tuple[str, ...]) -> tuple[PolicySet, GroupPolicy]:

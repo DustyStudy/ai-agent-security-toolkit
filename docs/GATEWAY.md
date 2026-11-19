@@ -69,7 +69,7 @@ With `mcp_upstreams` set, the gateway also serves one MCP endpoint, `/mcp` (stre
 # gateway.yaml (needs pip install "ai-agent-security-toolkit[gateway,mcp]" with mcp>=2.3)
 mcp_upstreams:
   jira: {url: https://mcp-jira.internal/mcp, auth: file:/run/secrets/jira-mcp-token}
-  docs: {url: http://mcp-docs.internal:8080/mcp, pins: pins/docs.json}
+  docs: {url: https://mcp-docs.internal/mcp, pins: pins/docs.json}
 mcp: {require_pins: true}   # refuse to start while an upstream (jira, here) has no pins
 ```
 
@@ -186,8 +186,9 @@ Limits:
 - **The gateway must be the only route to the model servers.** Ollama has no authentication; bind it to localhost or a network only the gateway can reach. Otherwise users skip the gateway. Check it with `probe-isolation` (below).
 - **Origin and Host checks.** Both listeners refuse, with a 403 before authentication, what a web page can send but a real client does not. This stops DNS rebinding (a page whose hostname is re-pointed at `127.0.0.1`) and cross-site requests. Each refusal is a `gateway_rejected` audit event with code `origin_not_allowed` or `host_not_allowed`.
   - `Origin`: a request that carries one is refused unless it is listed in `listen.allowed_origins` (exact origins such as `https://chat.corp.example`, no wildcards, default empty). Clients that are not browsers send no `Origin` and are unaffected. A browser app that calls the gateway, same-origin or not, must be listed. The admin listener refuses every `Origin`.
-  - `Host`: its name must be one of `listen.allowed_hosts` (names such as `gateway.corp.example`, without a port, no wildcards). The port in `Host` is not compared: the name is what a rebinding page cannot fake, and a forwarded port differs from the configured one. Unset with a loopback `listen.host`, the list is `localhost`, `127.0.0.1`, `[::1]` and `listen.host`. Unset with a non-loopback `listen.host`, the `Host` header is **not checked** and a warning is logged at startup: set the list to the name your proxy forwards. The admin listener always requires a loopback name. A request with no `Host` header at all (HTTP/1.0, which no browser sends) is served.
+  - `Host`: its name must be one of `listen.allowed_hosts` (names such as `gateway.corp.example`, without a port, no wildcards). The port in `Host` is not compared: the name is what a rebinding page cannot fake, and a forwarded port differs from the configured one. Unset with a loopback `listen.host`, the list is `localhost`, `127.0.0.1`, `[::1]` and `listen.host`. A non-loopback listener requires an explicit list containing the name your proxy forwards. The admin listener always requires a loopback name. A request with no `Host` header at all (HTTP/1.0, which no browser sends) is served.
   - `GET /healthz` on the main listener is exempt from both checks, because a container probe sends the pod address as `Host`. It returns a constant.
+- **Upstream TLS.** Configure an HTTPS endpoint with a trusted certificate for every remote model and MCP service. Loopback endpoints also accept HTTP for local services.
 - **TLS.** A non-loopback `listen.host` needs `listen.tls`, or `tls_terminated_by_proxy: true` when the auth proxy terminates TLS on the same host or a trusted network.
 - **One process.** Rate limits and the audit chain are per process. Run one replica per audit file.
 - **Shutdown.** On SIGTERM the gateway stops accepting connections and gives requests in flight `limits.shutdown_timeout_s` (default 30, whole seconds) to finish, then closes them. Set the orchestrator's grace period (Kubernetes `terminationGracePeriodSeconds`) a little above it.
@@ -214,7 +215,7 @@ It needs the same files as `serve --check` (the policy or bundle the config name
 
 ## Container image
 
-The repository's `Dockerfile` builds the gateway from the hash-pinned locks (`requirements/requirements-gateway.txt`) on a digest-pinned `python:3.13-slim`. Each release from 0.8.1 on is also published to `ghcr.io/dustystudy/ai-agent-security-toolkit`, tagged with the version (there is no `latest`) and for `linux/amd64` only. With `VERSION` set to a release, such as `0.8.1`:
+The repository's `Dockerfile` builds the gateway from the hash-pinned locks (`requirements/requirements-gateway.txt`) on a digest-pinned `python:3.13-alpine`. The release workflow scans the built image for high and critical vulnerabilities before pushing it to the registry. Each release from 0.8.1 on is also published to `ghcr.io/dustystudy/ai-agent-security-toolkit`, tagged with the version (there is no `latest`) and for `linux/amd64` only. With `VERSION` set to a release, such as `0.8.1`:
 
 ```bash
 docker pull ghcr.io/dustystudy/ai-agent-security-toolkit:$VERSION

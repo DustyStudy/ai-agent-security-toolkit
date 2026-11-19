@@ -17,7 +17,7 @@ listen:
 #   port: 9090
 
 identity:
-  mode: trusted_header     # the only mode in this version; put an SSO proxy (oauth2-proxy) in front
+  mode: trusted_header     # put an SSO proxy (such as oauth2-proxy) in front for this mode
   user_header: X-Auth-Request-User
   groups_header: X-Auth-Request-Groups
   trusted_proxies: [127.0.0.1/32]   # the header is ignored from any other peer and the request refused
@@ -68,7 +68,7 @@ upstreams:                 # "model" in a request selects one of these by name; 
 
 # mcp_upstreams:          # one /mcp endpoint for IDEs and agents (needs the mcp extra)
 #   jira: {url: https://mcp-jira.internal/mcp, auth: file:/run/secrets/jira-mcp-token}
-#   docs: {url: http://mcp-docs.internal:8080/mcp, pins: pins/docs.json}
+#   docs: {url: https://mcp-docs.internal/mcp, pins: pins/docs.json}
 # mcp: {require_pins: true}   # refuse to start while an mcp_upstream has no pins (jira, above)
 
 # tokens:                  # access tokens for IDE MCP configs (POST /tokens after SSO)

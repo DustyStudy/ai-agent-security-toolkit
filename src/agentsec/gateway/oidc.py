@@ -106,6 +106,9 @@ class OidcVerifier:
         for raw in doc["keys"]:
             if not isinstance(raw, dict) or raw.get("use", "sig") != "sig":
                 continue
+            ops = raw.get("key_ops", ["verify"])
+            if not isinstance(ops, list) or "verify" not in ops:
+                continue
             kid = raw.get("kid")
             if not isinstance(kid, str) or not kid:
                 continue  # keyless selection is ambiguous; require a kid
@@ -171,7 +174,8 @@ class OidcVerifier:
         user = claims.get(s.user_claim)
         if (
             not isinstance(user, str)
-            or not user.strip()
+            or not user
+            or user != user.strip()
             or not user.isprintable()
             or len(user) > 256
         ):
@@ -179,4 +183,4 @@ class OidcVerifier:
         raw_groups = claims.get(s.groups_claim, [])
         if not isinstance(raw_groups, list) or not all(isinstance(g, str) for g in raw_groups):
             raise TokenRejected(f"claim {s.groups_claim!r} must be a list of strings")
-        return user.strip(), tuple(g for g in raw_groups if g)
+        return user, tuple(g for g in raw_groups if g)

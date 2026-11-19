@@ -145,7 +145,7 @@ def test_admin_config(tmp_path):
     with pytest.raises(ConfigError, match="differ"):  # overlapping binds, different host strings
         write_config(
             tmp_path,
-            "listen:\n  host: 0.0.0.0\n  port: 8443\n  tls_terminated_by_proxy: true\n"
+            "listen:\n  host: 0.0.0.0\n  port: 8443\n  tls_terminated_by_proxy: true\n  allowed_hosts: [gateway.example]\n"
             "admin:\n  port: 8443\n",
         )
     with pytest.raises(ConfigError, match="admin.port"):

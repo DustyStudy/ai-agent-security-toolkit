@@ -25,7 +25,7 @@ from tests.test_gateway import USER, FakeUpstream, call, chat, write_config
 from tests.test_gateway_tokens import JSON, TOKENS, bearer
 
 HAS_MCP = importlib.util.find_spec("mcp") is not None
-MCP = "mcp_upstreams:\n  docs: {url: 'http://docs.internal/mcp'}\n" if HAS_MCP else ""
+MCP = "mcp_upstreams:\n  docs: {url: 'https://docs.internal/mcp'}\n" if HAS_MCP else ""
 needs_mcp = pytest.mark.skipif(not HAS_MCP, reason="/mcp is only routed with the mcp extra")
 CHAT = "/v1/chat/completions"
 ROUTES = [

@@ -17,6 +17,18 @@ Each step is useful on its own, and later steps build on earlier ones.
 5. **Fuzz in CI and before release.** `agentsec fuzz --target <your agent> --categories tool_misuse,exfiltration,prompt_leak --max-asr 0` gates on containment. Upload `--sarif` to code scanning if you use it. Extend the corpus with your own payloads.
 6. **Add screening and output validation** (`AgentMiddleware`): scan and spotlight untrusted input, and validate model output for secrets, exfiltration links and dangerous markup before it reaches a user or another system.
 
+## Gateway acceptance before employee rollout
+
+Use test accounts and synthetic data on the network paths employees will use. Record the policy revision, image digest and results with the rollout decision.
+
+| Control | Evidence to collect in staging |
+| --- | --- |
+| Identity and offboarding | Confirm that two users with different group policies see only their assigned models and tools. Remove one user from the identity provider. If gateway tokens are enabled, revoke that user's issued tokens as part of offboarding and confirm a previously issued token receives HTTP 401. |
+| Network isolation and TLS | Confirm that employee networks cannot reach model or MCP upstreams directly, that only the identity proxy can reach a trusted-header listener, and that remote upstream certificates validate from inside the gateway container. Configure the Host name the proxy forwards in `listen.allowed_hosts`. |
+| Tool authorization | Exercise a permitted read and a denied side effect through each deployed integration in enforce mode. Confirm the denied action produced an audit decision and no downstream operation. |
+| Audit retention | Trace both requests through the production log pipeline using request IDs. Verify the chain against a checkpoint held outside the gateway host. Confirm with a synthetic credential that neither the local log nor the SIEM stores its value. |
+| Rollback | Restore a compatible approved image in staging. For signed bundles, reissue the approved policy at a higher revision so rollback protection stays active. Verify that access-token revocations persist and that the audit trail remains verifiable across the restart. |
+
 ## Policy authoring
 
 - **Default deny is the point.** A tool that is not in the policy cannot run; extra arguments are refused. Keep it that way.

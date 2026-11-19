@@ -6,7 +6,7 @@
 # (audit log, token store, bundle state). See docs/GATEWAY.md, "Container image".
 
 # Pinned by digest; Dependabot moves it (.github/dependabot.yml).
-FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS build
+FROM python:3.13-alpine@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e AS build
 
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /src
@@ -25,14 +25,16 @@ RUN python -m build --no-isolation --wheel \
     && pip --python /opt/agentsec/bin/python install --no-deps dist/*.whl
 
 
-FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+FROM python:3.13-alpine@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e
 
 # A fixed numeric id, so `runAsNonRoot` and volume ownership can name it.
 # The base image's own pip goes too: nothing is installed at runtime.
 RUN python -m pip uninstall --yes --quiet pip \
-    && groupadd --system --gid 10001 agentsec \
-    && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin agentsec \
-    && install -d -o 10001 -g 10001 -m 0700 /var/lib/agentsec
+    && addgroup -S -g 10001 agentsec \
+    && adduser -S -D -H -u 10001 -G agentsec -s /sbin/nologin agentsec \
+    && mkdir -p /var/lib/agentsec \
+    && chown 10001:10001 /var/lib/agentsec \
+    && chmod 0700 /var/lib/agentsec
 
 COPY --from=build /opt/agentsec /opt/agentsec
 
@@ -44,6 +46,6 @@ USER 10001:10001
 WORKDIR /etc/agentsec
 EXPOSE 8443
 
-# checkov:skip=CKV_DOCKER_2: the port and TLS come from the mounted config, so a baked-in probe would be wrong; probe /healthz from the orchestrator
+# Probe /healthz from the orchestrator using the port and TLS settings in the mounted config.
 ENTRYPOINT ["agentsec"]
 CMD ["serve", "--config", "/etc/agentsec/gateway.yaml"]

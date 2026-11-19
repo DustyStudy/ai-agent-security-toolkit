@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
-import logging
 import math
 import os
 import re
@@ -21,8 +20,6 @@ from agentsec.gateway.policyset import ANY_GROUP, PolicySet, group_policy, strea
 from agentsec.gateway.tokens import TokenSettings
 from agentsec.sandbox.policy import Policy
 
-_LOG = logging.getLogger("agentsec.gateway")
-
 
 class ConfigError(ValueError):
     pass
@@ -31,7 +28,7 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class Upstream:
     name: str  # what clients put in "model"
-    url: str  # base URL ending before /chat/completions, e.g. http://ollama.internal:11434/v1
+    url: str  # base URL ending before /chat/completions, e.g. https://models.internal/v1
     model: str  # the model name the upstream expects
     api_key_ref: str | None = None  # "env:NAME" or "file:/path"; never a literal
 
@@ -75,7 +72,7 @@ class GatewayConfig:
     tls_key_file: str | None = None
     tls_terminated_by_proxy: bool = False
     # Host header names (no port) the main listener accepts. Empty: the loopback names when host is
-    # loopback, otherwise the Host header is not checked (load_config warns).
+    # loopback, otherwise the configuration must supply explicit names.
     allowed_hosts: tuple[str, ...] = ()
     allowed_origins: tuple[str, ...] = ()  # an Origin header outside this list is refused
     admin_port: int | None = None  # set: /metrics and /readyz on admin_host:admin_port
@@ -231,10 +228,10 @@ def loopback_hosts(host: str) -> frozenset[str] | None:
     )
 
 
-def _warn_plain_http(where: str, url: str, secret: Any) -> None:
+def _require_secure_upstream(where: str, url: str) -> None:
     parts = urlsplit(url)
-    if secret and parts.scheme == "http" and not _is_loopback(parts.hostname or ""):
-        _LOG.warning("%s sends its credential over plain HTTP; use an https URL", where)
+    if parts.scheme == "http" and not _is_loopback(parts.hostname or ""):
+        raise ConfigError(f"{where}.url requires https for a non-loopback upstream")
 
 
 def _oidc(section: dict[str, Any]) -> OidcSettings:
@@ -301,7 +298,7 @@ def _mcp_upstreams(data: dict[str, Any], base: Path) -> tuple[dict[str, McpUpstr
             if "bundle" in data:
                 raise ConfigError(f"with bundle, mcp_upstreams.{name}.pins goes in the bundle")
             pins[name] = _pin_file(base / _typed(u["pins"], str, f"mcp_upstreams.{name}.pins"))
-        _warn_plain_http(f"mcp_upstreams.{name}", url, auth)
+        _require_secure_upstream(f"mcp_upstreams.{name}", url)
         upstreams[name] = McpUpstream(name=name, url=url, auth_ref=auth)
     return upstreams, pins
 
@@ -446,10 +443,7 @@ def load_config(path: str | Path) -> GatewayConfig:
         if not re.fullmatch(r"\[[0-9a-f:.]+\]|[a-z0-9.-]+", h):
             raise ConfigError(f"listen.allowed_hosts: {h!r} is not a host name (without a port)")
     if not allowed_hosts and not _is_loopback(host):
-        _LOG.warning(
-            "listen.allowed_hosts is not set and listen.host is not loopback: "
-            "the Host header is not checked"
-        )
+        raise ConfigError("listen.allowed_hosts is required for a non-loopback listener")
     allowed_origins = tuple(
         o.lower() for o in _strs(listen.get("allowed_origins", []), "listen.allowed_origins")
     )
@@ -516,7 +510,7 @@ def load_config(path: str | Path) -> GatewayConfig:
             not isinstance(api_key, str) or not api_key.startswith(("env:", "file:"))
         ):
             raise ConfigError(f"upstreams.{name}.api_key must be 'env:NAME' or 'file:/path'")
-        _warn_plain_http(f"upstreams.{name}", url, api_key)
+        _require_secure_upstream(f"upstreams.{name}", url)
         upstreams[str(name)] = Upstream(
             name=str(name),
             url=url.rstrip("/"),

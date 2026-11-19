@@ -8,9 +8,7 @@ from dataclasses import dataclass
 
 # Same rationale as agentsec.middleware.injection.DEFAULT_MAX_SCAN_CHARS: this runs over
 # attacker-influenceable text of unbounded size (audit log fields, tool output, tool-call
-# exception text) across a dozen regex rules, so it needs a cost ceiling. Findings beyond the
-# cutoff are missed and that portion of ``redact_text``'s output is returned unredacted -- bound
-# how much untrusted content reaches this in the first place where you can.
+# exception text) across a dozen regex rules, so it needs a cost ceiling.
 DEFAULT_MAX_SCAN_CHARS = 200_000
 
 
@@ -138,6 +136,7 @@ _RULES: tuple[_Rule, ...] = (
         ),
         group=1,
     ),
+    _Rule("gateway_access_token", "secret", re.compile(r"agt_[A-Za-z0-9_-]{43}")),
     _Rule("github_token", "secret", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
     _Rule("gitlab_token", "secret", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}")),
     _Rule("npm_token", "secret", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b")),
@@ -209,6 +208,9 @@ def find_sensitive(
     merged: list[Finding] = []
     for f in found:
         if merged and f.start < merged[-1].end:
+            previous = merged[-1]
+            if f.end > previous.end:
+                merged[-1] = Finding(previous.kind, previous.start, f.end, previous.category)
             continue
         merged.append(f)
     return merged
@@ -219,9 +221,10 @@ def redact_text(
 ) -> tuple[str, list[Finding]]:
     """Replace sensitive spans with ``[REDACTED:<kind>]``.
 
-    Text beyond ``max_scan_chars`` is not scanned and is returned unredacted (see
-    :func:`find_sensitive`).
+    Oversized fields are withheld whole because a credential can cross the scan boundary.
     """
+    if len(text) > max_scan_chars:
+        return "[REDACTED:scan_limit]", [Finding("scan_limit", 0, len(text), "unscanned")]
     findings = find_sensitive(text, include_pii=include_pii, max_scan_chars=max_scan_chars)
     if not findings:
         return text, []

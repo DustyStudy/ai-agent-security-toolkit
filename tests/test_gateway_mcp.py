@@ -97,7 +97,7 @@ def write_config(tmp_path, extra=""):
             policy: policy.yaml
             upstreams: {local: {url: "http://127.0.0.1:1/v1", model: m}}
             mcp_upstreams:
-              docs: {url: "http://docs.internal/mcp"}
+              docs: {url: "https://docs.internal/mcp"}
               mail: {url: "https://mail.internal/mcp", auth: "env:MAIL_MCP_TOKEN"}
             audit: {file: audit.jsonl}
             """
@@ -359,8 +359,8 @@ def test_pins_drop_a_tool_whose_definition_changed(tmp_path):
         (tmp_path / "gateway.yaml")
         .read_text()
         .replace(
-            'docs: {url: "http://docs.internal/mcp"}',
-            'docs: {url: "http://docs.internal/mcp", pins: docs-pins.json}',
+            'docs: {url: "https://docs.internal/mcp"}',
+            'docs: {url: "https://docs.internal/mcp", pins: docs-pins.json}',
         )
     )
     rugpull = Upstreams(
@@ -426,8 +426,8 @@ def test_pin_files_load_into_the_policy_set(tmp_path):
         (tmp_path / "gateway.yaml")
         .read_text()
         .replace(
-            'docs: {url: "http://docs.internal/mcp"}',
-            'docs: {url: "http://docs.internal/mcp", pins: pins.json}',
+            'docs: {url: "https://docs.internal/mcp"}',
+            'docs: {url: "https://docs.internal/mcp", pins: pins.json}',
         )
     )
     (tmp_path / "gateway.yaml").write_text(text_)
@@ -463,7 +463,7 @@ def test_the_real_connector_reaches_an_http_upstream_with_its_token(tmp_path, mo
             (tmp_path / "gateway.yaml")
             .read_text()
             .replace(
-                'docs: {url: "http://docs.internal/mcp"}',
+                'docs: {url: "https://docs.internal/mcp"}',
                 f'docs: {{url: "http://127.0.0.1:{port}/mcp", auth: "env:DOCS_MCP_TOKEN"}}',
             )
         )

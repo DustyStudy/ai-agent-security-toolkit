@@ -275,11 +275,11 @@ class AuditLogger:
             record: dict[str, Any] = {
                 "seq": head.seq,
                 "ts": self._clock().isoformat(),
-                "session_id": self.session_id,
-                "actor": self.actor,
-                "event": event,
+                "session_id": self._clean_key(self.session_id),
+                "actor": self._clean_key(self.actor),
+                "event": self._clean_key(event),
                 "data": {
-                    self._clean_key(k): self._clean(v, keep=k in self._keep_fields)
+                    self._clean_key(k): self._clean_item(k, v, keep=k in self._keep_fields)
                     for k, v in data.items()
                 },
                 "prev_hash": head.prev_hash,
@@ -309,7 +309,7 @@ class AuditLogger:
             return {
                 "seq": self._head.seq - 1,
                 "hash": self._head.prev_hash,
-                "session_id": self.session_id,
+                "session_id": self._clean_key(self.session_id),
             }
 
     # -- internals ---------------------------------------------------------
@@ -326,8 +326,8 @@ class AuditLogger:
         return self._clean_str(repr(value), keep)
 
     def _clean_item(self, key: Any, value: Any, keep: bool) -> Any:
-        if self._redact and isinstance(value, str) and value:
-            kind = _credential_key(str(key))
+        if self._redact and value is not None:
+            kind = _credential_key(str(key)[-200:])
             if kind is not None:
                 # {"password": "x"} is the assignment password=x: the whole value goes,
                 # whatever it looks like (short, spaced, or starting like something else).
@@ -355,7 +355,9 @@ class AuditLogger:
 @functools.lru_cache(maxsize=1024)
 def _credential_key(key: str) -> str | None:
     """The redaction kind if ``key=<value>`` reads as a credential assignment, else None."""
-    prefix = f"{key[:200]}="
+    if key.casefold() in {"authorization", "proxy-authorization", "cookie", "set-cookie"}:
+        return "credential_header"
+    prefix = f"{key}="
     for f in find_sensitive(prefix + "x" * 8):
         if f.category == "secret" and f.start == len(prefix):
             return f.kind

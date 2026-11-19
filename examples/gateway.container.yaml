@@ -6,9 +6,8 @@ listen:
   host: 0.0.0.0                    # inside the container; publish the port only to the auth proxy
   port: 8443
   tls_terminated_by_proxy: true    # or mount a certificate and set listen.tls
-  # The Host name the proxy forwards. Unset on a non-loopback host, the Host header is not
-  # checked and a warning is logged. /healthz is exempt, so probes by address keep working.
-  # allowed_hosts: [gateway.corp.example]
+  # Use the Host name forwarded by your proxy. /healthz also accepts probes by address.
+  allowed_hosts: [gateway.corp.example]
 
 identity:
   mode: trusted_header
@@ -20,7 +19,7 @@ policy: policy.yaml
 
 upstreams:
   llama3.1-8b:
-    url: http://ollama:11434/v1    # a model server on the same container network, reachable from the gateway only
+    url: https://models.corp.example/v1    # internal TLS endpoint serving the model
     model: llama3.1:8b
 
 audit:

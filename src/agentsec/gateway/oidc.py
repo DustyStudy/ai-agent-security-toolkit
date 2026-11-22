@@ -44,7 +44,8 @@ class OidcSettings:
 
 
 def fetch_jwks(url: str, timeout: float = 5.0) -> dict[str, Any]:
-    opener = urllib.request.build_opener(_NoRedirect)
+    # ProxyHandler({}): HTTP(S)_PROXY in the environment must not route key fetches via a proxy.
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
     req = urllib.request.Request(url, headers={"Accept": "application/json"})  # noqa: S310 - URL from config, checked https
     # A total deadline, not just a per-read socket timeout: a server dripping bytes would
     # otherwise hold the verifier's lock (and every login behind it) indefinitely.
@@ -151,7 +152,8 @@ class OidcVerifier:
             raise TokenRejected("malformed token") from None
         alg, kid = header.get("alg"), header.get("kid")
         if alg not in s.algorithms:
-            raise TokenRejected(f"algorithm {alg!r} not allowed")
+            # Fixed text: the header value is the caller's, and the reason goes to the audit log.
+            raise TokenRejected("token algorithm not allowed")
         if not isinstance(kid, str) or not kid:
             raise TokenRejected("token has no kid")
         key, key_alg = self._key_for(kid)

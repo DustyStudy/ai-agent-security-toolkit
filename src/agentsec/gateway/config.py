@@ -495,12 +495,20 @@ def load_config(path: str | Path) -> GatewayConfig:
     else:
         raise ConfigError("identity.mode must be 'trusted_header' or 'oidc'")
     try:
-        proxies = tuple(ipaddress.ip_network(p, strict=False) for p in proxies_raw)
+        # strict: 172.28.0.10/16 written where a /32 was meant would trust the whole /16.
+        proxies = tuple(ipaddress.ip_network(p, strict=True) for p in proxies_raw)
     except ValueError as e:
         raise ConfigError(f"identity.trusted_proxies: {e}") from e
     if any(p.prefixlen == 0 for p in proxies):
         # Every peer could then name any user in a header.
         raise ConfigError("identity.trusted_proxies must not trust every address (/0)")
+    for p in proxies:
+        floor = 16 if p.version == 4 else 48
+        if p.prefixlen < floor:
+            # A proxy list is a few hosts or one subnet; a wider net is usually a typo.
+            raise ConfigError(
+                f"identity.trusted_proxies: {p} is too broad; use /{floor} or a longer prefix"
+            )
 
     upstreams_raw = data.get("upstreams")
     if not isinstance(upstreams_raw, dict) or not upstreams_raw:

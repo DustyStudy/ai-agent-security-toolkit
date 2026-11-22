@@ -50,6 +50,9 @@ class ExecRule:
     # for token. Use it when the only safe form of a command is one exact spelling, such as an
     # install that must come from the lock file (see locked_install_rules).
     exact_args: list[list[str]] | None = None
+    # Fixed working directory (must be inside cwd_roots). A rule with cwd or exact_args refuses
+    # a caller-supplied cwd: a relative argument means whatever the caller's directory makes it.
+    cwd: str | None = None
 
 
 # The lock-file-only form of each package manager's install. Lifecycle scripts are turned off
@@ -63,7 +66,10 @@ _LOCKED_INSTALLS: dict[str, tuple[str, list[str]]] = {
 
 
 def locked_install_rules(
-    tools: Sequence[str] = ("pip",), *, requirements: str = "requirements.txt"
+    tools: Sequence[str] = ("pip",),
+    *,
+    requirements: str = "requirements.txt",
+    cwd: str | None = None,
 ) -> dict[str, ExecRule]:
     """Rules that let an agent install dependencies only from the project's lock file.
 
@@ -71,16 +77,22 @@ def locked_install_rules(
     named. These rules allow one exact command per tool and nothing else, so a package name,
     an index URL or another requirements file is refused::
 
-        runner = SafeCommandRunner(locked_install_rules(["pip", "npm"]), cwd_roots=[repo])
-        runner.run("pip-install")   # pip install --require-hashes -r requirements.txt
+        rules = locked_install_rules(["pip", "npm"], cwd=repo)
+        runner = SafeCommandRunner(rules, cwd_roots=[repo])
+        runner.run("pip-install")   # pip install --require-hashes -r <repo>/requirements.txt
         runner.run("npm-install")   # npm ci --ignore-scripts
 
     Calling ``run`` with no arguments runs that command; any other argument list is denied.
+    The commands always run in ``cwd`` (the project directory; this process's working directory
+    when omitted) and ``requirements`` is made absolute against it, so the caller of ``run``
+    cannot aim the install at a lock file of its own in a subdirectory.
     This pins what is installed to the lock file. It does not vouch for the lock file: review
     changes to it. ``pip`` needs every requirement hash-pinned; ``npm.cmd`` and the ``pnpm.cmd``
     shim are batch files on Windows, which the runner refuses (pnpm's native ``pnpm.exe`` runs).
     """
     rules = {}
+    cwd = os.path.abspath(cwd or os.getcwd())
+    requirements = os.path.normpath(os.path.join(cwd, requirements))
     for tool in tools:
         if tool not in _LOCKED_INSTALLS:
             raise ValueError(
@@ -88,8 +100,26 @@ def locked_install_rules(
             )
         executable, args = _LOCKED_INSTALLS[tool]
         argv = [a.format(requirements=requirements) for a in args]
-        rules[f"{tool}-install"] = ExecRule(executable=executable, exact_args=[argv])
+        rules[f"{tool}-install"] = ExecRule(executable=executable, exact_args=[argv], cwd=cwd)
     return rules
+
+
+def _find_executable(name: str) -> str | None:
+    """PATH lookup that never consults the current directory.
+
+    ``shutil.which("git")`` on Windows tries the current directory before PATH, and an empty
+    or relative PATH entry means the current directory everywhere, so a ``git.exe`` planted in
+    a cloned repository would be the one that runs.
+    """
+    if os.path.dirname(name):
+        return shutil.which(name)  # an explicit path is looked up as given, not searched for
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if os.path.isabs(entry):
+            # With a directory part, which() checks only that directory (and PATHEXT).
+            found = shutil.which(os.path.join(entry, name))
+            if found is not None:
+                return found
+    return None
 
 
 def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
@@ -207,7 +237,7 @@ class SafeCommandRunner:
             raise ValueError("cwd_roots must not be empty")
         self._resolved: dict[str, tuple[str, ExecRule]] = {}
         for alias, rule in rules.items():
-            path = shutil.which(rule.executable)
+            path = _find_executable(rule.executable)
             if path is None:
                 raise ValueError(f"executable {rule.executable!r} for {alias!r} not found")
             # Check the canonical path that is actually run: realpath turns "npm.cmd." or
@@ -219,6 +249,12 @@ class SafeCommandRunner:
                 raise ValueError(
                     f"executable {rule.executable!r} for {alias!r} resolves to a batch file "
                     f"({path}); batch files run through cmd.exe and cannot be argument-safe"
+                )
+            if path_within_roots(path, cwd_roots)[0]:
+                # The agent can write there, so it could replace the binary it is allowed to run.
+                raise ValueError(
+                    f"executable {rule.executable!r} for {alias!r} resolves to {path}, "
+                    "which is inside cwd_roots"
                 )
             if rule.allowed_options is not None and not all(
                 isinstance(o, str) and _is_option_like(o) and "=" not in o
@@ -272,34 +308,44 @@ class SafeCommandRunner:
         def pump(stream: object, key: str) -> None:
             buf = buffers[key]
             read = stream.read1  # type: ignore[attr-defined]
-            while True:
-                chunk = read(65536)
-                if not chunk:
-                    return
-                room = limit + 1 - len(buf)
-                if room > 0:
-                    buf.extend(chunk[:room])
-                if len(buf) > limit:
-                    overflow.set()
-                    _kill_tree(proc)  # stop the producers; keep draining until the pipe closes
+            # Closes its own pipe at EOF, so a reader that outlives the join below still does.
+            with stream:  # type: ignore[attr-defined]
+                while True:
+                    chunk = read(65536)
+                    if not chunk:
+                        return
+                    room = limit + 1 - len(buf)
+                    if room > 0:
+                        buf.extend(chunk[:room])
+                    if len(buf) > limit:
+                        overflow.set()
+                        _kill_tree(proc)  # stop the producers; keep draining until pipe closes
 
         threads = [
             threading.Thread(target=pump, args=(proc.stdout, "out"), daemon=True),
             threading.Thread(target=pump, args=(proc.stderr, "err"), daemon=True),
         ]
-        for t in threads:
-            t.start()
         timed_out = False
         try:
-            proc.wait(timeout=self.timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-        # Also after a normal exit: background children it left behind must not outlive the
-        # call or hold the output pipes open past the timeout.
-        _kill_tree(proc)
-        proc.wait()
-        for t in threads:
-            t.join(timeout=5)
+            for t in threads:
+                t.start()
+            try:
+                proc.wait(timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+            # Also after a normal exit: background children it left behind must not outlive the
+            # call or hold the output pipes open past the timeout.
+            _kill_tree(proc)
+            proc.wait()
+            for t in threads:
+                t.join(timeout=5)
+        finally:
+            for t, stream in zip(threads, (proc.stdout, proc.stderr), strict=True):
+                # A reader still blocked after the join (a surviving grandchild holds the pipe
+                # open) keeps its pipe: close() would wait on the lock that read holds. That
+                # daemon thread closes it when the pipe ends.
+                if stream is not None and not t.is_alive():
+                    stream.close()
         code = -1 if timed_out else proc.returncode
         return bytes(buffers["out"]), bytes(buffers["err"]), code, timed_out, overflow.is_set()
 
@@ -334,6 +380,12 @@ class SafeCommandRunner:
                 raise CommandDenied(f"argument {a!r} does not match allowed pattern")
         check_options(args, rule)
 
+        if rule.cwd is not None or rule.exact_args is not None:
+            # An exact command is only as fixed as the directory its relative arguments and
+            # the tool's own project files (lock file, package.json) are read from.
+            if cwd is not None:
+                raise CommandDenied("this rule fixes the working directory; cwd is not accepted")
+            cwd = rule.cwd
         # A relative cwd is anchored to the first root here; safe because Popen gets the
         # resolved workdir, not the raw string.
         base = os.path.realpath(self.cwd_roots[0])

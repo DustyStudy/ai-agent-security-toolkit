@@ -23,6 +23,18 @@ def _default_resolver(host: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------- paths
+def has_win32_trailing_dot_or_space(path: str) -> bool:
+    """True if a component of ``path`` ends in "." or " " (other than "." and "..").
+
+    Win32 strips those on create, but realpath keeps them for a component that does not exist
+    yet, so ``.mcp.json .`` and ``.claude.\\settings.json`` would get past a deny pattern and
+    then create the denied file. Pure string check, so it can be tested off Windows.
+    """
+    return any(
+        part.endswith((".", " ")) and part not in {".", ".."} for part in re.split(r"[\\/]", path)
+    )
+
+
 def path_within_roots(value: str, roots: Sequence[str]) -> tuple[bool, str]:
     """Resolve ``value`` (following symlinks) and require it to live under a root.
 
@@ -40,6 +52,8 @@ def path_within_roots(value: str, roots: Sequence[str]) -> tuple[bool, str]:
     # Windows: "file::$DATA" and "file:stream" open a stream of "file" under another name,
     # which no deny pattern written for the file name matches.
     if os.name == "nt" and ":" in os.path.splitdrive(value)[1]:
+        return False, value
+    if os.name == "nt" and has_win32_trailing_dot_or_space(value):
         return False, value
     resolved = os.path.realpath(value)
     for root in roots:
@@ -89,19 +103,19 @@ _HOSTNAME_CHARS = re.compile(r"[a-z0-9._-]+")
 def _ascii_host(host: str) -> str | None:
     """The host as a normalising fetcher would see it, or None if it is not a valid name.
 
-    URL libraries fold Unicode look-alikes (fullwidth digits, etc.) to ASCII via IDNA and
-    ignore a trailing dot, so a fullwidth "127.0.0.1" and ``https://127.0.0.1./`` both reach
-    loopback. Checking the raw string would let both through; check this form instead.
+    Fetchers ignore a trailing dot, so ``https://127.0.0.1./`` reaches loopback; check the
+    name without it. A non-ASCII host is refused: Python's IDNA 2003 codec maps "ß" to "ss"
+    where HTTP clients (IDNA 2008 / UTS 46) keep it, so "atlaßian.net" would be checked as
+    atlassian.net and fetched from another domain. Callers must pass punycode ("xn--...").
     """
     # Whitespace, control and format characters (zero-width, bidirectional overrides, line
     # separators) never belong in a hostname. Trimming them would judge a different host than
     # the fetcher connects to, so refuse instead.
     if any(ch.isspace() or unicodedata.category(ch) in {"Cc", "Cf", "Zl", "Zp"} for ch in host):
         return None
-    try:
-        ascii_form = host if host.isascii() else host.encode("idna").decode("ascii")
-    except UnicodeError:
+    if not host.isascii():
         return None
+    ascii_form = host
     # One trailing dot marks an absolute name and is ignored by fetchers. More than one leaves an
     # empty DNS label, which fetchers reject, so refuse it rather than guess what they would do.
     ascii_form = ascii_form.removesuffix(".").lower()

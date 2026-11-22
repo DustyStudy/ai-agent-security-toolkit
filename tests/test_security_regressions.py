@@ -1144,7 +1144,9 @@ def test_ipv6_literals_and_idna_hosts_still_parse():
     rule = ArgRule(type="url", schemes=["http", "https"], block_private=False)
     assert not check_url("http://[2606:4700::1111]/", rule)
     assert not check_url("http://[fe80::1%25eth0]/", rule)
-    assert not check_url("https://bücher.example/", rule)
+    # Unicode hosts are refused since IDNA 2003 and 2008 disagree; the punycode form parses.
+    assert check_url("https://bücher.example/", rule)
+    assert not check_url("https://xn--bcher-kva.example/", rule)
     assert not check_url("https://under_score.example/", rule)
 
 

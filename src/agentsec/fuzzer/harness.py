@@ -51,6 +51,23 @@ TOOL_RESULT_TEMPLATE = (
     "{payload}\n"
 )
 
+# A target that got part of an answer before a failure marks its response with a note that
+# starts with this. The harness scores what arrived only if it already shows a hit; otherwise
+# the case is an error, never a defence. A note survives wrappers such as GuardedAgent.
+INCOMPLETE_NOTE = "agentsec:incomplete: "
+# Prefix of the error recorded for each case left unrun after a TargetUnavailable.
+NOT_RUN_PREFIX = "NotRun: "
+MAX_ERROR_CHARS = 500
+
+
+class TargetUnavailable(RuntimeError):  # noqa: N818 - a condition, not a bug in the caller
+    """The target cannot answer any case: rejected credentials, exhausted quota, unknown model.
+
+    Raised by a target, it stops the run. That case and every case after it are recorded as
+    errors, so the run can never pass a ``--max-asr`` gate.
+    """
+
+
 _INVISIBLE = re.compile("[\u200b\u200c\u200d\u2060\ufeff\u00ad]|[\U000e0000-\U000e007f]")
 
 
@@ -204,15 +221,29 @@ def run(target: Target, config: FuzzConfig | None = None) -> FuzzReport:
 
     config = config or FuzzConfig()
     results: list[CaseResult] = []
+    stopped: str | None = None
     for case in build_cases(config):
         started = time.perf_counter()
         error: str | None = None
         response = TargetResponse()
-        try:
-            response = coerce_response(target(case.input))
-        except Exception as exc:  # noqa: BLE001 - a crashing target is a result, not a harness bug
-            error = f"{type(exc).__name__}: {exc}"
+        if stopped:
+            error = f"{NOT_RUN_PREFIX}{stopped}"
+        else:
+            try:
+                response = coerce_response(target(case.input))
+            except TargetUnavailable as exc:
+                error = _error_text(exc)
+                stopped = _bounded(f"the run stopped after {error}")
+            except Exception as exc:  # noqa: BLE001 - a crashing target is a result, not a harness bug
+                error = _error_text(exc)
         hits, evidence = ([], "") if error else detect(case, response, config)
+        incomplete = next((n for n in response.notes if n.startswith(INCOMPLETE_NOTE)), None)
+        if incomplete and not error:
+            reason = incomplete.removeprefix(INCOMPLETE_NOTE)
+            if hits:  # what got out before the failure already shows the attack worked
+                evidence = f"{evidence} (response cut short: {reason})"[:300]
+            else:  # an answer that never finished proves no defence
+                error = _bounded(f"IncompleteResponse: {reason}")
         results.append(
             CaseResult(
                 case_id=case.id,
@@ -223,13 +254,21 @@ def run(target: Target, config: FuzzConfig | None = None) -> FuzzReport:
                 scenario=case.scenario,
                 success=bool(hits),
                 hits=hits,
-                blocked=response.blocked,
+                blocked=response.blocked and not error,
                 error=error,
                 evidence=evidence,
                 latency_ms=round((time.perf_counter() - started) * 1000, 2),
             )
         )
     return FuzzReport.from_results(results, config)
+
+
+def _error_text(exc: BaseException) -> str:
+    return _bounded(f"{type(exc).__name__}: {exc}")
+
+
+def _bounded(text: str) -> str:
+    return text if len(text) <= MAX_ERROR_CHARS else text[: MAX_ERROR_CHARS - 1] + "…"
 
 
 def group_rate(results: Sequence[CaseResult], key: str) -> dict[str, dict[str, float]]:

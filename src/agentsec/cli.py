@@ -25,6 +25,7 @@ from agentsec.configscan import (
 from agentsec.fuzzer import CORPUS, MUTATORS, FuzzConfig, load_target, run
 from agentsec.fuzzer.formats import clean
 from agentsec.fuzzer.harness import DEFAULT_SCENARIOS, SCENARIOS, build_cases
+from agentsec.fuzzer.payloads import categories
 from agentsec.middleware.audit import VerifyResult, read_records, verify_file
 from agentsec.sandbox import Policy, PolicyError, ToolGuard
 from agentsec.threatmodel import (
@@ -50,6 +51,18 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
         categories=_csv(args.categories),
         max_cases=args.max_cases,
     )
+    # A misspelt name must not shrink the matrix silently: an unknown category selects nothing.
+    for kind, given, valid in (
+        ("scenario", config.scenarios, SCENARIOS),
+        ("mutator", config.mutators, MUTATORS),
+        ("category", config.categories, categories()),
+    ):
+        unknown = [name for name in given or [] if name not in valid]
+        if unknown:
+            print(
+                f"error: unknown {kind}(s): {unknown}; choose from {list(valid)}", file=sys.stderr
+            )
+            return 2
     if args.list:
         cases = build_cases(config)
         print(
@@ -86,6 +99,14 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
     if report.total and report.errors == report.total:
         # Zero successes out of zero scored cases would pass any --max-asr gate.
         print("FAIL: every case errored; nothing was evaluated", file=sys.stderr)
+        return 2
+    if args.max_asr is not None and (report.errors or not report.total):
+        # An unscored case could be a bypass, so ASR over the rest proves nothing.
+        print(
+            f"FAIL: --max-asr could not be evaluated fully: {report.errors} of {report.total} "
+            "case(s) errored",
+            file=sys.stderr,
+        )
         return 2
     if args.max_asr is not None and report.exceeds(args.max_asr):
         print(f"FAIL: ASR {report.asr:.1%} exceeds --max-asr {args.max_asr:.1%}", file=sys.stderr)
@@ -125,6 +146,10 @@ def cmd_audit(args: argparse.Namespace) -> int:
         result = verify_file(args.file)
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if result.ok and not result.records_checked and not args.allow_empty:
+        # A log truncated to nothing has no broken link to find.
+        print("FAIL: no records to verify; pass --allow-empty if expected", file=sys.stderr)
         return 2
     if result.ok:
         print(f"OK: {result.records_checked} record(s), chain intact")
@@ -553,6 +578,11 @@ def build_parser() -> argparse.ArgumentParser:
     a_sub = a.add_subparsers(dest="action", required=True)
     av = a_sub.add_parser("verify", help="Verify a hash-chained JSONL audit log.")
     av.add_argument("file")
+    av.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="exit 0 for a log with zero records (default: exit 2, as a truncated log has none)",
+    )
     asum = a_sub.add_parser(
         "summary",
         help="Count events, decisions and denials in an audit log (verifies the chain first).",

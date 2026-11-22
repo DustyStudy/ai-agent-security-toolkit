@@ -18,7 +18,12 @@ from agentsec.integrations.mcp import GuardedMCPClient
 from agentsec.middleware import AuditLogger, MemorySink
 from agentsec.middleware.audit import verify_records
 from agentsec.middleware.redact import redact_text
-from agentsec.middleware.validators import JsonSchemaValidator, OutputGuard, SecretLeakValidator
+from agentsec.middleware.validators import (
+    MAX_JSON_DEPTH,
+    JsonSchemaValidator,
+    OutputGuard,
+    SecretLeakValidator,
+)
 from agentsec.sandbox import Policy, Session, ToolDenied, ToolGuard
 from agentsec.sandbox.guard import Verdict
 from agentsec.types import ToolCall
@@ -203,6 +208,16 @@ def test_json_schema_validator_reports_deep_nesting_instead_of_raising():
     assert validator.check(deep)
     result = OutputGuard([validator]).process(deep)
     assert not result.allowed
+
+
+def test_json_schema_validator_depth_limit_does_not_depend_on_the_python_version():
+    # Python 3.14's json parses 100,000 levels that 3.13 refused with RecursionError; the
+    # explicit limit keeps the verdict the same on every supported version.
+    validator = JsonSchemaValidator({"type": "array"})
+    limit = MAX_JSON_DEPTH
+    assert validator.check("[" * limit + "]" * limit) == []
+    over = validator.check("[" * (limit + 1) + "]" * (limit + 1))
+    assert over and "nested too deeply" in over[0].message
 
 
 def test_json_schema_validator_reports_nesting_too_deep_for_the_schema_check():

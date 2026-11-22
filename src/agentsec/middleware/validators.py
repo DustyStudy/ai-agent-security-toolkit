@@ -443,6 +443,23 @@ def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return doc
 
 
+# Deeper documents are refused whatever the Python version: before 3.14 the json module
+# raised RecursionError on deep nesting, 3.14 parses it, and the consumer's parser may not.
+MAX_JSON_DEPTH = 256
+
+
+def _too_deep(doc: Any, limit: int = MAX_JSON_DEPTH) -> bool:
+    stack: list[tuple[Any, int]] = [(doc, 1)]
+    while stack:
+        value, depth = stack.pop()
+        if isinstance(value, dict | list):
+            if depth > limit:
+                return True
+            children = value.values() if isinstance(value, dict) else value
+            stack.extend((child, depth + 1) for child in children)
+    return False
+
+
 class JsonSchemaValidator:
     """For agents whose output feeds a parser: require valid JSON matching a schema."""
 
@@ -468,6 +485,10 @@ class JsonSchemaValidator:
         except RecursionError:
             # "[[[[...": deep nesting exhausts the stack. Report it; raising would crash the
             # caller's pipeline instead of withholding the output.
+            return [
+                Violation(self.name, "output is not valid JSON: nested too deeply", self.action)
+            ]
+        if _too_deep(doc):
             return [
                 Violation(self.name, "output is not valid JSON: nested too deeply", self.action)
             ]

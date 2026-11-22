@@ -97,7 +97,7 @@ agentsec fuzz --target guarded:ollama:llama3.1:8b --scenarios tool_result
 agentsec fuzz --target mypkg.agent:respond --scenarios direct,indirect,tool_result
 ```
 
-`--max-asr 0.05` makes the command exit `1` above 5%, so it can gate a release. Add `--categories tool_misuse,exfiltration,prompt_leak --max-asr 0` to gate specifically on containment.
+`--max-asr 0.05` makes the command exit `1` above 5%, so it can gate a release. It exits `2` instead when no case was scored or any case errored, because then the gate could not be evaluated. Add `--categories tool_misuse,exfiltration,prompt_leak --max-asr 0` to gate specifically on containment.
 
 **CI reports.** `--sarif report.sarif` writes SARIF 2.1.0 for GitHub code scanning and `--junit report.xml` writes JUnit XML for any CI test UI. Successful attacks become findings (`error` for tool misuse, exfiltration and prompt leak; `warning` for instruction-following), each tagged with its OWASP LLM Top 10 (2025) id. Fuzz findings have no source location, so pass `--sarif-artifact path/to/agent.py` (repo-relative) to say which file the alerts attach to.
 
@@ -187,16 +187,16 @@ It fails closed. A config file that does not parse is a finding, which includes 
 An instruction file that legitimately quotes an injection phrase (a security project's `CLAUDE.md`) is flagged by the heuristic scanner. After reading it, accept that one finding by its item id:
 
 ```bash
-agentsec scan-config --pins agent-pins.json --update-pins --accept CLAUDE.md
+agentsec scan-config --pins agent-pins.json --update-pins --accept CLAUDE.md --reason "quotes the phrase in a security guide; read in full"
 ```
 
-This records the entry's fingerprint under `accepted` in the pin file. The finding is then printed as `ACCEPTED` and no longer fails the run. The acceptance holds only while the entry is byte-for-byte what was reviewed: any change makes it `changed` and flagged again. It covers the whole entry at that fingerprint, not one phrase in it, so read the whole entry first. Only `injection` findings can be accepted. A plaintext secret, an unparsed or oversized file and an ambiguous id always block. There is no wildcard, and `--accept` on an id with no injection finding exits 2. Acceptances are read only from the pin file, so they are as trustworthy as the pins: whoever can write that file can accept a finding.
+`--accept` requires `--reason`. This records the entry's fingerprint, the reason and a UTC timestamp under `accepted` in the pin file. Pin files are version 2: a version-1 pin file is refused, so delete it and re-pin, recording a reason for each acceptance. The finding is then printed as `ACCEPTED` and no longer fails the run. The acceptance holds only while the entry is byte-for-byte what was reviewed: any change makes it `changed` and flagged again. It covers the whole entry at that fingerprint, not one phrase in it, so read the whole entry first. Only `injection` findings can be accepted. A plaintext secret, an unparsed or oversized file and an ambiguous id always block. There is no wildcard, and `--accept` on an id with no injection finding exits 2. Acceptances are read only from the pin file, so they are as trustworthy as the pins: whoever can write that file can accept a finding.
 
 Only `.git` is skipped, because an `AGENTS.md` inside `node_modules` steers an agent that works there. Make and check pins on a clean checkout, or installed packages that ship their own instruction files show up as new entries. Keep the pin file where the agent cannot write, and put it under `CODEOWNERS`. YAML is read only under an agent directory, and a YAML or TOML comment is not part of any pinned entry. It has been run on test fixtures and this repository, not against every agent's real config layout.
 
 ### Check CI workflows that run an agent
 
-An agent that triages issues or reviews pull requests in CI reads text anyone can write. If its job also holds secrets or a token with write access, an injected instruction can spend them. `agentsec scan-workflows` reads `.github/workflows` and reports each job where three things meet: a trigger an outsider controls in a run that can hold secrets (`issues`, `issue_comment`, `pull_request_target`, `workflow_run`, review and discussion events), a step that runs an agent (Claude Code, Codex, Gemini, Copilot, Aider, Cline, opencode, OpenHands or Cursor, by name in `uses:` or `run:`), and no `if:` that looks at who the author is. The finding lists the job's write permissions and the secrets the workflow references. Exit code 1 on a finding.
+An agent that triages issues or reviews pull requests in CI reads text anyone can write. If its job also holds secrets or a token with write access, an injected instruction can spend them. `agentsec scan-workflows` reads `.github/workflows` and reports each job where three things meet: a trigger an outsider controls in a run that can hold secrets (`issues`, `issue_comment`, `pull_request_target`, `workflow_run`, review and discussion events), a step that runs an agent (Claude Code, Codex, Gemini, Copilot, Aider, Cline, opencode, OpenHands or Cursor, by name in `uses:` or `run:`), and no `if:` that looks at who the author is. The finding lists the job's write permissions and the secrets the workflow references. Exit code 1 on a finding, and 2 when no workflow file is found, so a wrong path cannot pass.
 
 ```bash
 agentsec scan-workflows            # this repository

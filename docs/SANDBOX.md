@@ -86,7 +86,7 @@ Start from [`examples/claude-code.policy.yaml`](../examples/claude-code.policy.y
 | Denied (not in the policy, a bad argument, a limit, taint with `action: deny`) | Exit code 2: the call is blocked and the model is shown the reason. |
 | Needs approval (`require_approval`, or taint with `action: approve`) | Answers `ask`, so the human decides in Claude Code's permission prompt, with the reason. With `--block-approvals`: exit code 2, as for a denial. |
 
-- **Register it on every tool, failing closed.** The registration above is the hardened one. A matcher narrower than `"*"` (`"Bash"`), or an `if` filter on the handler, means the hook never sees the other tools: `Read`, `WebFetch` and every MCP tool then run with no policy and no taint. Without `"onFailure": "block"` (Claude Code 2.1.295 or later) a hook that times out or crashes lets the call run. `agentsec scan-config` reports the first as `unguarded` and the second as `failopen`, on the settings file that registers the hook. It recognises a handler whose own command line is `agentsec hook`, not a wrapper script that runs it, and it does not know about hooks turned off elsewhere (`disableAllHooks`).
+- **Register it on every tool, failing closed.** The registration above is the hardened one. A matcher narrower than `"*"` (`"Bash"`), or an `if` filter on the handler, means the hook never sees the other tools: `Read`, `WebFetch` and every MCP tool then run with no policy and no taint. Without `"onFailure": "block"` (Claude Code 2.1.295 or later) a hook that times out or crashes lets the call run. `agentsec scan-config` reports the first as `unguarded` and the second as `failopen`, on the settings file that registers the hook. It recognises a handler whose own command line is `agentsec hook`, not a wrapper script that runs it, and a `"disableAllHooks": true` in the same settings file is reported as `unguarded`. A hook switched off in another file is not seen.
 - **`--block-approvals`: when `ask` is not enough.** Add it to the hook command when nobody can answer a prompt (CI, `claude -p`), or when a `permissions.deny` rule must hold on a Claude Code version you have not checked. It was reported (anthropics/claude-code issue 39344) that a hook answering `ask` made Claude Code skip a matching `permissions.deny` rule. The hooks documentation now says deny and ask rules "are still evaluated regardless of what the hook returns"; we have not tested either claim against a build. With the flag a call that needs approval is blocked and not counted, so the only way through is to change the policy.
 
 - **What taints is the policy's choice.** The example marks web fetches, web searches, MCP tools and the shell `returns_untrusted`, and not `Read`: an agent reads files first thing, so every session would be tainted. A planted file in a repository you did not write is therefore not covered until you set `returns_untrusted: true` on `Read`. The shell is marked because its output can carry third-party text (`curl`, `gh`, `git log`); the cost is that after the first shell command every later shell command, file write and fetch asks. `Edit` and `Write` are `side_effects`, and files that steer the agent or run code (`CLAUDE.md`, `AGENTS.md`, `.mcp.json`, `.claude/`, `.vscode/`, `.husky/`, `.github/workflows/`, `.git/`) are denied outright, since a planted one acts in a later, untainted session.
@@ -124,7 +124,9 @@ Every argument that starts with `-` must then be a listed flag, exactly or as `-
 from agentsec.sandbox import SafeCommandRunner, locked_install_rules
 
 runner = SafeCommandRunner(
-    locked_install_rules(["pip", "uv"], requirements="requirements/requirements-runtime.txt"),
+    locked_install_rules(
+        ["pip", "uv"], requirements="requirements/requirements-runtime.txt", cwd="/srv/repo"
+    ),
     cwd_roots=["/srv/repo"],
     inherit_env=["PATH"],
 )

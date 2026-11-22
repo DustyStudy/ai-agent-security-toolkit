@@ -86,11 +86,28 @@ async def _arun(
         return _failure(exc)
 
 
+def _dict_entries(
+    guard: ToolGuard, session: Session, entries: list[dict[str, Any]]
+) -> Iterator[dict[str, Any]]:
+    """Yield the well-formed entries; audit each non-dict one as a denial and drop it."""
+    for entry in entries:
+        if isinstance(entry, dict):
+            yield entry
+        else:
+            # .get() would raise and crash the agent loop. "" is never a policy tool, so the
+            # guard denies and audits the malformed entry (default deny returns before any
+            # blocking check, so the sync call is safe on the async path too). It has no id,
+            # and a result with an empty call id would be rejected, so none is made.
+            guard.authorize(ToolCall(name="", arguments={}, id=""), session)
+
+
 # ------------------------------------------------------------------------ Anthropic
 
 
-def _anthropic_calls(content_blocks: list[dict[str, Any]]) -> Iterator[ToolCall]:
-    for block in content_blocks:
+def _anthropic_calls(
+    guard: ToolGuard, session: Session, content_blocks: list[dict[str, Any]]
+) -> Iterator[ToolCall]:
+    for block in _dict_entries(guard, session, content_blocks):
         if block.get("type") != "tool_use":
             continue
         raw_input: Any = block.get("input")
@@ -120,7 +137,7 @@ def run_anthropic_tool_uses(
     """Turn ``tool_use`` content blocks into ``tool_result`` blocks for the next user turn."""
     return [
         _anthropic_result(call, *_run(guard, session, registry, call))
-        for call in _anthropic_calls(content_blocks)
+        for call in _anthropic_calls(guard, session, content_blocks)
     ]
 
 
@@ -132,7 +149,7 @@ async def arun_anthropic_tool_uses(
 ) -> list[dict[str, Any]]:
     """Async :func:`run_anthropic_tool_uses`. Registry functions may be sync or ``async def``."""
     results: list[dict[str, Any]] = []
-    for call in _anthropic_calls(content_blocks):
+    for call in _anthropic_calls(guard, session, content_blocks):
         results.append(_anthropic_result(call, *await _arun(guard, session, registry, call)))
     return results
 
@@ -142,6 +159,8 @@ async def arun_anthropic_tool_uses(
 
 def parse_openai_tool_call(tc: dict[str, Any]) -> tuple[ToolCall, str | None]:
     """Parse one ``tool_calls`` entry. The second item is a refusal message, or ``None``."""
+    if not isinstance(tc, dict):
+        tc = {}  # direct callers only (run_* drop these first): no name, so the guard denies
     fn = tc.get("function")
     if not isinstance(fn, dict):
         fn = {}
@@ -149,7 +168,9 @@ def parse_openai_tool_call(tc: dict[str, Any]) -> tuple[ToolCall, str | None]:
     refusal = None
     try:
         args: Any = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):  # TypeError: arguments was not a string
+    # TypeError: arguments was not a string. ValueError: invalid JSON (JSONDecodeError) or an
+    # integer past the digit limit. RecursionError: deep nesting. All are model-supplied.
+    except (ValueError, TypeError, RecursionError):
         args = raw
         refusal = "Tool call refused: arguments were not valid JSON"
     if refusal is None and not isinstance(args, dict):
@@ -172,7 +193,7 @@ def run_openai_tool_calls(
 ) -> list[dict[str, Any]]:
     """Turn chat-completions ``tool_calls`` into ``role: tool`` messages."""
     messages: list[dict[str, Any]] = []
-    for tc in tool_calls:
+    for tc in _dict_entries(guard, session, tool_calls):
         call, refusal = parse_openai_tool_call(tc)
         if refusal is not None:
             guard.authorize(call, session)  # denied; called so the attempt is audited
@@ -191,7 +212,7 @@ async def arun_openai_tool_calls(
 ) -> list[dict[str, Any]]:
     """Async :func:`run_openai_tool_calls`. Registry functions may be sync or ``async def``."""
     messages: list[dict[str, Any]] = []
-    for tc in tool_calls:
+    for tc in _dict_entries(guard, session, tool_calls):
         call, refusal = parse_openai_tool_call(tc)
         if refusal is not None:
             await guard.aauthorize(call, session)  # denied; called so the attempt is audited

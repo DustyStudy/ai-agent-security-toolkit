@@ -9,6 +9,7 @@ from agentsec.middleware import AgentMiddleware, AuditLogger, MemorySink
 from agentsec.middleware.validators import Action, OutputGuard, ProtectedStringValidator
 from agentsec.sandbox import Policy, Session, ToolGuard
 from agentsec.sandbox.adapters import (
+    arun_anthropic_tool_uses,
     arun_openai_tool_calls,
     parse_openai_tool_call,
     run_anthropic_tool_uses,
@@ -101,11 +102,18 @@ def test_openai_non_dict_entries_are_denied_and_audited():
     assert verdicts == ["deny"] * 6
 
 
-def test_anthropic_non_dict_blocks_are_denied_and_audited():
+def test_anthropic_non_dict_blocks_are_audited_denials_with_no_tool_result():
     sink = MemorySink()
+    guard, session = _guard(sink), Session()
     blocks = ["not a dict", {"type": "text", "text": "hi"}, None]
-    results = run_anthropic_tool_uses(_guard(sink), Session(), blocks, {})  # type: ignore[arg-type]
-    assert len(results) == 2
-    assert all(r["is_error"] and r["content"].startswith("Tool call refused") for r in results)
+    # No tool_result: one with an empty tool_use_id would be rejected on the next turn.
+    assert run_anthropic_tool_uses(guard, session, blocks, {}) == []  # type: ignore[arg-type]
+    assert asyncio.run(arun_anthropic_tool_uses(guard, session, blocks, {})) == []  # type: ignore[arg-type]
     verdicts = [r["data"]["verdict"] for r in sink.records if r["event"] == "tool_decision"]
-    assert verdicts == ["deny", "deny"]
+    assert verdicts == ["deny"] * 4
+
+
+def test_anthropic_real_tool_use_next_to_a_non_dict_block_still_runs():
+    blocks = [None, {"type": "tool_use", "id": "t1", "name": "fetch", "input": {}}]
+    results = run_anthropic_tool_uses(_guard(), Session(), blocks, {"fetch": lambda: "page"})  # type: ignore[arg-type]
+    assert results == [{"type": "tool_result", "tool_use_id": "t1", "content": "page"}]

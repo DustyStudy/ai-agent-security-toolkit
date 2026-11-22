@@ -89,12 +89,16 @@ async def _arun(
 # ------------------------------------------------------------------------ Anthropic
 
 
-def _anthropic_calls(content_blocks: list[dict[str, Any]]) -> Iterator[ToolCall]:
+def _anthropic_calls(
+    guard: ToolGuard, session: Session, content_blocks: list[dict[str, Any]]
+) -> Iterator[ToolCall]:
     for block in content_blocks:
         if not isinstance(block, dict):
             # .get() would raise and crash the agent loop. "" is never a policy tool, so the
-            # guard denies and audits the malformed entry.
-            yield ToolCall(name="", arguments={}, id="")
+            # guard denies and audits the malformed entry (default deny returns before any
+            # blocking check, so the sync call is safe on the async path too). It has no id,
+            # and a tool_result with an empty tool_use_id would be rejected, so none is made.
+            guard.authorize(ToolCall(name="", arguments={}, id=""), session)
             continue
         if block.get("type") != "tool_use":
             continue
@@ -125,7 +129,7 @@ def run_anthropic_tool_uses(
     """Turn ``tool_use`` content blocks into ``tool_result`` blocks for the next user turn."""
     return [
         _anthropic_result(call, *_run(guard, session, registry, call))
-        for call in _anthropic_calls(content_blocks)
+        for call in _anthropic_calls(guard, session, content_blocks)
     ]
 
 
@@ -137,7 +141,7 @@ async def arun_anthropic_tool_uses(
 ) -> list[dict[str, Any]]:
     """Async :func:`run_anthropic_tool_uses`. Registry functions may be sync or ``async def``."""
     results: list[dict[str, Any]] = []
-    for call in _anthropic_calls(content_blocks):
+    for call in _anthropic_calls(guard, session, content_blocks):
         results.append(_anthropic_result(call, *await _arun(guard, session, registry, call)))
     return results
 

@@ -48,10 +48,14 @@ def test_malformed_exact_args_is_refused_at_construction(tmp_path, bad):
         runner_for(ExecRule(executable="x", exact_args=bad), tmp_path)
 
 
-def test_preset_commands():
-    rules = locked_install_rules(["pip", "uv", "npm", "pnpm"], requirements="reqs/lock.txt")
+def test_preset_commands(tmp_path):
+    rules = locked_install_rules(
+        ["pip", "uv", "npm", "pnpm"], requirements="reqs/lock.txt", cwd=str(tmp_path)
+    )
+    # The requirements path is absolute, so it does not depend on the directory of the run.
+    lock = str(tmp_path / "reqs" / "lock.txt")
     assert {alias: (r.executable, r.exact_args) for alias, r in rules.items()} == {
-        "pip-install": ("pip", [["install", "--require-hashes", "-r", "reqs/lock.txt"]]),
+        "pip-install": ("pip", [["install", "--require-hashes", "-r", lock]]),
         "uv-install": ("uv", [["sync", "--locked"]]),
         "npm-install": ("npm", [["ci", "--ignore-scripts"]]),
         "pnpm-install": ("pnpm", [["install", "--frozen-lockfile", "--ignore-scripts"]]),
@@ -76,14 +80,14 @@ def test_preset_commands():
     ],
 )
 def test_pip_preset_refuses_everything_but_the_locked_install(tmp_path, args):
-    runner = runner_for(locked_install_rules()["pip-install"], tmp_path)
+    runner = runner_for(locked_install_rules(cwd=str(tmp_path))["pip-install"], tmp_path)
     with pytest.raises(CommandDenied):
         runner.run("cmd", args)
 
 
 def test_pip_preset_passes_the_locked_install_through(tmp_path):
-    runner = runner_for(locked_install_rules()["pip-install"], tmp_path)
-    expected = ["install", "--require-hashes", "-r", "requirements.txt"]
+    runner = runner_for(locked_install_rules(cwd=str(tmp_path))["pip-install"], tmp_path)
+    expected = ["install", "--require-hashes", "-r", str(tmp_path / "requirements.txt")]
     # The stand-in interpreter cannot run "install"; what matters is that it was not denied
     # and that the exact command line was handed to the program.
     assert runner.run("cmd").argv[1:] == expected

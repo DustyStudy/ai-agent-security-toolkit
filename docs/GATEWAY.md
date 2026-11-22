@@ -177,10 +177,10 @@ Limits:
 | Failure | Result |
 |---|---|
 | Audit log cannot be written | 503; nothing is forwarded |
-| Upstream down, bad status or non-JSON | 502 |
-| Upstream timeout (a total deadline of about `upstream_timeout_s`, at most twice it) | 504 |
+| Upstream down, bad status, non-JSON, a broken HTTP response or an invalid upstream API key | 502; the audit names only the cause type |
+| Upstream timeout: connect, headers or body, a total deadline of `upstream_timeout_s` | 504 |
 | Request body not received within `body_timeout_s` | 408 |
-| Upstream answer malformed | 502 |
+| Upstream answer malformed, or an error event inside a stream | 502 before any text is released; after that, the stream ends with an error event and no `[DONE]`, and the delivered text is audited and checked (`gateway_output_violation_after_delivery` with `interrupted: true` if it broke a rule) |
 | Any other error | 500 with no detail |
 | Body too large | 413 |
 | No group policy matches the user | 403 |

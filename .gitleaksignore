@@ -16,3 +16,4 @@ f8751d35f3bb82a02809fca83d6bf1f83739befa:tests/test_gateway_serve.py:generic-api
 9c546405320f04345c00b38569285335f0c22721:tests/test_audit_redaction_hardening.py:curl-auth-user:128
 9c546405320f04345c00b38569285335f0c22721:tests/test_audit_redaction_hardening.py:curl-auth-header:139
 9c546405320f04345c00b38569285335f0c22721:tests/test_audit_redaction_hardening.py:curl-auth-header:140
+# Synthetic credentials in the audit-redaction test fixtures, and a comment in redact.py (squash of #128, 9c546405320f04345c00b38569285335f0c22721). Reviewed: not secrets.

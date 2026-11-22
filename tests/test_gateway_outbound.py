@@ -98,7 +98,9 @@ def test_attachments_are_refused_when_the_policy_is_on(tmp_path, mode, part):
     app, up, sink = app_for(tmp_path, mode)
     body = {"model": "local", "messages": [{"role": "user", "content": [part]}]}
     assert call(app, body=body)[0] == 400 and up.requests == []
-    assert "gateway_outbound_blocked" in [r["event"] for r in sink.records]
+    # Only text and images get as far as the outbound policy; other parts are refused at parsing.
+    refusal = "gateway_outbound_blocked" if part["type"] == "image_url" else "gateway_rejected"
+    assert refusal in [r["event"] for r in sink.records]
 
 
 def test_off_is_the_default_and_changes_nothing(tmp_path):

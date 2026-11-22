@@ -18,9 +18,11 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +32,7 @@ from agentsec.integrations.mcp import _strings
 from agentsec.middleware.injection import InjectionScanner
 from agentsec.middleware.redact import find_sensitive, redact_text
 
-PIN_FILE_VERSION = 1
+PIN_FILE_VERSION = 2
 # A file or entry longer than this is reported instead of trusted: padding could push an
 # injection or a secret past the prefix the scanners read.
 MAX_SCANNED_CHARS = 200_000
@@ -40,6 +42,8 @@ AGENT_DIRS = frozenset(
     {
         ".agents",
         ".amazonq",
+        ".amp",
+        ".augment",
         ".claude",
         ".claude-plugin",
         ".clinerules",
@@ -47,15 +51,21 @@ AGENT_DIRS = frozenset(
         ".continue",
         ".cursor",
         ".gemini",
+        ".junie",
+        ".kilocode",
         ".kiro",
         ".opencode",
+        ".qwen",
         ".roo",
+        ".trae",
         ".windsurf",
+        ".zed",
     }
 )
 # Names are compared casefolded: on Windows and macOS an agent opens agents.md as AGENTS.md.
 _INSTRUCTION_NAMES = frozenset(
     {
+        "agent.md",
         "agents.md",
         "agents.override.md",
         "claude.md",
@@ -65,11 +75,16 @@ _INSTRUCTION_NAMES = frozenset(
         ".cursorrules",
         ".windsurfrules",
         ".clinerules",
+        # Roo's custom modes are prompt text in YAML or JSON: scanned whole, like instructions.
+        ".roomodes",
         "copilot-instructions.md",
     }
 )
 _INSTRUCTION_SUFFIXES = (".instructions.md", ".prompt.md", ".chatmode.md", ".agent.md")
-_CONFIG_ANYWHERE = frozenset({".mcp.json", ".claude.json", "opencode.json"})
+_CONFIG_ANYWHERE = frozenset({".mcp.json", ".claude.json", "opencode.json", ".aider.conf.yml"})
+# settings.json can point the agent at other instruction files and auto-approve its tools;
+# tasks.json can run a command when the folder opens.
+_CONFIG_IN_VSCODE = frozenset({"mcp.json", "settings.json", "tasks.json"})
 _CONFIG_IN_AGENT_DIR = frozenset(
     {
         "mcp.json",
@@ -100,6 +115,9 @@ _EXPANDED = {
 # shortcut: only a handler whose own command line names `agentsec hook` is recognised, not a
 # wrapper script that runs it. Upgrade if wrappers turn out to be how people register it.
 _AGENTSEC_HOOK = re.compile(r"agentsec\S*\s+hook\b")
+# After the invocation, anything that lets a later command decide the exit status. Quoted
+# arguments are not parsed, so a ";" inside one is flagged too.
+_AFTER_HOOK = re.compile(r"[;&|\n]|\bexit\b")
 # Claude Code runs a hook group on every tool when its matcher is omitted, "" or "*".
 _MATCH_ALL = ("", "*", ".*")
 
@@ -156,7 +174,8 @@ def _sha256(data: bytes) -> str:
 
 def _classify(parts: tuple[str, ...]) -> str | None:
     name = parts[-1].casefold()
-    in_agent_dir = bool({p.casefold() for p in parts[:-1]} & AGENT_DIRS)
+    above = [p.casefold() for p in parts[:-1]]
+    in_agent_dir = not AGENT_DIRS.isdisjoint(above)
     if (
         name in _INSTRUCTION_NAMES
         or name.endswith(_INSTRUCTION_SUFFIXES)
@@ -169,8 +188,11 @@ def _classify(parts: tuple[str, ...]) -> str | None:
     if (
         name in _CONFIG_ANYWHERE
         or (in_agent_dir and name in _CONFIG_IN_AGENT_DIR)
-        or (name == "mcp.json" and len(parts) > 1 and parts[-2].casefold() == ".vscode")
+        or (name in _CONFIG_IN_VSCODE and above[-1:] == [".vscode"])
+        or (name.endswith(".json") and above[-2:] == [".github", "hooks"])
         or (in_agent_dir and name.endswith(_YAML_SUFFIXES))
+        # A custom command (.gemini/commands/x.toml) is a prompt the agent runs by name.
+        or (in_agent_dir and name.endswith(".toml") and "commands" in above)
     ):
         return "config"
     # Everything else under an agent directory is pinned whole: a hook script, an image.
@@ -282,13 +304,14 @@ def _entries(rel: str, data: Any) -> list[tuple[str, str, Any]]:
 def _check_agentsec_hook(scan: ConfigScan, rel: str, data: Any) -> None:
     """Flag an ``agentsec hook`` registration, in Claude Code's settings format, that leaves
     tool calls ungated: a matcher or ``if`` filter narrower than every tool, or no
-    ``"onFailure": "block"``, without which a hook that times out or crashes lets the call run.
+    ``"onFailure": "block"``, without which a hook that times out or crashes lets the call run,
+    or a command line that goes on after the hook, or ``"disableAllHooks": true`` beside it.
     A file that does not register the hook has nothing to check: it may be registered elsewhere.
     """
     hooks = data.get("hooks") if isinstance(data, Mapping) else None
     groups = hooks.get("PreToolUse") if isinstance(hooks, Mapping) else None
     narrow: list[str] = []
-    covered = failopen = False
+    covered = failopen = chained = registered = False
     for group in groups if isinstance(groups, list) else []:
         handlers = group.get("hooks") if isinstance(group, Mapping) else None
         for handler in handlers if isinstance(handlers, list) else []:
@@ -296,7 +319,13 @@ def _check_agentsec_hook(scan: ConfigScan, rel: str, data: Any) -> None:
                 continue
             args = handler.get("args")
             parts = [handler.get("command", ""), *(args if isinstance(args, list) else [])]
-            if not _AGENTSEC_HOOK.search(" ".join(map(str, parts))):
+            found = _AGENTSEC_HOOK.search(line := " ".join(map(str, parts)))
+            if not found:
+                continue
+            registered = True
+            if _AFTER_HOOK.search(line, found.end()):
+                # `agentsec hook ... || true` turns the blocking exit status 2 into 0.
+                chained = True
                 continue
             matcher = group.get("matcher", "")
             if matcher in _MATCH_ALL and "if" not in handler:
@@ -310,8 +339,15 @@ def _check_agentsec_hook(scan: ConfigScan, rel: str, data: Any) -> None:
     if narrow and not covered:
         detail = f'agentsec hook does not see every tool ({"; ".join(narrow)}): use matcher "*"'
         scan.findings.append(ConfigFinding(item, "unguarded", detail))
+    if registered and data.get("disableAllHooks") is True:
+        detail = 'agentsec hook is registered but "disableAllHooks" is true: it never runs'
+        scan.findings.append(ConfigFinding(item, "unguarded", detail))
     if failopen:
         detail = 'agentsec hook lacks "onFailure": "block": a timeout or crash lets the call run'
+        scan.findings.append(ConfigFinding(item, "failopen", detail))
+    if chained:
+        detail = "agentsec hook is followed by another command (||, ;, &&, |, exit): its "
+        detail += "blocking exit status can be replaced"
         scan.findings.append(ConfigFinding(item, "failopen", detail))
 
 
@@ -337,24 +373,48 @@ def _scan_file(
     scan: ConfigScan, path: Path, rel: str, kind: str, scanner: InjectionScanner
 ) -> None:
     try:
-        if path.stat().st_size > MAX_FILE_BYTES:
-            scan.findings.append(ConfigFinding(rel, "oversized", f"over {MAX_FILE_BYTES} bytes"))
-            return
-        raw = path.read_bytes()
+        # Opened once and checked on the descriptor, so the file cannot be swapped between the
+        # check and the read. O_NONBLOCK: opening a FIFO would otherwise wait for a writer.
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(path, flags), "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                # A device or FIFO has no size: a link to /dev/zero would be read forever.
+                scan.findings.append(ConfigFinding(rel, "unparsed", "not a regular file"))
+                return
+            raw = handle.read(MAX_FILE_BYTES + 1)
     except OSError as exc:
         scan.findings.append(ConfigFinding(rel, "unparsed", f"cannot read: {type(exc).__name__}"))
+        return
+    if len(raw) > MAX_FILE_BYTES:
+        scan.findings.append(ConfigFinding(rel, "oversized", f"over {MAX_FILE_BYTES} bytes"))
         return
     # Newlines are normalised so a pin made on Linux matches a Windows checkout. Files are
     # fingerprinted as bytes: two invalid UTF-8 sequences decode to the same replacement.
     whole = _sha256(raw.replace(b"\r\n", b"\n"))
+    try:
+        decoded: str | None = raw.decode("utf-8-sig").replace("\r\n", "\n")
+    except UnicodeDecodeError:
+        decoded = None
+    if decoded is not None and "\0" in decoded:
+        # ASCII in UTF-16 without a byte order mark is valid UTF-8 with a NUL between letters.
+        decoded = None
     if kind == "file":
         scan._add(ConfigItem(rel, kind, whole, f"{len(raw)} bytes"))
+        if decoded is not None:
+            # A hook script or a command file is text the agent reads or runs. What does not
+            # decode (an image) is pinned only.
+            _scan_text(scan, rel, decoded, scanner)
+        return
+    if kind == "instructions":
+        if decoded is None:
+            # Decoded with replacement, a UTF-16 file is noise to the scanners and still
+            # instructions to an agent that detects the encoding.
+            scan.findings.append(ConfigFinding(rel, "unparsed", "not valid: not UTF-8 text"))
+            return
+        scan._add(ConfigItem(rel, kind, whole, show(decoded.strip().partition("\n")[0])))
+        _scan_text(scan, rel, decoded, scanner)
         return
     text = raw.decode("utf-8-sig", errors="replace").replace("\r\n", "\n")
-    if kind == "instructions":
-        scan._add(ConfigItem(rel, kind, whole, show(text.strip().partition("\n")[0])))
-        _scan_text(scan, rel, text, scanner)
-        return
     # The raw text is checked for size and for secrets the parsed entries do not hold, such as
     # one in a TOML comment.
     _scan_text(scan, rel, text, scanner, injection=False)
@@ -471,12 +531,39 @@ def check_pins(scan: ConfigScan, pins: Mapping[str, str]) -> list[ConfigFinding]
     return findings
 
 
+def acceptance(fingerprint: str, reason: str) -> dict[str, str]:
+    """The record of one accepted ``injection`` finding. ``reason`` is what the reviewer saw
+    that makes it a false positive: an acceptance nobody can explain later is not reviewable."""
+    if not reason.strip():
+        raise ValueError("an acceptance needs a reason")
+    return {
+        "fingerprint": fingerprint,
+        "reason": reason.strip(),
+        "accepted_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+
+
+def _check_accepted(accepted: Any) -> None:
+    fields = {"fingerprint", "reason", "accepted_at"}
+    if not isinstance(accepted, dict) or not all(
+        isinstance(k, str)
+        and isinstance(v, dict)
+        and v.keys() == fields
+        and all(isinstance(x, str) and x.strip() for x in v.values())
+        for k, v in accepted.items()
+    ):
+        raise ValueError(
+            'config pin file "accepted" must map item ids to a fingerprint, a reason and '
+            "accepted_at, all non-empty strings"
+        )
+
+
 def split_accepted(
-    scan: ConfigScan, accepted: Mapping[str, str]
+    scan: ConfigScan, accepted: Mapping[str, Mapping[str, str]]
 ) -> tuple[list[ConfigFinding], list[ConfigFinding]]:
     """The scan's findings as (blocking, accepted).
 
-    ``accepted`` maps an item id to the fingerprint at which a human accepted its ``injection``
+    ``accepted`` maps an item id to the :func:`acceptance` a human gave its ``injection``
     finding as a false positive. It waives that kind only, and only while the entry still has
     that fingerprint: a plaintext secret should be removed, and the other kinds mean the entry
     was not fully read. Take ``accepted`` from the reviewed pin file, never from the scanned tree.
@@ -485,41 +572,59 @@ def split_accepted(
     waived: list[ConfigFinding] = []
     for f in scan.findings:
         item = scan.items.get(f.item)
-        ok = f.kind == "injection" and item is not None and accepted.get(f.item) == item.fingerprint
+        record = accepted.get(f.item)
+        ok = (
+            f.kind == "injection"
+            and item is not None
+            and record is not None
+            and record.get("fingerprint") == item.fingerprint
+        )
         (waived if ok else blocking).append(f)
     return blocking, waived
 
 
 def save_pins(
-    path: str | Path, pins: Mapping[str, str], accepted: Mapping[str, str] | None = None
+    path: str | Path,
+    pins: Mapping[str, str],
+    accepted: Mapping[str, Mapping[str, str]] | None = None,
 ) -> None:
     payload: dict[str, Any] = {"version": PIN_FILE_VERSION, "items": dict(pins)}
     if accepted:
-        payload["accepted"] = dict(accepted)
+        payload["accepted"] = {k: dict(v) for k, v in accepted.items()}
+        _check_accepted(payload["accepted"])  # nothing is stored without a reason
     Path(path).write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
     )
 
 
-def _load(path: str | Path, key: str) -> dict[str, str]:
+def _load(path: str | Path, key: str) -> dict[str, Any]:
     raw = json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=_no_duplicates)
+    if isinstance(raw, dict) and raw.get("version") == 1:
+        # Version 1 kept an acceptance as a bare fingerprint: nothing says who waived the
+        # finding or why, so it is not carried over.
+        raise ValueError(
+            "config pin file is version 1, which records no reason for accepted findings: "
+            "review the entries, delete the file and write it again with --update-pins, "
+            "re-accepting each false positive with --accept ITEM_ID --reason TEXT"
+        )
     if not isinstance(raw, dict) or raw.get("version") != PIN_FILE_VERSION:
         raise ValueError(f"unsupported config pin file (expected version {PIN_FILE_VERSION})")
-    # "accepted" is optional so a pin file written before it existed still loads. When present
-    # it is validated on every load: a malformed acceptance is never silently ignored.
-    for name in ("items", "accepted"):
-        section = raw.get(name, {} if name == "accepted" else None)
-        if not isinstance(section, dict) or not all(
-            isinstance(k, str) and isinstance(v, str) for k, v in section.items()
-        ):
-            raise ValueError(f'config pin file "{name}" must map item ids to fingerprint strings')
-    return raw.get(key, {})
+    items = raw.get("items")
+    if not isinstance(items, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in items.items()
+    ):
+        raise ValueError('config pin file "items" must map item ids to fingerprint strings')
+    # "accepted" is optional. When present it is validated on every load: a malformed
+    # acceptance is never silently ignored.
+    _check_accepted(raw.get("accepted", {}))
+    section: dict[str, Any] = raw.get(key, {})
+    return section
 
 
 def load_pins(path: str | Path) -> dict[str, str]:
     return _load(path, "items")
 
 
-def load_accepted(path: str | Path) -> dict[str, str]:
-    """Accepted injection false positives from a pin file: item id to fingerprint."""
+def load_accepted(path: str | Path) -> dict[str, dict[str, str]]:
+    """Accepted injection false positives from a pin file: item id to :func:`acceptance`."""
     return _load(path, "accepted")

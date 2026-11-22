@@ -24,9 +24,20 @@ ROOT = Path(__file__).resolve().parents[1]
 REQ = "requirements/requirements-"
 
 # lock name -> uv inputs (files and extras) that make up that lock
+# Locks CI follows with `pip install --no-build-isolation -e .` also carry build.in. "runtime"
+# does not (the release SBOM is generated from it); its CI job installs the "build" lock too.
 LOCKS: dict[str, list[str]] = {
     "runtime": ["pyproject.toml"],
-    "dev": ["pyproject.toml", "--extra", "dev", "--extra", "gateway", "--extra", "mcp"],
+    "dev": [
+        "pyproject.toml",
+        "--extra",
+        "dev",
+        "--extra",
+        "gateway",
+        "--extra",
+        "mcp",
+        f"{REQ}build.in",
+    ],
     # What the container image installs: the gateway and its MCP endpoint, no dev tools.
     "gateway": ["pyproject.toml", "--extra", "gateway", "--extra", "mcp"],
     "integrations": [
@@ -40,8 +51,10 @@ LOCKS: dict[str, list[str]] = {
         "--extra",
         "gateway",
         f"{REQ}langgraph.in",
+        f"{REQ}build.in",
     ],  # fmt: skip
-    "fuzz": ["pyproject.toml", f"{REQ}fuzz.in"],
+    "fuzz": ["pyproject.toml", f"{REQ}fuzz.in", f"{REQ}build.in"],
+    "build": [f"{REQ}build.in"],
     "release-tools": [f"{REQ}release-tools.in"],
     "lock-tools": [f"{REQ}lock-tools.in"],
 }

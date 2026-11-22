@@ -57,7 +57,10 @@ _PW_KEY = (
 # sit right before the separator, so max_tokens: 1024 or secretary=x do not match.
 _CREDENTIAL_FIELD = (
     r"(?i)(?<![a-z])(?:api[_-]?key|client[_-]?secret|secret|(?:access|auth|refresh)?[_-]?token"
-    r"|account[_-]?key|shared[_-]?access[_-]?key|sig)[\"']?\s*[=:]\s*"  # sig=: Azure SAS
+    r"|account[_-]?key|shared[_-]?access[_-]?key|sig"  # sig=: Azure SAS
+    # SECRET_KEY (Django), private_key, signing_key, aws_secret_access_key, access_key ...
+    r"|(?:private|secret|signing|encryption|master|(?:secret[_-]?)?access)[_-]?key"
+    r")[\"']?\s*[=:]\s*"
 )
 
 # Command lines give the secret after a space, with no "=" or ":" for the rules above to key
@@ -172,6 +175,18 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(
         "authorization_header",
         "secret",
+        # A known scheme marks what follows as the credential, however short it is:
+        # "Authorization: Bearer abc.def" was left whole by the 12-character rule below.
+        re.compile(
+            r"(?i)\b(?:proxy-)?authorization[\"']?\s*[=:]\s*[\"']?"
+            r"(?:bearer|token|apikey|api-key|key|dpop|digest|hmac|negotiate|ntlm|sso-key)\s+"
+            r"(?!\[REDACTED:)([A-Za-z0-9._~+/=:-]+)"
+        ),
+        group=1,
+    ),
+    _Rule(
+        "authorization_header",
+        "secret",
         # Any other scheme ("Token", "ApiKey", custom) and a bare credential with no scheme.
         re.compile(
             r"(?i)\bauthorization[\"']?\s*[=:]\s*[\"']?(?:[a-z][a-z0-9-]*\s+)?"
@@ -185,8 +200,20 @@ _RULES: tuple[_Rule, ...] = (
     _Rule("npm_token", "secret", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b")),
     _Rule("huggingface_token", "secret", re.compile(r"\bhf_[A-Za-z0-9]{30,}\b")),
     _Rule("github_fine_grained_pat", "secret", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}\b")),
-    _Rule("slack_token", "secret", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
-    _Rule("anthropic_api_key", "secret", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")),
+    # xoxe-: refresh tokens, xapp-: app-level tokens. Possessive, not \b: a token ending in
+    # "-" kept its last character in the output.
+    _Rule("slack_token", "secret", re.compile(r"\b(?:xox[abeprs]|xapp)-[A-Za-z0-9-]{10,}+")),
+    # The path of an incoming webhook is its credential: anyone holding it can post.
+    _Rule(
+        "slack_webhook",
+        "secret",
+        re.compile(
+            r"\bhooks\.slack(?:-gov)?\.com/((?:services|workflows|triggers)/[A-Za-z0-9/_-]+)"
+        ),
+        group=1,
+    ),
+    _Rule("anthropic_api_key", "secret", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}+")),
+    _Rule("google_oauth_token", "secret", re.compile(r"\bya29\.[A-Za-z0-9_-]{20,}+")),
     # Current OpenAI keys are sk-proj-/sk-svcacct-/sk-admin- with "-" and "_" in the body.
     _Rule(
         "openai_style_api_key",
@@ -212,10 +239,21 @@ _RULES: tuple[_Rule, ...] = (
         # One start per run of token characters ("-" included in the lookbehind): with \b,
         # "eyJ-eyJ-eyJ-..." restarted at every "eyJ" and rescanned the rest of the run.
         re.compile(
-            r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}\b"
+            r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+"
         ),
     ),
     _Rule("bearer_token", "secret", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}")),
+    _Rule(
+        "cookie_header",
+        "secret",
+        # Cookie: sid=...; csrftoken=... and Set-Cookie: sid=...: session cookies are bearer
+        # credentials. Only name=value lists match, so prose such as "Cookie: oatmeal" stays.
+        re.compile(
+            r"(?i)\b(?:set-)?cookie[\"']?[ \t]*:[ \t]*[\"']?(?!\[REDACTED:)"
+            r"([^\s=;,\"']{1,256}=[^\r\n\"']{0,4096})"
+        ),
+        group=1,
+    ),
     _Rule(
         "us_ssn",
         "pii",

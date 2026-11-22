@@ -78,6 +78,11 @@ class Session:
 Approver = Callable[[ToolCall, Decision], bool | Awaitable[bool]]
 
 _ASYNC_APPROVER_REASON = "approver is async; use aauthorize()/aexecute() instead of the sync API"
+_NON_BOOL_APPROVER_REASON = "approver returned a non-boolean answer"
+
+# One lock for every guard: a Session shared by several guards (one per MCP server, say) must
+# still count and taint atomically, and the critical section is a few dictionary operations.
+_COMMIT_LOCK = threading.Lock()
 
 
 class ToolGuard:
@@ -102,13 +107,16 @@ class ToolGuard:
             for rule in policy.tools.values()
             for arg in rule.args.values()
         )
-        self._lock = threading.Lock()
+        self._lock = _COMMIT_LOCK
         self.default_session = Session()
 
     # ------------------------------------------------------------- evaluation
     def evaluate(self, call: ToolCall, session: Session | None = None) -> Decision:
         """Pure policy check. Does not consume rate limits or contact the approver."""
         session = session or self.default_session
+        if not isinstance(call.name, str):
+            # An unhashable name (a JSON list) would raise in the lookup below.
+            return Decision(Verdict.DENY, str(call.name), ("tool name must be a string",))
         rule = self.policy.tools.get(call.name)
         if rule is None:
             return Decision(Verdict.DENY, call.name, ("tool not in policy (default deny)",))
@@ -168,7 +176,12 @@ class ToolGuard:
             if self.approver is None:
                 decision = self._resolve_approval(call, session, decision, None)
             else:
-                answer = self.approver(call, decision)
+                try:
+                    answer = self.approver(call, decision)
+                except Exception as exc:  # noqa: BLE001 - a failing approver refuses the call
+                    return self._commit(
+                        call, session, self._approver_failed(call, session, decision, exc)
+                    )
                 if inspect.isawaitable(answer):
                     # An un-awaited coroutine is truthy: treating it as an answer would
                     # approve every request. Discard it and refuse.
@@ -179,7 +192,7 @@ class ToolGuard:
                     )
                     self._audit("approval", session, tool=call.name, approved=False)
                 else:
-                    decision = self._resolve_approval(call, session, decision, bool(answer))
+                    decision = self._answer(call, session, decision, answer)
         return self._commit(call, session, decision)
 
     async def aauthorize(self, call: ToolCall, session: Session | None = None) -> Decision:
@@ -190,16 +203,40 @@ class ToolGuard:
             if self.approver is None:
                 decision = self._resolve_approval(call, session, decision, None)
             else:
-                if inspect.iscoroutinefunction(self.approver):
-                    answer = await self.approver(call, decision)
+                try:
+                    if inspect.iscoroutinefunction(self.approver):
+                        answer = await self.approver(call, decision)
+                    else:
+                        # A plain approver usually blocks (a prompt, an HTTP round trip), so run
+                        # it in a worker thread rather than stalling every task on the loop.
+                        answer = await asyncio.to_thread(self.approver, call, decision)
+                        if inspect.isawaitable(answer):
+                            answer = await answer
+                except Exception as exc:  # noqa: BLE001 - a failing approver refuses the call
+                    decision = self._approver_failed(call, session, decision, exc)
                 else:
-                    # A plain approver usually blocks (a prompt, an HTTP round trip), so run it
-                    # in a worker thread rather than stalling every task on the event loop.
-                    answer = await asyncio.to_thread(self.approver, call, decision)
-                    if inspect.isawaitable(answer):
-                        answer = await answer
-                decision = self._resolve_approval(call, session, decision, bool(answer))
+                    decision = self._answer(call, session, decision, answer)
         return self._commit(call, session, decision)
+
+    def _answer(
+        self, call: ToolCall, session: Session, decision: Decision, answer: Any
+    ) -> Decision:
+        """Only ``True`` approves. ``bool(answer)`` would read ``input()``'s "n" as a yes."""
+        if isinstance(answer, bool):
+            return self._resolve_approval(call, session, decision, answer)
+        self._audit("approval", session, tool=call.name, approved=False)
+        return Decision(Verdict.DENY, call.name, (*decision.reasons, _NON_BOOL_APPROVER_REASON))
+
+    def _approver_failed(
+        self, call: ToolCall, session: Session, decision: Decision, exc: Exception
+    ) -> Decision:
+        """An approver that raises (or times out) refuses the call, and the refusal is audited.
+
+        Only the exception type is recorded: its message may quote the arguments.
+        """
+        self._audit("approval", session, tool=call.name, approved=False)
+        reason = f"approver failed ({type(exc).__name__}); refused"
+        return Decision(Verdict.DENY, call.name, (*decision.reasons, reason))
 
     def _begin(self, call: ToolCall, session: Session) -> Decision:
         self._audit("tool_request", session, tool=call.name, arguments=call.arguments)

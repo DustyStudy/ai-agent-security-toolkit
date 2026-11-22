@@ -355,14 +355,17 @@ class AuditLogger:
         self._keep_fields = frozenset(keep_fields)
         self._clock = clock or (lambda: datetime.now(UTC))
         # Loggers on the same file (one per conversation, say) share one chain head, so
-        # their records interleave into a single chain instead of forking it.
-        key = getattr(sink, "chain_key", None)
+        # their records interleave into a single chain instead of forking it. A sink with no
+        # file behind it (memory, stream, callback) is shared by object: two loggers on one
+        # such sink each started at seq 0 and wrote two interleaved chains that never verify.
+        # The id cannot be reused while the head lives, because every logger holding the
+        # head also holds the sink.
+        key = getattr(sink, "chain_key", None) or f"sink-object:{id(sink)}"
         with _HEADS_LOCK:
-            head = _HEADS.get(key) if key else None
+            head = _HEADS.get(key)
             if head is None:
                 head = _ChainHead()
-                if key:
-                    _HEADS[key] = head
+                _HEADS[key] = head
         with head.lock:
             last = sink.last_record()
             head.seq = int(last["seq"]) + 1 if last else 0
@@ -420,6 +423,17 @@ class AuditLogger:
         if isinstance(value, dict):
             # Keys are redacted too: an agent can put a secret in a key as easily as a value.
             return {self._clean_key(k): self._clean_item(k, v, keep) for k, v in value.items()}
+        if (
+            self._redact
+            and isinstance(value, list | tuple)
+            and len(value) == 2
+            and isinstance(value[0], str)
+            and value[1] is not None
+            and _credential_key(value[0][-200:]) is not None
+        ):
+            # A (name, value) pair, as in httpx/aiohttp header lists:
+            # [("Authorization", "Bearer x")] is the assignment Authorization=...
+            return [self._clean(value[0], keep), self._clean_item(value[0], value[1], keep)]
         if isinstance(value, list | tuple | set | frozenset):
             return [self._clean(v, keep) for v in value]
         if isinstance(value, int | float | bool) or value is None:
@@ -491,6 +505,9 @@ def _credential_key(key: str) -> str | None:
         return None
     if words[-1] in _PASSWORD_WORDS:
         return "password_assignment"
+    if words[-1] == "auth":
+        # requests' auth=("user", "password"), basic_auth, proxy_auth: the value is a credential.
+        return "secret_assignment"
     # A bare "key" (an S3 object key, a keyboard key) and a public key are not secrets.
     plain_key = words[-1] == "key" and (len(words) == 1 or words[-2] == "public")
     if (words[-1] in _SECRET_WORDS and not plain_key) or "".join(words) in _SECRET_NAMES:

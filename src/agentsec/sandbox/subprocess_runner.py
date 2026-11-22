@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import shutil
 import signal
 import subprocess  # noqa: S404 - the point of this module is to constrain subprocess use
 import sys
@@ -104,19 +103,32 @@ def locked_install_rules(
     return rules
 
 
+def _runnable(path: str) -> str | None:
+    """``path`` itself, or on Windows ``path`` plus a PATHEXT extension, if it is an executable."""
+    extensions = [""]
+    if os.name == "nt":
+        extensions += os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
+    for extension in extensions:
+        candidate = path + extension
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def _find_executable(name: str) -> str | None:
     """PATH lookup that never consults the current directory.
 
     ``shutil.which("git")`` on Windows tries the current directory before PATH, and an empty
     or relative PATH entry means the current directory everywhere, so a ``git.exe`` planted in
-    a cloned repository would be the one that runs.
+    a cloned repository would be the one that runs. ``shutil.which`` is not used for
+    directory-qualified names either: before Python 3.12 it skips PATHEXT when the name has a
+    directory part, so ``<dir>/git`` never matches ``<dir>/git.exe``.
     """
     if os.path.dirname(name):
-        return shutil.which(name)  # an explicit path is looked up as given, not searched for
+        return _runnable(name)  # an explicit path is looked up as given, not searched for
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         if os.path.isabs(entry):
-            # With a directory part, which() checks only that directory (and PATHEXT).
-            found = shutil.which(os.path.join(entry, name))
+            found = _runnable(os.path.join(entry, name))
             if found is not None:
                 return found
     return None

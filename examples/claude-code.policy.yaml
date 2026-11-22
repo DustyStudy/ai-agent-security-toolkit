@@ -13,8 +13,9 @@
 # Add --block-approvals to the command to block, not ask, when a call needs approval.
 version: 1
 
-# Once the session has fetched web content or called an MCP tool, shell commands and further
-# fetches go to the human through Claude Code's own permission prompt. `deny` blocks them.
+# Once the session has fetched web content, called an MCP tool or run a shell command, shell
+# commands, file writes and further fetches go to the human through Claude Code's own
+# permission prompt. `deny` blocks them.
 taint:
   enabled: true
   action: approve
@@ -37,24 +38,30 @@ tools:
 
   Edit:
     description: Edit a file in the checkout.
+    # A write is a side effect: a tainted session could otherwise plant code that runs later
+    # (package.json, Makefile, conftest.py) with nobody asked.
+    side_effects: true
     args:
       file_path: &writable
         type: path
         required: true
         roots: [/home/me/project]
         # Files that run code or steer the agent later: keep them out of the agent's reach
-        # and pin them with `agentsec scan-config`.
+        # and pin them with `agentsec scan-config`. Denied even when the session is clean,
+        # because a planted CLAUDE.md steers the next session, which starts untainted.
         deny_patterns:
           - '[\\/]\.git[\\/]'
           - '[\\/]\.github[\\/]workflows[\\/]'
-          - '[\\/]\.(claude|cursor|codex|gemini)[\\/]'
+          - '[\\/]\.(claude|cursor|codex|gemini|vscode|husky)[\\/]'
           - '(^|[\\/])\.mcp\.json$'
+          - '(^|[\\/])(CLAUDE(\.local)?|AGENTS|GEMINI)\.md$'
       old_string: {type: string, required: true, max_length: 200000}
       new_string: {type: string, required: true, max_length: 200000}
       replace_all: {type: boolean}
 
   Write:
     description: Create or overwrite a file in the checkout.
+    side_effects: true             # as for Edit
     args:
       file_path: *writable
       content: {type: string, required: true, max_length: 1000000}
@@ -62,6 +69,10 @@ tools:
   Bash:
     description: Run a shell command.
     side_effects: true             # can send data anywhere, and can delete the hook's state
+    # Output can carry third-party text (curl, gh, git log). The cost: the first shell command
+    # taints the session, so every later shell command, write and fetch asks. Set it to false
+    # if that is too many prompts and you accept that a command's output is trusted.
+    returns_untrusted: true
     args:
       command: {type: string, required: true, max_length: 8000}
       description: {type: string, max_length: 500}

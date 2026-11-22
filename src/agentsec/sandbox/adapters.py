@@ -91,6 +91,11 @@ async def _arun(
 
 def _anthropic_calls(content_blocks: list[dict[str, Any]]) -> Iterator[ToolCall]:
     for block in content_blocks:
+        if not isinstance(block, dict):
+            # .get() would raise and crash the agent loop. "" is never a policy tool, so the
+            # guard denies and audits the malformed entry.
+            yield ToolCall(name="", arguments={}, id="")
+            continue
         if block.get("type") != "tool_use":
             continue
         raw_input: Any = block.get("input")
@@ -142,6 +147,8 @@ async def arun_anthropic_tool_uses(
 
 def parse_openai_tool_call(tc: dict[str, Any]) -> tuple[ToolCall, str | None]:
     """Parse one ``tool_calls`` entry. The second item is a refusal message, or ``None``."""
+    if not isinstance(tc, dict):
+        tc = {}  # no name: the guard denies and audits it like any unknown tool
     fn = tc.get("function")
     if not isinstance(fn, dict):
         fn = {}
@@ -149,7 +156,9 @@ def parse_openai_tool_call(tc: dict[str, Any]) -> tuple[ToolCall, str | None]:
     refusal = None
     try:
         args: Any = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):  # TypeError: arguments was not a string
+    # TypeError: arguments was not a string. ValueError: invalid JSON (JSONDecodeError) or an
+    # integer past the digit limit. RecursionError: deep nesting. All are model-supplied.
+    except (ValueError, TypeError, RecursionError):
         args = raw
         refusal = "Tool call refused: arguments were not valid JSON"
     if refusal is None and not isinstance(args, dict):

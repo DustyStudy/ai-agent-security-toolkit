@@ -25,7 +25,7 @@ from typing import Any
 import yaml
 
 from agentsec.gateway.policyset import ANY_GROUP, PolicySet, group_policy, stream_settings
-from agentsec.sandbox.policy import Policy, PolicyError
+from agentsec.sandbox.policy import Policy, PolicyError, load_yaml_strict
 
 MANIFEST = "manifest.yaml"
 SIGNATURE = "manifest.sig"
@@ -68,6 +68,16 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _parse_manifest(manifest_bytes: bytes) -> dict[str, Any]:
+    try:
+        manifest = load_yaml_strict(manifest_bytes)
+    except PolicyError as e:  # a duplicate key: the later block would silently win
+        raise BundleError(f"{MANIFEST}: {e}") from None
+    if not isinstance(manifest, dict):
+        raise BundleError("manifest must be a mapping")
+    return manifest
+
+
 def _referenced_files(manifest: dict[str, Any]) -> list[str]:
     entries = manifest.get("group_policies")
     if not isinstance(entries, list):
@@ -92,9 +102,7 @@ def sign_bundle(root: str | Path, private_key_pem: bytes) -> Path:
     if not isinstance(key, Ed25519PrivateKey):
         raise BundleError("the signing key must be an Ed25519 private key")
     manifest_bytes = _read(root, MANIFEST)
-    manifest = yaml.safe_load(manifest_bytes)
-    if not isinstance(manifest, dict):
-        raise BundleError("manifest must be a mapping")
+    manifest = _parse_manifest(manifest_bytes)
     files = {rel: _sha(_read(root, rel)) for rel in _referenced_files(manifest)}
     payload = _payload(_sha(manifest_bytes), files)
     sig = {
@@ -241,9 +249,7 @@ def load_bundle(
 ) -> PolicySet:
     """Verify and parse a bundle. ``upstreams`` checks each group's ``models`` against config."""
     manifest_bytes, contents = verify_bundle(root, public_key)
-    manifest = yaml.safe_load(manifest_bytes)
-    if not isinstance(manifest, dict):
-        raise BundleError("manifest must be a mapping")
+    manifest = _parse_manifest(manifest_bytes)
     unknown = set(manifest) - _MANIFEST_KEYS
     if unknown:
         raise BundleError(f"unknown manifest keys: {sorted(unknown)}")
@@ -269,7 +275,7 @@ def load_bundle(
             raise BundleError(f"{where}.tools must name a signed policy file")
         if tools not in parsed:
             try:
-                parsed[tools] = Policy.from_dict(yaml.safe_load(contents[tools]))
+                parsed[tools] = Policy.from_dict(load_yaml_strict(contents[tools]))
             except (PolicyError, yaml.YAMLError) as err:
                 raise BundleError(f"{tools}: {err}") from None
         mode = e.get("mode", "enforce")

@@ -13,12 +13,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-import yaml
-
 from agentsec.gateway.oidc import SUPPORTED_ALGORITHMS, OidcSettings
 from agentsec.gateway.policyset import ANY_GROUP, PolicySet, group_policy, stream_settings
 from agentsec.gateway.tokens import TokenSettings
-from agentsec.sandbox.policy import Policy
+from agentsec.sandbox.policy import Policy, load_yaml_strict
 
 
 class ConfigError(ValueError):
@@ -356,7 +354,7 @@ def _single_policy(
     if not isinstance(policy_section, str):
         raise ConfigError("policy must be the path of a tool policy YAML file (or use bundle)")
     raw_policy = (base / policy_section).read_bytes()  # one read: the hash covers what is parsed
-    policy = Policy.from_dict(yaml.safe_load(raw_policy))
+    policy = Policy.from_dict(load_yaml_strict(raw_policy))
     mode = data.get("mode", "enforce")
     if mode not in {"enforce", "monitor"}:
         raise ConfigError("mode must be 'enforce' or 'monitor'")
@@ -424,7 +422,7 @@ def _bundle(
 
 def load_config(path: str | Path) -> GatewayConfig:
     path = Path(path)
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data = load_yaml_strict(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ConfigError("config must be a mapping")
     unknown = set(data) - _TOP

@@ -9,11 +9,12 @@ from collections import Counter
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agentsec import __version__
 from agentsec.configscan import (
     ConfigFinding,
+    acceptance,
     check_pins,
     load_accepted,
     load_pins,
@@ -25,6 +26,7 @@ from agentsec.configscan import (
 from agentsec.fuzzer import CORPUS, MUTATORS, FuzzConfig, load_target, run
 from agentsec.fuzzer.formats import clean
 from agentsec.fuzzer.harness import DEFAULT_SCENARIOS, SCENARIOS, build_cases
+from agentsec.fuzzer.payloads import categories
 from agentsec.middleware.audit import VerifyResult, read_records, verify_file
 from agentsec.sandbox import Policy, PolicyError, ToolGuard
 from agentsec.threatmodel import (
@@ -36,6 +38,9 @@ from agentsec.threatmodel import (
     render_markdown,
 )
 from agentsec.types import ToolCall
+
+if TYPE_CHECKING:
+    from agentsec.gateway.tokens import TokenSettings
 
 
 def _csv(value: str | None) -> list[str] | None:
@@ -50,6 +55,18 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
         categories=_csv(args.categories),
         max_cases=args.max_cases,
     )
+    # A misspelt name must not shrink the matrix silently: an unknown category selects nothing.
+    for kind, given, valid in (
+        ("scenario", config.scenarios, SCENARIOS),
+        ("mutator", config.mutators, MUTATORS),
+        ("category", config.categories, categories()),
+    ):
+        unknown = [name for name in given or [] if name not in valid]
+        if unknown:
+            print(
+                f"error: unknown {kind}(s): {unknown}; choose from {list(valid)}", file=sys.stderr
+            )
+            return 2
     if args.list:
         cases = build_cases(config)
         print(
@@ -86,6 +103,14 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
     if report.total and report.errors == report.total:
         # Zero successes out of zero scored cases would pass any --max-asr gate.
         print("FAIL: every case errored; nothing was evaluated", file=sys.stderr)
+        return 2
+    if args.max_asr is not None and (report.errors or not report.total):
+        # An unscored case could be a bypass, so ASR over the rest proves nothing.
+        print(
+            f"FAIL: --max-asr could not be evaluated fully: {report.errors} of {report.total} "
+            "case(s) errored",
+            file=sys.stderr,
+        )
         return 2
     if args.max_asr is not None and report.exceeds(args.max_asr):
         print(f"FAIL: ASR {report.asr:.1%} exceeds --max-asr {args.max_asr:.1%}", file=sys.stderr)
@@ -125,6 +150,10 @@ def cmd_audit(args: argparse.Namespace) -> int:
         result = verify_file(args.file)
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if result.ok and not result.records_checked and not args.allow_empty:
+        # A log truncated to nothing has no broken link to find.
+        print("FAIL: no records to verify; pass --allow-empty if expected", file=sys.stderr)
         return 2
     if result.ok:
         print(f"OK: {result.records_checked} record(s), chain intact")
@@ -248,8 +277,11 @@ def cmd_scan_config(args: argparse.Namespace) -> int:
     if args.accept and not args.update_pins:
         print("error: --accept needs --pins FILE and --update-pins", file=sys.stderr)
         return 2
+    if args.accept and not (args.reason or "").strip():
+        print("error: --accept needs --reason TEXT", file=sys.stderr)
+        return 2
     pins_path = args.pins and Path(args.pins)
-    accepted: dict[str, str] = {}
+    accepted: dict[str, dict[str, str]] = {}
     pin_findings = []
     try:
         scan = scan_config(args.path)
@@ -265,7 +297,7 @@ def cmd_scan_config(args: argparse.Namespace) -> int:
         if item_id not in flagged or item_id not in scan.items:
             print(f"error: --accept {show(item_id)}: no injection finding on it", file=sys.stderr)
             return 2
-        accepted[item_id] = scan.items[item_id].fingerprint
+        accepted[item_id] = acceptance(scan.items[item_id].fingerprint, args.reason)
     blocking, waived = split_accepted(scan, accepted)
     findings = blocking + pin_findings
 
@@ -274,7 +306,11 @@ def cmd_scan_config(args: argparse.Namespace) -> int:
         return [{"item": show(f.item), "kind": f.kind, "detail": f.detail} for f in found]
 
     if args.json:
-        report = {"items": len(scan.items), "findings": rows(findings), "accepted": rows(waived)}
+        waived_rows = [
+            row | {k: show(accepted[f.item][k]) for k in ("reason", "accepted_at")}
+            for row, f in zip(rows(waived), waived, strict=True)
+        ]
+        report = {"items": len(scan.items), "findings": rows(findings), "accepted": waived_rows}
         print(json.dumps(report, indent=2))
     else:
         if not pins_path:
@@ -283,7 +319,12 @@ def cmd_scan_config(args: argparse.Namespace) -> int:
         for f in findings:
             print(f"{f.kind.upper():<9} {show(f.item)}: {f.detail}")
         for f in waived:
-            print(f"ACCEPTED  {show(f.item)}: {f.kind}, {f.detail}")
+            # The reason comes from the pin file, so it is escaped like everything else.
+            why = accepted[f.item]
+            print(
+                f"ACCEPTED  {show(f.item)}: {f.kind}, {f.detail} "
+                f"(reason: {show(why['reason'])}; accepted {show(why['accepted_at'])})"
+            )
         tail = f", {len(waived)} accepted" if waived else ""
         print(f"{len(scan.items)} item(s), {len(findings)} finding(s){tail}")
     if not args.update_pins:
@@ -304,20 +345,21 @@ def cmd_scan_config(args: argparse.Namespace) -> int:
 
 
 def cmd_scan_workflows(args: argparse.Namespace) -> int:
-    from agentsec.workflowscan import scan_workflows
+    from agentsec.workflowscan import scan_workflows, workflow_files
 
     try:
+        scanned = len(workflow_files(args.path))
         findings = scan_workflows(args.path)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.json:
         rows = [{"item": show(f.item), "kind": f.kind, "detail": f.detail} for f in findings]
-        print(json.dumps({"findings": rows}, indent=2))
+        print(json.dumps({"files_scanned": scanned, "findings": rows}, indent=2))
     else:
         for f in findings:
             print(f"{f.kind.upper()} {show(f.item)}: {f.detail}")
-        print(f"{len(findings)} finding(s)")
+        print(f"{scanned} file(s) scanned, {len(findings)} finding(s)")
     return 1 if findings else 0
 
 
@@ -389,6 +431,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if args.check:
         print(f"config ok: {len(config.upstreams)} upstream(s), policy {config.policies.revision}")
         return 0
+    if config.bundle is not None and config.bundle.state_file is not None:
+        from agentsec.gateway.bundle import write_state
+
+        try:
+            # Before the bundle is enforced, and only here: load_config has other callers.
+            write_state(config.bundle.state_file, config.policies)
+        except OSError as e:
+            print(f"invalid gateway config: bundle: {e}", file=sys.stderr)
+            return 2
     serve(config)
     return 0
 
@@ -435,17 +486,32 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     return 0
 
 
+def _token_settings(path: str) -> TokenSettings:
+    """Only the tokens section: a token command must not depend on the bundle or the policy."""
+    import yaml
+
+    from agentsec.gateway.config import ConfigError, _tokens
+
+    try:
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        raise ConfigError(f"{path} is not valid YAML: {e}") from None
+    if not isinstance(data, dict):
+        raise ConfigError(f"{path}: config must be a mapping")
+    tokens = _tokens(data, Path(path).parent)
+    if tokens is None:
+        raise ConfigError(f"{path} has no tokens section")
+    return tokens
+
+
 def cmd_token(args: argparse.Namespace) -> int:
     from datetime import UTC, datetime
 
-    from agentsec.gateway.config import ConfigError, load_config
+    from agentsec.gateway.config import ConfigError
     from agentsec.gateway.tokens import TokenStore
 
     try:
-        settings = load_config(args.config).tokens
-        if settings is None:
-            raise ConfigError("the config has no tokens section")
-        store = TokenStore(settings.store)
+        store = TokenStore(_token_settings(args.config).store)
     except (ConfigError, OSError, ValueError) as e:
         print(f"token {args.action} failed: {e}", file=sys.stderr)
         return 1
@@ -461,43 +527,67 @@ def cmd_token(args: argparse.Namespace) -> int:
             print(f"{t.id}  {t.user:<24} {state:<7} expires {when(t.expires)}  "
                   f"last used {when(t.last_used)}  {t.name}")  # fmt: skip
         return 0
+    if args.action == "enable":
+        # Undoes only the block that offboarding recorded; revoked tokens stay revoked.
+        enabled = store.enable_user(args.user)
+        print(f"{args.user}: {'enabled' if enabled else 'was not disabled'}")
+        return 0 if enabled else 1
     if (args.id is None) == (args.user is None):
         print("token revoke takes --id ID or --user USER", file=sys.stderr)
         return 2
     count = int(store.revoke(args.id)) if args.id else store.revoke_user(args.user)
     print(f"revoked {count} token(s)")
-    return 0
+    return 0 if count else 1  # a mistyped id or user must not look like a revocation
 
 
 def cmd_token_offboard(args: argparse.Namespace) -> int:
-    """Exit 0: nothing overdue; 1: bad input; 3: a revocation is pending past its deadline."""
+    """Exit 0: nothing overdue; 1: bad input, an unreadable config or a missing store;
+    3: a revocation is pending past its deadline."""
     from agentsec.gateway import offboard
-    from agentsec.gateway.config import ConfigError, load_config
+    from agentsec.gateway.config import ConfigError
 
     try:
-        settings = []
-        for path in args.config:
-            tokens = load_config(path).tokens
-            if tokens is None:
-                raise ConfigError(f"{path} has no tokens section")
-            settings.append(tokens)
         text = (
             sys.stdin.read()
             if args.events == "-"
             else (Path(args.events).read_text(encoding="utf-8") if args.events else "")
         )
         events = offboard.parse_events(text) if text.strip() else []
-        deadline = args.deadline_s or min(t.offboarding_deadline_s for t in settings)
-        out = offboard.run(args.ledger, [t.store for t in settings], events, deadline_s=deadline)
+        # Before any config is read: stdin cannot be replayed, a broken gateway config can.
+        offboard.record(args.ledger, events)
+        settings, unread = [], {}
+        for path in args.config:
+            try:
+                settings.append(_token_settings(path))
+            except (ConfigError, OSError, ValueError) as e:
+                unread[path] = f"{type(e).__name__}: {e}"[:200]
+                print(f"token offboard: config not read: {e}", file=sys.stderr)
+        deadline = args.deadline_s or min(
+            (t.offboarding_deadline_s for t in settings), default=offboard.DEFAULT_DEADLINE_S
+        )
+        out = offboard.run(
+            args.ledger, [t.store for t in settings], [], deadline_s=deadline, unread=unread
+        )
         if args.metrics_file:
             Path(args.metrics_file).write_text(offboard.metrics_text(out), encoding="utf-8")
     except (ConfigError, offboard.OffboardError, OSError, ValueError) as e:
         print(f"token offboard failed: {e}", file=sys.stderr)
         return 1
     print(f"revoked {out.revoked} token(s); {len(out.pending)} pending, {len(out.overdue)} overdue")
+    for (kind, user, group), count in out.counts.items():
+        what = f"user {user}" if kind == "user" else f"user {user}, group {group}"
+        print(f"  {what}: revoked {count} token(s)")
+    for kind, user, group in out.unmatched:
+        what = f"user {user}" if kind == "user" else f"user {user}, group {group}"
+        print(
+            f"warning: {what} matched no token in any store (names are compared exactly)",
+            file=sys.stderr,
+        )
+    for store in out.missing:
+        print(f"token offboard: token store {store} does not exist on this host", file=sys.stderr)
     for ev in offboard.audit_events(out):
         print(json.dumps(ev), file=sys.stderr)
-    return 3 if out.overdue else 0
+    return 3 if out.overdue else 1 if unread or out.missing else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -553,6 +643,11 @@ def build_parser() -> argparse.ArgumentParser:
     a_sub = a.add_subparsers(dest="action", required=True)
     av = a_sub.add_parser("verify", help="Verify a hash-chained JSONL audit log.")
     av.add_argument("file")
+    av.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="exit 0 for a log with zero records (default: exit 2, as a truncated log has none)",
+    )
     asum = a_sub.add_parser(
         "summary",
         help="Count events, decisions and denials in an audit log (verifies the chain first).",
@@ -584,7 +679,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="ITEM_ID",
         help="With --pins and --update-pins: record this entry's injection finding as a reviewed "
-        "false positive, until the entry changes. Repeat for more entries.",
+        "false positive, until the entry changes. Repeat for more entries. Needs --reason.",
+    )
+    sc.add_argument(
+        "--reason",
+        metavar="TEXT",
+        help="With --accept: why the finding is a false positive. Stored in the pin file.",
     )
     sc.add_argument("--json", action="store_true", help="Print findings as JSON.")
     sc.set_defaults(func=cmd_scan_config)
@@ -669,6 +769,9 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--config", required=True, help="the gateway config with a tokens section")
     tr.add_argument("--id", help="the token id")
     tr.add_argument("--user", help="revoke all of this user's tokens")
+    te = t_sub.add_parser("enable", help="Let a user that offboarding disabled mint tokens again.")
+    te.add_argument("--config", required=True, help="the gateway config with a tokens section")
+    te.add_argument("--user", required=True)
     t.set_defaults(func=cmd_token)
     to = t_sub.add_parser(
         "offboard",

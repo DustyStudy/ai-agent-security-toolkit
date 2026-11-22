@@ -4,7 +4,8 @@ removes a user from a group, on every token store, with a durable retry ledger.
 An IdP automation (Okta, Entra, Keycloak) posts one JSON document to ``agentsec token offboard``:
 ``{"disabled_users": ["a@x"], "removed_groups": [{"user": "b@x", "group": "admins"}]}``.
 Each (event, store) pair is a ledger row that stays pending until that store's revoke succeeds,
-so a store that is down is retried on the next run and cannot be silently skipped.
+so a store that is down is retried on the next run and cannot be silently skipped. A disabled
+user is also recorded in each store, so no new token can be minted for them afterwards.
 """
 
 from __future__ import annotations
@@ -12,8 +13,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from contextlib import closing
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,13 @@ CREATE TABLE IF NOT EXISTS offboarding (
     done REAL,                   -- NULL while pending
     error TEXT,
     PRIMARY KEY (kind, user, grp, store)
+);
+CREATE TABLE IF NOT EXISTS inbox (   -- events not yet turned into rows for every store
+    kind TEXT NOT NULL,
+    user TEXT NOT NULL,
+    grp TEXT NOT NULL,
+    first_seen REAL NOT NULL,
+    PRIMARY KEY (kind, user, grp)
 );
 """
 
@@ -54,6 +63,11 @@ class Outcome:
     revoked: int
     pending: list[Pending]
     overdue: list[Pending]
+    # Per (kind, user, group) with a row finished in this run: tokens revoked by this run.
+    counts: dict[tuple[str, str, str], int] = field(default_factory=dict)
+    # Events whose every row finished in this run with no token revoked: likely a wrong name.
+    unmatched: list[tuple[str, str, str]] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)  # stores whose file does not exist here
 
 
 def parse_events(text: str) -> list[tuple[str, str, str]]:
@@ -85,6 +99,33 @@ def parse_events(text: str) -> list[tuple[str, str, str]]:
     return out
 
 
+def _open_existing(path: str) -> TokenStore:
+    return TokenStore(path, create=False)
+
+
+def record(
+    ledger: str | Path,
+    events: list[tuple[str, str, str]],
+    *,
+    clock: Callable[[], float] = time.time,
+) -> None:
+    """Make ``events`` durable. Needs no store and no config, so it runs before either is read."""
+    now = clock()
+    with closing(sqlite3.connect(str(ledger), timeout=5.0)) as db:
+        db.executescript(_SCHEMA)
+        with db:
+            for ev in events:
+                # An event already waiting keeps its first_seen: the deadline runs from then.
+                db.execute("INSERT OR IGNORE INTO inbox VALUES (?, ?, ?, ?)", (*ev, now))
+                # A finished row reopens: the same user can be disabled a second time after
+                # being re-enabled and given new tokens. A pending row keeps its first_seen.
+                db.execute(
+                    "UPDATE offboarding SET first_seen = ?, done = NULL, error = NULL "
+                    "WHERE kind = ? AND user = ? AND grp = ? AND done IS NOT NULL",
+                    (now, *ev),
+                )
+
+
 def run(
     ledger: str | Path,
     stores: list[str],
@@ -92,26 +133,35 @@ def run(
     *,
     deadline_s: float = DEFAULT_DEADLINE_S,
     clock: Callable[[], float] = time.time,
-    open_store: Callable[[str], TokenStore] = TokenStore,
+    open_store: Callable[[str], TokenStore] = _open_existing,
+    unread: Mapping[str, str] | None = None,
 ) -> Outcome:
-    """Record ``events`` for every store, then try every pending row (new and old)."""
+    """Record ``events`` for every store, then try every pending row (new and old).
+
+    ``unread`` maps a gateway config that could not be read to the error: its store is unknown,
+    so the events wait in the inbox, and count as pending, until a run reads every config.
+    """
     now = clock()
+    unread = unread or {}
+    record(ledger, events, clock=clock)
     db = sqlite3.connect(str(ledger), timeout=5.0)
     try:
-        db.executescript(_SCHEMA)
         with db:
-            for kind, user, group in events:
+            waiting = db.execute("SELECT kind, user, grp, first_seen FROM inbox").fetchall()
+            for kind, user, group, seen in waiting:
                 for store in stores:
-                    # A finished row reopens: the same user can be disabled a second time after
-                    # being re-enabled and given new tokens. A pending row keeps its first_seen.
                     db.execute(
                         "INSERT INTO offboarding (kind, user, grp, store, first_seen) "
-                        "VALUES (?, ?, ?, ?, ?) ON CONFLICT (kind, user, grp, store) DO UPDATE "
-                        "SET first_seen = excluded.first_seen, done = NULL, error = NULL "
-                        "WHERE done IS NOT NULL",
-                        (kind, user, group, store, now),
+                        "VALUES (?, ?, ?, ?, ?) ON CONFLICT (kind, user, grp, store) DO NOTHING",
+                        (kind, user, group, store, seen),
                     )
+            if not unread:
+                db.execute("DELETE FROM inbox")
+                waiting = []
         revoked = 0
+        counts: dict[tuple[str, str, str], int] = {}
+        finished: dict[tuple[str, str, str], int] = {}
+        missing: set[str] = set()
         rows = db.execute(
             "SELECT kind, user, grp, store FROM offboarding WHERE done IS NULL"
         ).fetchall()
@@ -119,12 +169,16 @@ def run(
             try:
                 ts = open_store(store)
                 try:
-                    revoked += (
-                        ts.revoke_user(user) if kind == "user" else ts.revoke_group(user, group)
-                    )
+                    # Disabling also blocks new tokens, so a user with none yet is still covered.
+                    n = ts.disable_user(user) if kind == "user" else ts.revoke_group(user, group)
                 finally:
                     ts.close()
+                revoked += n
+                counts[kind, user, group] = counts.get((kind, user, group), 0) + n
+                finished[kind, user, group] = finished.get((kind, user, group), 0) + 1
             except Exception as e:  # noqa: BLE001 - any failure leaves the row pending for retry
+                if isinstance(e, FileNotFoundError):
+                    missing.add(store)
                 err = f"{type(e).__name__}: {e}"[:200]
                 with db:
                     db.execute(
@@ -146,10 +200,27 @@ def run(
                 "WHERE done IS NULL ORDER BY first_seen"
             )
         ]
+        pending += [
+            Pending(kind, user, group, config, seen, error)
+            for kind, user, group, seen in waiting
+            for config, error in unread.items()
+        ]
+        # Only when all of the event's rows finished in this run: an earlier run may have
+        # revoked its tokens on another store, and that count is not kept.
+        unmatched = [
+            ev
+            for ev, n in counts.items()
+            if n == 0
+            and ev not in {(k, u, g) for k, u, g, _ in waiting}
+            and finished[ev]
+            == db.execute(
+                "SELECT COUNT(*) FROM offboarding WHERE kind = ? AND user = ? AND grp = ?", ev
+            ).fetchone()[0]
+        ]
     finally:
         db.close()
     overdue = [p for p in pending if now - p.first_seen > deadline_s]
-    return Outcome(revoked, pending, overdue)
+    return Outcome(revoked, pending, overdue, counts, unmatched, sorted(missing))
 
 
 def metrics_text(out: Outcome) -> str:

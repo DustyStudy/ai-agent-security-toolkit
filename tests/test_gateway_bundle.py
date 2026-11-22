@@ -13,7 +13,12 @@ from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
 
 from agentsec.gateway import ConfigError, Gateway, load_config  # noqa: E402
-from agentsec.gateway.bundle import BundleError, load_bundle, sign_bundle  # noqa: E402
+from agentsec.gateway.bundle import (  # noqa: E402
+    BundleError,
+    load_bundle,
+    sign_bundle,
+    write_state,
+)
 from agentsec.gateway.policyset import PolicySet  # noqa: E402
 from agentsec.middleware.audit import MemorySink  # noqa: E402
 from tests.test_gateway import FakeUpstream, call, chat, tool  # noqa: E402
@@ -358,7 +363,8 @@ def test_a_malformed_but_signed_manifest_is_a_logged_rejection(tmp_path):
 def test_the_state_file_refuses_rollback_across_restarts(tmp_path):
     root = make_bundle(tmp_path / "b", revision=10)
     extra = ", state_file: state.json"
-    write_config(tmp_path, root, extra)  # accepts 10, records it
+    # Accepts 10; `serve` records it (load_config alone only checks the state file).
+    write_state(tmp_path / "state.json", write_config(tmp_path, root, extra).policies)
     assert json.loads((tmp_path / "state.json").read_text())["revision"] == 10
     make_bundle(root, revision=5)  # older but validly signed and unexpired
     with pytest.raises(ConfigError, match="rollback refused"):

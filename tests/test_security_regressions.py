@@ -790,13 +790,15 @@ def test_two_loggers_on_one_file_share_a_single_chain(tmp_path):
     assert a.checkpoint()["hash"] == b.checkpoint()["hash"]
 
 
-def test_torn_last_line_fails_closed_with_a_clear_error(tmp_path):
+def test_torn_last_line_is_set_aside_not_chained_onto(tmp_path):
     path = tmp_path / "audit.jsonl"
     AuditLogger(FileSink(path)).log("prompt", text="hi")
     with path.open("a", encoding="utf-8") as fh:
         fh.write('{"seq": 1, "ha')  # crash mid-write
-    with pytest.raises(ValueError, match="torn write"):
-        AuditLogger(FileSink(path))
+    # Was a refusal; a torn final fragment is now moved aside (see
+    # test_audit_redaction_hardening.py). Every other bad tail still refuses, below.
+    assert AuditLogger(FileSink(path)).log("prompt")["seq"] == 1
+    assert verify_file(path).ok
 
 
 @pytest.mark.parametrize("line", ["1", "[]", '"x"', "null"])
@@ -1144,7 +1146,9 @@ def test_ipv6_literals_and_idna_hosts_still_parse():
     rule = ArgRule(type="url", schemes=["http", "https"], block_private=False)
     assert not check_url("http://[2606:4700::1111]/", rule)
     assert not check_url("http://[fe80::1%25eth0]/", rule)
-    assert not check_url("https://bücher.example/", rule)
+    # Unicode hosts are refused since IDNA 2003 and 2008 disagree; the punycode form parses.
+    assert check_url("https://bücher.example/", rule)
+    assert not check_url("https://xn--bcher-kva.example/", rule)
     assert not check_url("https://under_score.example/", rule)
 
 

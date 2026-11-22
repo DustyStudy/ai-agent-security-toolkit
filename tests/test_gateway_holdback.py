@@ -331,8 +331,10 @@ def test_stream_transport_fails_closed(sse_server, status, body, limit, error):
 def test_stream_transport_unreachable():
     from agentsec.gateway.app import http_stream_transport
 
+    # Windows retries a refused SYN for about 2 s before reporting it; a shorter deadline
+    # would turn the refusal into a (correctly reported) connect timeout.
     with pytest.raises(UpstreamError, match="unreachable"):
-        list(http_stream_transport(_upstream("http://127.0.0.1:1/v1"), b"{}", 2, 1000))
+        list(http_stream_transport(_upstream("http://127.0.0.1:1/v1"), b"{}", 10, 1000))
 
 
 # ------------------------------------------------------- review regressions (Codex)

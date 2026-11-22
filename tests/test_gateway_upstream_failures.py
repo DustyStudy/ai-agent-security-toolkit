@@ -190,8 +190,10 @@ def test_a_connect_timeout_is_a_timeout_not_an_unreachable_upstream(monkeypatch)
 
 
 def test_a_refused_connection_names_the_cause_not_just_urlerror():
+    # Windows retries a refused SYN for about 2 s before reporting it; a shorter deadline
+    # would turn the refusal into a (correctly reported) connect timeout.
     with pytest.raises(UpstreamError, match="unreachable: ConnectionRefusedError"):
-        http_transport(Upstream("local", "http://127.0.0.1:1/v1", "m"), b"{}", 2, 1000)
+        http_transport(Upstream("local", "http://127.0.0.1:1/v1", "m"), b"{}", 10, 1000)
 
 
 def test_a_stream_that_stalls_after_release_ends_with_a_timeout_event(tmp_path, monkeypatch, stub):

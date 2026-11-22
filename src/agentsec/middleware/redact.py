@@ -60,6 +60,20 @@ _CREDENTIAL_FIELD = (
     r"|account[_-]?key|shared[_-]?access[_-]?key|sig)[\"']?\s*[=:]\s*"  # sig=: Azure SAS
 )
 
+# Command lines give the secret after a space, with no "=" or ":" for the rules above to key
+# on: --password X, sshpass -p X, mysql -pX, docker login -p X. "-p" stays case-sensitive
+# (mysql -P is the port), and a following "-" is the next flag, not a value. The gap after
+# the command name is bounded so a long run of command names cannot go quadratic.
+_CLI_FLAG = (
+    r"(?:(?<![\w-])--(?i:(?:[a-z0-9]+[-_])*(?:password|passwd|token|secret|api[-_]?key))[ \t]+"
+    r"|\bsshpass[ \t]+-p[ \t]*"
+    r"|\bmysql(?:dump|admin)?\b[^\n]{0,200}?\s-p[ \t]*"
+    r"|\bdocker[ \t]+login\b[^\n]{0,200}?\s-p[ \t]+"
+    r")(?!-)"
+)
+# curl -u user:PASSWORD - the user name stays for context.
+_CURL_USER = r"\bcurl\b[^\n]{0,200}?\s(?:-u|--user)[ \t]*"
+
 
 def _assignment_rules(kind: str, key: str) -> tuple[_Rule, ...]:
     """Unquoted, double-quoted and single-quoted values after ``key``.
@@ -118,6 +132,35 @@ _RULES: tuple[_Rule, ...] = (
     # strings). A lookbehind, not \b: "_" before PASSWORD is a word character.
     *_assignment_rules("password_assignment", _PW_KEY),
     *_assignment_rules("secret_assignment", _CREDENTIAL_FIELD),
+    *_assignment_rules("cli_credential", _CLI_FLAG),
+    _Rule(
+        "cli_credential",
+        "secret",
+        re.compile(_CURL_USER + r"[^\s:\"']+:(?!\[REDACTED:)([^\s\"']+)"),
+        group=1,
+    ),
+    _Rule(
+        "cli_credential",
+        "secret",
+        re.compile(_CURL_USER + r"\"[^\":\n]*:(?!\[REDACTED:)((?:[^\"\\\n]|\\.)+)"),
+        group=1,
+    ),
+    _Rule(
+        "cli_credential",
+        "secret",
+        re.compile(_CURL_USER + r"'[^':\n]*:(?!\[REDACTED:)([^'\n]+)"),
+        group=1,
+    ),
+    _Rule(
+        "authorization_header",
+        "secret",
+        # -H "Authorization: Bearer X" with a token shorter than the general rules accept.
+        re.compile(
+            r"(?:-H|--header)[ \t]*[\"']?(?i:(?:proxy-)?authorization):[ \t]*"
+            r"(?:[A-Za-z][A-Za-z0-9-]*[ \t]+)?+(?!\[REDACTED:)([^\s\"']+)"
+        ),
+        group=1,
+    ),
     # Stripe secret/restricted keys use "_", which the OpenAI-style sk- rule does not cover.
     _Rule("stripe_api_key", "secret", re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}")),
     _Rule(

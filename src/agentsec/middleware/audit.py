@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -117,33 +118,82 @@ class FileSink:
     def last_record(self) -> dict[str, Any] | None:
         if not self.path.exists():
             return None
-        last = None
-        with self.path.open(encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                if line.strip():
-                    last = line
-        if not last:
+        with self._lock:
+            lines, torn_at = self._tail()
+            if lines and torn_at is not None and _parse(lines[-1]) is _NOT_JSON:
+                # A final line with no newline that is not JSON is a write cut short by a
+                # crash. Refusing here blocked every later session until someone repaired the
+                # file by hand; nothing can have chained onto the fragment, so set it aside.
+                self._set_aside(lines.pop(), torn_at)
+                torn_at = None
+        if not lines:
             return None
-        try:
-            record = json.loads(last)
-        except json.JSONDecodeError:
-            record = None
+        record = _parse(lines[-1])
         valid = (
             # No newline: the next append would glue onto this line ("}{...").
-            last.endswith("\n")
+            torn_at is None
             and isinstance(record, dict)
             and type(record.get("seq")) is int
             and isinstance(record.get("hash"), str)
             and compute_hash({k: v for k, v in record.items() if k != "hash"}) == record["hash"]
         )
         if not valid:
-            # Usually a write torn by a crash. Appending after it would chain onto a guess,
-            # so refuse to start; fail closed rather than silently fork the chain.
+            # Appending after it would chain onto a guess, so refuse to start; fail closed
+            # rather than silently fork the chain.
             raise ValueError(
                 f"last line of audit log {self.path} is not a valid record (torn write?). "
                 "Run `agentsec audit verify` on it, then repair it or start a new file."
             )
         return record
+
+    def _tail(self) -> tuple[list[bytes], int | None]:
+        """The last two non-blank lines, and the offset of the last one if it has no newline.
+
+        Reads backwards from the end: every hook invocation resumes the chain, and reading
+        the whole of a growing log each time made every call slower than the one before.
+        """
+        block = 1 << 16
+        with self.path.open("rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            while True:
+                start = max(0, size - block)
+                fh.seek(start)
+                parts = fh.read().split(b"\n")
+                if start:
+                    parts = parts[1:]  # may begin mid-line
+                lines = [p for p in parts if p.strip()]
+                if start == 0 or len(lines) >= 2:
+                    break
+                block *= 2
+        unterminated = bool(parts and parts[-1].strip())
+        return lines[-2:], size - len(parts[-1]) if unterminated else None
+
+    def _set_aside(self, fragment: bytes, offset: int) -> None:
+        aside = self.path.with_name(f"{self.path.name}.torn-{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}")
+        # Copy first, then cut: a crash between the two leaves the fragment in both places.
+        with aside.open("xb") as out:
+            out.write(fragment)
+            out.flush()
+            os.fsync(out.fileno())
+        os.truncate(self.path, offset)
+        _LOG.warning(
+            "audit log %s ended in a torn write (%d bytes); moved it to %s and resumed from "
+            "the last complete record",
+            self.path,
+            len(fragment),
+            aside,
+        )
+
+
+_NOT_JSON = object()
+
+
+def _parse(line: bytes) -> Any:
+    """The JSON value on ``line``, or ``_NOT_JSON``."""
+    try:
+        return json.loads(line.decode("utf-8", "replace"))
+    except ValueError:  # JSONDecodeError, or an integer too long to convert
+        return _NOT_JSON
 
 
 class CallbackSink:
@@ -403,15 +453,48 @@ class AuditLogger:
         return text
 
 
+# camelCase, snake_case, kebab-case and dotted names all split into the same words.
+_KEY_WORDS = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+")
+_PASSWORD_WORDS = frozenset({"password", "passwd", "pwd"})
+_SECRET_WORDS = frozenset({"token", "secret", "key", "credential", "credentials", "private"})
+# Names written with no word boundary, which the split cannot see into.
+_SECRET_NAMES = frozenset(
+    {
+        "secretaccesskey",
+        "awssecretaccesskey",
+        "sessiontoken",
+        "secretkey",
+        "privatekey",
+        "signingkey",
+        "clientsecret",
+        "appsecret",
+        "apitoken",
+        "idtoken",
+        "bearertoken",
+    }
+)
+
+
 @functools.lru_cache(maxsize=1024)
 def _credential_key(key: str) -> str | None:
-    """The redaction kind if ``key=<value>`` reads as a credential assignment, else None."""
+    """The redaction kind if ``key`` names a credential, else None."""
     if key.casefold() in {"authorization", "proxy-authorization", "cookie", "set-cookie"}:
         return "credential_header"
     prefix = f"{key}="
     for f in find_sensitive(prefix + "x" * 8):
         if f.category == "secret" and f.start == len(prefix):
             return f.kind
+    # The probe only sees what the text rules find in an 8-character value, so it misses
+    # SecretAccessKey, sessionToken, private_key and the like. Decide those by name.
+    words = [w.lower() for w in _KEY_WORDS.findall(key)]
+    if not words:
+        return None
+    if words[-1] in _PASSWORD_WORDS:
+        return "password_assignment"
+    # A bare "key" (an S3 object key, a keyboard key) and a public key are not secrets.
+    plain_key = words[-1] == "key" and (len(words) == 1 or words[-2] == "public")
+    if (words[-1] in _SECRET_WORDS and not plain_key) or "".join(words) in _SECRET_NAMES:
+        return "secret_assignment"
     return None
 
 

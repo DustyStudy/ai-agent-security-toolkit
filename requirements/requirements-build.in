@@ -1,0 +1,4 @@
+# Build backend (pyproject.toml build-system), installed with hashes so
+# `pip install --no-build-isolation -e .` does not fetch it unpinned.
+setuptools>=77.0
+wheel

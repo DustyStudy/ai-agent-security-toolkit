@@ -10,3 +10,9 @@ f8751d35f3bb82a02809fca83d6bf1f83739befa:tests/test_gateway_serve.py:generic-api
 4f423d5536539f7a8534d91b1ee8bc5d78e51bce:tests/test_audit_redaction_hardening.py:curl-auth-user:128
 4f423d5536539f7a8534d91b1ee8bc5d78e51bce:tests/test_audit_redaction_hardening.py:curl-auth-header:139
 4f423d5536539f7a8534d91b1ee8bc5d78e51bce:tests/test_audit_redaction_hardening.py:curl-auth-header:140
+# Same five reviewed false positives in the squash commit for #128.
+9c546405320f04345c00b38569285335f0c22721:src/agentsec/middleware/redact.py:curl-auth-user:74
+9c546405320f04345c00b38569285335f0c22721:tests/test_audit_redaction_hardening.py:curl-auth-user:127
+9c546405320f04345c00b38569285335f0c22721:tests/test_audit_redaction_hardening.py:curl-auth-user:128
+9c546405320f04345c00b38569285335f0c22721:tests/test_audit_redaction_hardening.py:curl-auth-header:139
+9c546405320f04345c00b38569285335f0c22721:tests/test_audit_redaction_hardening.py:curl-auth-header:140

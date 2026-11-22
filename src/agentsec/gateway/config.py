@@ -396,7 +396,6 @@ def _bundle(
         load_bundle,
         load_public_key,
         read_state,
-        write_state,
     )
 
     root = _typed(section.get("dir"), str, "bundle.dir")
@@ -415,8 +414,9 @@ def _bundle(
         if policies.numeric_revision is not None and policies.numeric_revision < min_revision:
             raise BundleError(f"bundle revision is below bundle.min_revision ({min_revision})")
         if state_file is not None:
+            # Checked here, recorded only by `serve`: a token command, `serve --check` or
+            # `probe-isolation` reading the config must not advance the accepted revision.
             check_state(policies, read_state(state_file))
-            write_state(state_file, policies)
     except (BundleError, OSError, ValueError) as e:
         raise ConfigError(f"bundle: {e}") from e
     return settings, policies

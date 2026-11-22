@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS tokens (
     last_used REAL
 );
 CREATE INDEX IF NOT EXISTS tokens_user ON tokens (user);
+CREATE TABLE IF NOT EXISTS disabled_users (
+    user TEXT PRIMARY KEY,
+    disabled_at REAL NOT NULL
+);
 """
 
 
@@ -89,13 +93,25 @@ def looks_like_token(value: str) -> bool:
 
 
 class TokenStore:
-    def __init__(self, path: str | Path, *, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self, path: str | Path, *, clock: Callable[[], float] = time.time, create: bool = True
+    ) -> None:
         path = Path(path)
-        if not path.exists():
-            # Created owner-only before SQLite opens it (POSIX; Windows uses the folder's ACL).
-            fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
-            os.close(fd)
-        self._db = sqlite3.connect(str(path), check_same_thread=False, timeout=5.0)
+        if not create:
+            # Offboarding: a missing file means the volume is not mounted on this host, and
+            # revoking in a new empty database would report success while the tokens stay live.
+            if not path.exists():
+                raise FileNotFoundError(f"token store {path} does not exist")
+            # mode=rw: SQLite itself refuses to create it, should it vanish after the check.
+            self._db = sqlite3.connect(
+                path.resolve().as_uri() + "?mode=rw", uri=True, check_same_thread=False, timeout=5.0
+            )
+        else:
+            if not path.exists():
+                # Created owner-only before SQLite opens it (POSIX; Windows uses the folder's ACL).
+                fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+                os.close(fd)
+            self._db = sqlite3.connect(str(path), check_same_thread=False, timeout=5.0)
         self._db.executescript(_SCHEMA)
         self._lock = threading.Lock()
         self._clock = clock
@@ -129,6 +145,8 @@ class TokenStore:
                     "DELETE FROM tokens WHERE MIN(expires, COALESCE(revoked, expires)) < ?",
                     (now - PRUNE_AFTER_S,),
                 )
+                if self._disabled(user):
+                    raise TokenError(f"user {user} is disabled; no token can be issued")
                 live = self._db.execute(
                     "SELECT COUNT(*) FROM tokens WHERE user = ? AND revoked IS NULL "
                     "AND expires > ?",
@@ -171,6 +189,33 @@ class TokenStore:
                 (self._clock(), user),
             ).rowcount
 
+    def disable_user(self, user: str) -> int:
+        """Revoke the user's tokens and refuse new ones until ``enable_user``. Count revoked."""
+        now = self._clock()
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT OR IGNORE INTO disabled_users (user, disabled_at) VALUES (?, ?)",
+                (user, now),
+            )
+            return self._db.execute(
+                "UPDATE tokens SET revoked = ? WHERE user = ? AND revoked IS NULL", (now, user)
+            ).rowcount
+
+    def enable_user(self, user: str) -> bool:
+        """Let ``user`` mint tokens again (revoked ones stay revoked). False if not disabled."""
+        with self._lock, self._db:
+            return (
+                self._db.execute("DELETE FROM disabled_users WHERE user = ?", (user,)).rowcount > 0
+            )
+
+    def is_user_disabled(self, user: str) -> bool:
+        with self._lock:
+            return self._disabled(user)
+
+    def _disabled(self, user: str) -> bool:
+        row = self._db.execute("SELECT 1 FROM disabled_users WHERE user = ?", (user,)).fetchone()
+        return row is not None
+
     def revoke_group(self, user: str, group: str) -> int:
         """Revoke the user's live tokens that were issued with ``group``."""
         with self._lock, self._db:
@@ -199,6 +244,8 @@ class TokenStore:
                 raise TokenError(f"token {info.id} is revoked")
             if info.expires <= now:
                 raise TokenError(f"token {info.id} has expired")
+            if self._disabled(info.user):
+                raise TokenError(f"token {info.id} belongs to a disabled user")
             if info.last_used is None or now - info.last_used > TOUCH_INTERVAL_S:
                 with self._db:
                     self._db.execute("UPDATE tokens SET last_used = ? WHERE id = ?", (now, info.id))

@@ -243,6 +243,11 @@ class ToolGuard:
                 else:
                     session.calls[call.name] += 1
                     session.total_calls += 1
+                    # Taint at commit, not after the tool returns, so authorize()-only callers
+                    # taint exactly like execute(). It also covers a tool that raises or is
+                    # cancelled: it may already have fetched attacker-controlled content.
+                    if rule.returns_untrusted:
+                        session.mark_untrusted(call.name)
         self._audit(
             "tool_decision",
             session,
@@ -263,19 +268,13 @@ class ToolGuard:
             raise ToolDenied(decision)
         rule = self.policy.tools[call.name]
         call = self._pin_paths(call, rule, session)
-        try:
-            result = fn(**call.arguments)
-            if inspect.isawaitable(result):
-                # Calling an async tool from the sync path would hand the model a coroutine
-                # object as if it were the tool's output, and the tool would never run.
-                if inspect.iscoroutine(result):
-                    result.close()
-                raise TypeError(f"tool {call.name!r} is async; use aexecute()/awrap()")
-        finally:
-            # Taint even if the tool raised: it may already have fetched attacker-controlled
-            # content before failing, and the model is shown the error either way.
-            if rule.returns_untrusted:
-                session.mark_untrusted(call.name)
+        result = fn(**call.arguments)
+        if inspect.isawaitable(result):
+            # Calling an async tool from the sync path would hand the model a coroutine
+            # object as if it were the tool's output, and the tool would never run.
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError(f"tool {call.name!r} is async; use aexecute()/awrap()")
         self._audit("tool_result", session, tool=call.name, result=result)
         return result
 
@@ -294,18 +293,12 @@ class ToolGuard:
             raise ToolDenied(decision)
         rule = self.policy.tools[call.name]
         call = self._pin_paths(call, rule, session)
-        try:
-            if _is_coroutine_callable(fn):
-                result = await fn(**call.arguments)
-            else:
-                result = await asyncio.to_thread(fn, **call.arguments)
-                if inspect.isawaitable(result):
-                    result = await result
-        finally:
-            # Also runs on cancellation: a worker thread cannot be interrupted, so the tool
-            # may still have read untrusted content even though this task was cancelled.
-            if rule.returns_untrusted:
-                session.mark_untrusted(call.name)
+        if _is_coroutine_callable(fn):
+            result = await fn(**call.arguments)
+        else:
+            result = await asyncio.to_thread(fn, **call.arguments)
+            if inspect.isawaitable(result):
+                result = await result
         self._audit("tool_result", session, tool=call.name, result=result)
         return result
 

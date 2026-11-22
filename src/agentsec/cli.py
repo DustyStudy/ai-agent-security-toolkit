@@ -14,6 +14,7 @@ from typing import Any
 from agentsec import __version__
 from agentsec.configscan import (
     ConfigFinding,
+    acceptance,
     check_pins,
     load_accepted,
     load_pins,
@@ -273,8 +274,11 @@ def cmd_scan_config(args: argparse.Namespace) -> int:
     if args.accept and not args.update_pins:
         print("error: --accept needs --pins FILE and --update-pins", file=sys.stderr)
         return 2
+    if args.accept and not (args.reason or "").strip():
+        print("error: --accept needs --reason TEXT", file=sys.stderr)
+        return 2
     pins_path = args.pins and Path(args.pins)
-    accepted: dict[str, str] = {}
+    accepted: dict[str, dict[str, str]] = {}
     pin_findings = []
     try:
         scan = scan_config(args.path)
@@ -290,7 +294,7 @@ def cmd_scan_config(args: argparse.Namespace) -> int:
         if item_id not in flagged or item_id not in scan.items:
             print(f"error: --accept {show(item_id)}: no injection finding on it", file=sys.stderr)
             return 2
-        accepted[item_id] = scan.items[item_id].fingerprint
+        accepted[item_id] = acceptance(scan.items[item_id].fingerprint, args.reason)
     blocking, waived = split_accepted(scan, accepted)
     findings = blocking + pin_findings
 
@@ -299,7 +303,11 @@ def cmd_scan_config(args: argparse.Namespace) -> int:
         return [{"item": show(f.item), "kind": f.kind, "detail": f.detail} for f in found]
 
     if args.json:
-        report = {"items": len(scan.items), "findings": rows(findings), "accepted": rows(waived)}
+        waived_rows = [
+            row | {k: show(accepted[f.item][k]) for k in ("reason", "accepted_at")}
+            for row, f in zip(rows(waived), waived, strict=True)
+        ]
+        report = {"items": len(scan.items), "findings": rows(findings), "accepted": waived_rows}
         print(json.dumps(report, indent=2))
     else:
         if not pins_path:
@@ -308,7 +316,12 @@ def cmd_scan_config(args: argparse.Namespace) -> int:
         for f in findings:
             print(f"{f.kind.upper():<9} {show(f.item)}: {f.detail}")
         for f in waived:
-            print(f"ACCEPTED  {show(f.item)}: {f.kind}, {f.detail}")
+            # The reason comes from the pin file, so it is escaped like everything else.
+            why = accepted[f.item]
+            print(
+                f"ACCEPTED  {show(f.item)}: {f.kind}, {f.detail} "
+                f"(reason: {show(why['reason'])}; accepted {show(why['accepted_at'])})"
+            )
         tail = f", {len(waived)} accepted" if waived else ""
         print(f"{len(scan.items)} item(s), {len(findings)} finding(s){tail}")
     if not args.update_pins:
@@ -615,7 +628,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="ITEM_ID",
         help="With --pins and --update-pins: record this entry's injection finding as a reviewed "
-        "false positive, until the entry changes. Repeat for more entries.",
+        "false positive, until the entry changes. Repeat for more entries. Needs --reason.",
+    )
+    sc.add_argument(
+        "--reason",
+        metavar="TEXT",
+        help="With --accept: why the finding is a false positive. Stored in the pin file.",
     )
     sc.add_argument("--json", action="store_true", help="Print findings as JSON.")
     sc.set_defaults(func=cmd_scan_config)

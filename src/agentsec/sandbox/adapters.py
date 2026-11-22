@@ -86,20 +86,28 @@ async def _arun(
         return _failure(exc)
 
 
+def _dict_entries(
+    guard: ToolGuard, session: Session, entries: list[dict[str, Any]]
+) -> Iterator[dict[str, Any]]:
+    """Yield the well-formed entries; audit each non-dict one as a denial and drop it."""
+    for entry in entries:
+        if isinstance(entry, dict):
+            yield entry
+        else:
+            # .get() would raise and crash the agent loop. "" is never a policy tool, so the
+            # guard denies and audits the malformed entry (default deny returns before any
+            # blocking check, so the sync call is safe on the async path too). It has no id,
+            # and a result with an empty call id would be rejected, so none is made.
+            guard.authorize(ToolCall(name="", arguments={}, id=""), session)
+
+
 # ------------------------------------------------------------------------ Anthropic
 
 
 def _anthropic_calls(
     guard: ToolGuard, session: Session, content_blocks: list[dict[str, Any]]
 ) -> Iterator[ToolCall]:
-    for block in content_blocks:
-        if not isinstance(block, dict):
-            # .get() would raise and crash the agent loop. "" is never a policy tool, so the
-            # guard denies and audits the malformed entry (default deny returns before any
-            # blocking check, so the sync call is safe on the async path too). It has no id,
-            # and a tool_result with an empty tool_use_id would be rejected, so none is made.
-            guard.authorize(ToolCall(name="", arguments={}, id=""), session)
-            continue
+    for block in _dict_entries(guard, session, content_blocks):
         if block.get("type") != "tool_use":
             continue
         raw_input: Any = block.get("input")
@@ -152,7 +160,7 @@ async def arun_anthropic_tool_uses(
 def parse_openai_tool_call(tc: dict[str, Any]) -> tuple[ToolCall, str | None]:
     """Parse one ``tool_calls`` entry. The second item is a refusal message, or ``None``."""
     if not isinstance(tc, dict):
-        tc = {}  # no name: the guard denies and audits it like any unknown tool
+        tc = {}  # direct callers only (run_* drop these first): no name, so the guard denies
     fn = tc.get("function")
     if not isinstance(fn, dict):
         fn = {}
@@ -185,7 +193,7 @@ def run_openai_tool_calls(
 ) -> list[dict[str, Any]]:
     """Turn chat-completions ``tool_calls`` into ``role: tool`` messages."""
     messages: list[dict[str, Any]] = []
-    for tc in tool_calls:
+    for tc in _dict_entries(guard, session, tool_calls):
         call, refusal = parse_openai_tool_call(tc)
         if refusal is not None:
             guard.authorize(call, session)  # denied; called so the attempt is audited
@@ -204,7 +212,7 @@ async def arun_openai_tool_calls(
 ) -> list[dict[str, Any]]:
     """Async :func:`run_openai_tool_calls`. Registry functions may be sync or ``async def``."""
     messages: list[dict[str, Any]] = []
-    for tc in tool_calls:
+    for tc in _dict_entries(guard, session, tool_calls):
         call, refusal = parse_openai_tool_call(tc)
         if refusal is not None:
             await guard.aauthorize(call, session)  # denied; called so the attempt is audited

@@ -90,16 +90,29 @@ def test_openai_hostile_arguments_are_denied_and_audited(arguments):
     assert [r["data"]["verdict"] for r in sink.records if r["event"] == "tool_decision"] == ["deny"]
 
 
-def test_openai_non_dict_entries_are_denied_and_audited():
+def test_openai_non_dict_entries_are_audited_denials_with_no_tool_message():
     sink = MemorySink()
     guard, session = _guard(sink), Session()
     entries = ["not a dict", None, 7]
-    messages = run_openai_tool_calls(guard, session, entries, {})  # type: ignore[arg-type]
-    amessages = asyncio.run(arun_openai_tool_calls(guard, session, entries, {}))  # type: ignore[arg-type]
-    assert len(messages) == len(amessages) == 3
-    assert all(m["content"].startswith("Tool call refused") for m in messages + amessages)
+    # No role:tool message: one with an empty tool_call_id would be rejected on the next turn.
+    assert run_openai_tool_calls(guard, session, entries, {}) == []  # type: ignore[arg-type]
+    assert asyncio.run(arun_openai_tool_calls(guard, session, entries, {})) == []  # type: ignore[arg-type]
     verdicts = [r["data"]["verdict"] for r in sink.records if r["event"] == "tool_decision"]
     assert verdicts == ["deny"] * 6
+
+
+def test_openai_real_tool_call_next_to_a_non_dict_entry_still_runs():
+    guard, session = _guard(), Session()
+    entries = [None, {"id": "c1", "function": {"name": "fetch", "arguments": "{}"}}]
+    expected = [{"role": "tool", "tool_call_id": "c1", "content": "page"}]
+    registry = {"fetch": lambda: "page"}
+    assert run_openai_tool_calls(guard, session, entries, registry) == expected  # type: ignore[arg-type]
+    assert asyncio.run(arun_openai_tool_calls(guard, session, entries, registry)) == expected  # type: ignore[arg-type]
+
+
+def test_parse_openai_tool_call_does_not_raise_on_a_non_dict_entry():
+    call, refusal = parse_openai_tool_call(None)  # type: ignore[arg-type]
+    assert (call.name, call.arguments, refusal) == ("", {}, None)
 
 
 def test_anthropic_non_dict_blocks_are_audited_denials_with_no_tool_result():

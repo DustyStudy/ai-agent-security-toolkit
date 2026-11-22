@@ -15,6 +15,7 @@ import ipaddress
 import json
 import logging
 import math
+import os
 import re
 import threading
 import time
@@ -23,6 +24,7 @@ import urllib.request
 import uuid
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Generator, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -74,6 +76,12 @@ _ROLES = {"system", "developer", "user", "assistant", "tool"}
 _FINISH = {"stop", "length", "tool_calls", "content_filter"}
 WITHHELD_NOTICE = "A tool call was withheld by policy."
 MAX_CONCURRENT_AUTH = 8  # token verifications in flight, across all clients
+# Model calls in flight, across all users (limits.concurrent_requests is per user). Each holds a
+# thread for up to twice upstream_timeout_s, so they get their own pool and a 503 when it is full.
+MAX_CONCURRENT_UPSTREAM = 32
+# Audit records one peer can cause before it is authenticated: a burst, then a slow refill.
+PREAUTH_AUDIT_BURST = 10
+PREAUTH_AUDIT_PER_MIN = 6
 _TOKEN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "agentsec_token_id", default=None
 )
@@ -114,7 +122,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect)
+# No proxies: HTTP(S)_PROXY from the environment would send prompts and the upstream key through
+# the corporate proxy, even for a 127.0.0.1 upstream.
+_OPENER = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
 
 
 def http_transport(upstream: Upstream, body: bytes, timeout: float, max_bytes: int) -> Any:
@@ -253,6 +263,64 @@ class _Limiter:
                     del self._active[user]
 
 
+class _AuditBudget:
+    """Per-peer token bucket for audit records written before authentication.
+
+    Without it a peer looping bad tokens fills the audit volume, and a full volume fails every
+    user's request closed. Suppressed records are counted in a log line instead.
+    """
+
+    def __init__(self, burst: int, per_min: float, clock: Callable[[], float]) -> None:
+        self._burst, self._rate, self._clock = burst, per_min / 60, clock
+        self._peers: dict[str, list[float]] = {}  # peer -> [tokens, last refill, suppressed]
+        self._lock = threading.Lock()
+        self._swept = clock()
+
+    def allow(self, peer: str) -> bool:
+        with self._lock:
+            now = self._clock()
+            if now - self._swept >= 60:
+                # Forget peers whose bucket has refilled, or every peer ever seen stays in memory.
+                self._swept = now
+                full = self._burst / self._rate
+                for idle in [p for p, b in self._peers.items() if now - b[1] >= full]:
+                    self._summary(idle, self._peers.pop(idle))
+            bucket = self._peers.setdefault(peer, [self._burst, now, 0])
+            bucket[0] = min(self._burst, bucket[0] + (now - bucket[1]) * self._rate)
+            bucket[1] = now
+            if bucket[0] < 1:
+                bucket[2] += 1
+                return False
+            bucket[0] -= 1
+            self._summary(peer, bucket)
+            return True
+
+    @staticmethod
+    def _summary(peer: str, bucket: list[float]) -> None:
+        if bucket[2]:
+            _LOG.warning("suppressed %d pre-auth audit records from peer %r", int(bucket[2]), peer)
+            bucket[2] = 0
+
+
+def _peer(scope: Scope) -> str | None:
+    client = scope.get("client")
+    return str(client[0]) if client else None
+
+
+def _content_part(part: Any) -> dict[str, Any]:
+    """One message content part, rebuilt: text or an image. Nothing else is forwarded.
+
+    A model server may fetch whatever a ``video_url`` or ``audio_url`` part names (SSRF), and no
+    check here reads audio or files. Remote image URLs are refused in ``_screen_messages``.
+    """
+    kind = part.get("type") if isinstance(part, dict) else None
+    if kind == "text" and isinstance(part.get("text"), str):
+        return {"type": "text", "text": part["text"]}
+    if kind == "image_url" and part.get("image_url") is not None:
+        return {"type": "image_url", "image_url": part["image_url"]}
+    raise HttpError(400, "unsupported message content part", "bad_request")
+
+
 def _texts(content: Any) -> list[str]:
     if isinstance(content, str):
         return [content]
@@ -305,6 +373,8 @@ class Gateway:
         self._audit_probe: Callable[[], None] | None = None
         if sink is None:
             sink = FileSink(config.audit_file)
+            # Created owner-only, like the token store (POSIX; Windows uses the folder's ACL).
+            os.close(os.open(sink.path, os.O_CREAT | os.O_WRONLY, 0o600))
             self._audit_probe = sink.check_writable
             if config.cef_file:
                 # The hash-chained file is the record; CEF is a copy for the SIEM, and TeeSink
@@ -331,6 +401,18 @@ class Gateway:
         self._oidc = None if config.oidc is None else OidcVerifier(config.oidc, fetch=jwks_fetch)
         self._auth_slots = asyncio.Semaphore(MAX_CONCURRENT_AUTH)
         self._limiter = _Limiter(config.requests_per_min, config.concurrent_requests, clock)
+        self._preauth_audit = _AuditBudget(PREAUTH_AUDIT_BURST, PREAUTH_AUDIT_PER_MIN, clock)
+        # Two pools, so slow generations cannot starve auth and policy lookups of threads. A
+        # request holds at most one upstream thread, and _upstream_active (event loop only) keeps
+        # requests within the pool, so nothing queues there.
+        self._upstream_pool = ThreadPoolExecutor(
+            MAX_CONCURRENT_UPSTREAM, thread_name_prefix="agentsec-upstream"
+        )
+        self._upstream_active = 0
+        # Auth holds at most MAX_CONCURRENT_AUTH of these; the rest serve policy and token work.
+        self._control_pool = ThreadPoolExecutor(
+            2 * MAX_CONCURRENT_AUTH, thread_name_prefix="agentsec-control"
+        )
         self._tokens = (
             None if config.tokens is None else TokenStore(config.tokens.store, clock=wall_clock)
         )
@@ -368,6 +450,7 @@ class Gateway:
             return  # lifespan is turned off in serve(); websockets are not served
         send = self._counted(send)
         request_id = uuid.uuid4().hex
+        user, peer = None, _peer(scope)
         try:
             path, method = scope["path"], scope["method"]
             if path == "/healthz" and method == "GET":
@@ -377,8 +460,9 @@ class Gateway:
             user, groups, token_id = await self._identify(scope, request_id)
             _TOKEN_ID.set(token_id)  # recorded on this request's audit records
             # A reload reads and verifies files: off the event loop.
-            policies, gp = await asyncio.to_thread(self._group_policy, groups)
+            policies, gp = await self._off_loop(self._control_pool, self._group_policy, groups)
             if path == "/v1/models" and method == "GET":
+                self._log_request("gateway_models_listed", user, groups, policies, gp, request_id)
                 data = [
                     {"id": n, "object": "model", "owned_by": "agentsec"}
                     for n in self.config.upstreams
@@ -389,7 +473,7 @@ class Gateway:
             if self._tokens is not None and (path == "/tokens" or path.startswith("/tokens/")):
                 with self._limiter.slot(user):
                     await self._serve_tokens(
-                        scope, receive, send, user, groups, token_id, request_id
+                        scope, receive, send, user, groups, token_id, request_id, policies, gp
                     )
                 return
             if path == "/mcp" and self._mcp is not None:
@@ -413,22 +497,31 @@ class Gateway:
                 except TimeoutError:
                     raise HttpError(408, "request body timed out", "body_timeout") from None
                 # Policy checks may resolve DNS and the upstream call blocks: keep both off the loop.
-                status, payload, stream = await asyncio.to_thread(
-                    self._complete, body, user, groups, request_id, policies, gp
-                )
-                if not isinstance(payload, dict):  # holdback: released as it is checked
-                    await self._stream_events(send, payload, request_id)
-                    return
+                if self._upstream_active >= MAX_CONCURRENT_UPSTREAM:
+                    raise HttpError(503, "busy", "busy")  # rather than queue behind slow calls
+                self._upstream_active += 1
+                try:
+                    status, payload, stream = await self._off_loop(
+                        self._upstream_pool,
+                        self._complete, body, user, groups, request_id, policies, gp,
+                    )  # fmt: skip
+                    if not isinstance(payload, dict):  # holdback: released as it is checked
+                        await self._stream_events(send, payload, request_id)
+                        return
+                finally:
+                    self._upstream_active -= 1
         except HttpError as e:
             if not e.audited:
-                self._log_rejection(e, request_id)
+                self._log_rejection(e, request_id, user, peer)
             await self._error(send, e, request_id)
             return
-        except OSError:
+        except OSError as e:
             # Most likely the audit file: an unaudited model call is a gap in the evidence.
+            self._log_failure(e, request_id, user, peer)
             await self._error(send, HttpError(503, "unavailable", "unavailable"), request_id)
             return
-        except Exception:  # noqa: BLE001 - fail closed, never leak internals to the client
+        except Exception as e:  # noqa: BLE001 - fail closed, never leak internals to the client
+            self._log_failure(e, request_id, user, peer)
             await self._error(send, HttpError(500, "internal error", "internal_error"), request_id)
             return
         if stream:
@@ -439,10 +532,11 @@ class Gateway:
     # ------------------------------------------------------------------ tokens
     async def _serve_tokens(
         self, scope: Scope, receive: Receive, send: Send, user: str, groups: tuple[str, ...],
-        token_id: str | None, request_id: str,
+        token_id: str | None, request_id: str, policies: PolicySet, gp: GroupPolicy,
     ) -> None:  # fmt: skip
         """POST /tokens, GET /tokens, DELETE /tokens/<id>: a user's own access tokens."""
-        assert self._tokens is not None  # noqa: S101 - the route checks it
+        tokens = self._tokens
+        assert tokens is not None  # noqa: S101 - the route checks it
         settings = self.config.tokens
         assert settings is not None  # noqa: S101 - set together with the store
         if token_id is not None:
@@ -451,7 +545,8 @@ class Gateway:
         path, method = scope["path"], scope["method"]
         log = self._audit.bind(actor=user, session_id=request_id)
         if path == "/tokens" and method == "GET":
-            listed = await asyncio.to_thread(self._tokens.list, user=user)
+            listed = await self._off_loop(self._control_pool, lambda: tokens.list(user=user))
+            self._log_request("gateway_tokens_listed", user, groups, policies, gp, request_id)
             await self._json(send, 200, {"data": [t.public() for t in listed]}, request_id)
             return
         if path == "/tokens" and method == "POST":
@@ -465,9 +560,10 @@ class Gateway:
                 raise HttpError(408, "request body timed out", "body_timeout") from None
             name, ttl_s = self._token_request(body, settings)
             try:
-                info, token = await asyncio.to_thread(
-                    self._tokens.issue, user, groups, name, ttl_s, settings.max_per_user
-                )
+                info, token = await self._off_loop(
+                    self._control_pool,
+                    tokens.issue, user, groups, name, ttl_s, settings.max_per_user,
+                )  # fmt: skip
             except TokenError as e:
                 raise HttpError(409, str(e), "too_many_tokens") from None
             log.log("gateway_token_issued", token_id=info.id, name=name, expires=info.expires)
@@ -477,7 +573,9 @@ class Gateway:
             return
         if path.startswith("/tokens/") and method == "DELETE":
             target = path[len("/tokens/") :]
-            done = await asyncio.to_thread(self._tokens.revoke, target, user=user)
+            done = await self._off_loop(
+                self._control_pool, lambda: tokens.revoke(target, user=user)
+            )
             if not done:
                 raise HttpError(404, "no such token", "not_found")  # also someone else's
             log.log("gateway_token_revoked", token_id=target, by="owner")
@@ -513,12 +611,15 @@ class Gateway:
             raise HttpError(400, "ttl_days is above the allowed maximum", "bad_request")
         return name, ttl_s
 
-    def _from_access_token(self, token: str, request_id: str) -> tuple[str, tuple[str, ...], str]:
+    def _from_access_token(
+        self, token: str, request_id: str, peer: str | None
+    ) -> tuple[str, tuple[str, ...], str]:
         assert self._tokens is not None  # noqa: S101 - callers check it
         try:
             info = self._tokens.verify(token)
         except TokenError as e:
-            self._audit.log("gateway_auth_failed", request_id=request_id, reason=str(e))
+            # The store's reasons are a fixed set; the only variable part is its own token id.
+            self._log_auth_failed(request_id, str(e), peer)
             raise HttpError(401, "unauthenticated", "unauthenticated", audited=True) from None
         return info.user, info.groups, info.id
 
@@ -544,6 +645,12 @@ class Gateway:
             await send(message)
 
         caller = Caller(user, groups, policies, gp, request_id, _TOKEN_ID.get())
+        # Initialize, session delete and the like leave no record of their own in McpGateway.
+        self._log_request(
+            "gateway_mcp_request", user, groups, policies, gp, request_id,
+            method=scope["method"],
+            session=any(k.lower() == b"mcp-session-id" for k, _ in scope.get("headers", [])),
+        )  # fmt: skip
         # One deadline for the whole exchange: a stalled body or upstream holds a slot otherwise.
         deadline = self.config.body_timeout_s + 2 * self.config.upstream_timeout_s
         try:
@@ -570,7 +677,7 @@ class Gateway:
         try:
             _check_origin_host(scope, frozenset(), self._admin_hosts)
         except HttpError as e:
-            self._log_rejection(e, request_id)
+            self._log_rejection(e, request_id, None, _peer(scope))
             await self._error(send, e, request_id)
             return
         path, method = scope["path"], scope["method"]
@@ -582,10 +689,11 @@ class Gateway:
             return
         try:
             # Without traffic nothing else checks for a new bundle; this keeps readiness honest.
-            await asyncio.to_thread(self._maybe_reload)
+            await self._off_loop(self._control_pool, self._maybe_reload)
         except Exception:  # noqa: BLE001 - _maybe_reload logs its own failures
             _LOG.exception("bundle reload from the admin listener failed")
-        await asyncio.to_thread(self.metrics.flush)  # redeliver a SIEM backlog even with no traffic
+        # Redeliver a SIEM backlog even with no traffic.
+        await self._off_loop(self._control_pool, self.metrics.flush)
         policies = self._policies
         if path == "/metrics":
             body = self.metrics.render(policies).encode()
@@ -605,7 +713,7 @@ class Gateway:
         audit_ok = True
         if self._audit_probe is not None:
             try:
-                await asyncio.to_thread(self._audit_probe)
+                await self._off_loop(self._control_pool, self._audit_probe)
             except OSError:
                 audit_ok = False
         payload = {
@@ -701,24 +809,70 @@ class Gateway:
         finally:
             self._reload_lock.release()
 
-    def _log_rejection(self, e: HttpError, request_id: str) -> None:
+    @staticmethod
+    async def _off_loop(pool: ThreadPoolExecutor, fn: Callable[..., Any], *args: Any) -> Any:
+        """``asyncio.to_thread`` on one of our own pools (the contextvars come along, as there)."""
+        ctx = contextvars.copy_context()
+        return await asyncio.get_running_loop().run_in_executor(pool, ctx.run, fn, *args)
+
+    def _log_request(
+        self, event: str, user: str, groups: tuple[str, ...], policies: PolicySet,
+        gp: GroupPolicy, request_id: str, **data: Any,
+    ) -> None:  # fmt: skip
+        """The record of a request that is not a chat completion, shaped like gateway_request."""
+        self._audit.bind(actor=user, session_id=request_id).log(
+            event,
+            groups=list(groups),
+            policy_group=gp.group,
+            policy_rev=policies.revision,
+            mode=gp.mode,
+            token_id=_TOKEN_ID.get(),
+            **data,
+        )
+
+    def _log_auth_failed(self, request_id: str, reason: str, peer: str | None) -> None:
+        if self._preauth_audit.allow(peer or ""):
+            self._audit.log("gateway_auth_failed", request_id=request_id, reason=reason, peer=peer)
+
+    def _log_rejection(
+        self, e: HttpError, request_id: str, user: str | None, peer: str | None
+    ) -> None:
+        # A refused user is always recorded; an unidentified peer only within its budget.
+        if user is None and not self._preauth_audit.allow(peer or ""):
+            return
         try:
-            self._audit.log("gateway_rejected", request_id=request_id, status=e.status, code=e.code)
+            self._audit.bind(actor=user).log(
+                "gateway_rejected", request_id=request_id, status=e.status, code=e.code, peer=peer
+            )
         except Exception:  # noqa: BLE001 - the client gets its error either way
             _LOG.warning("could not audit a rejected request", exc_info=True)
+
+    def _log_failure(
+        self, e: Exception, request_id: str, user: str | None, peer: str | None
+    ) -> None:
+        _LOG.error("request %s failed", request_id, exc_info=e)
+        if user is None and not self._preauth_audit.allow(peer or ""):
+            return
+        try:
+            # Only the type: an exception message can carry secret material.
+            self._audit.bind(actor=user).log(
+                "gateway_error", request_id=request_id, error=type(e).__name__, peer=peer
+            )
+        except Exception:  # noqa: BLE001 - best effort; the audit file may be what failed
+            _LOG.warning("could not audit a failed request", exc_info=True)
 
     async def _identify(
         self, scope: Scope, request_id: str
     ) -> tuple[str, tuple[str, ...], str | None]:
         token_id = None
-        bearer = _bearer(scope)
+        bearer, peer = _bearer(scope), _peer(scope)
         if self._tokens is not None and bearer is not None and looks_like_token(bearer):
             # An access token stands in for the SSO sign-in it was issued after, from any peer.
             if self._auth_slots.locked():
                 raise HttpError(503, "busy", "busy")
             async with self._auth_slots:
-                user, groups, token_id = await asyncio.to_thread(
-                    self._from_access_token, bearer, request_id
+                user, groups, token_id = await self._off_loop(
+                    self._control_pool, self._from_access_token, bearer, request_id, peer
                 )
         elif self._oidc is None:
             user, groups = self._from_trusted_header(scope)
@@ -729,12 +883,15 @@ class Gateway:
                 raise HttpError(503, "busy", "busy")
             async with self._auth_slots:
                 # A JWKS refresh is blocking network I/O: keep it off the event loop.
-                user, groups = await asyncio.to_thread(
-                    self._from_token, self._oidc, scope, request_id
+                user, groups = await self._off_loop(
+                    self._control_pool, self._from_token, self._oidc, scope, request_id
                 )
         allowed = self.config.allowed_groups
         if allowed and not set(groups) & set(allowed):
-            raise HttpError(403, "forbidden", "forbidden")
+            # Audited here, where the user is known: the caller only sees the error.
+            e = HttpError(403, "forbidden", "forbidden", audited=True)
+            self._log_rejection(e, request_id, user, peer)
+            raise e
         return user, groups, token_id
 
     def _from_token(
@@ -746,9 +903,9 @@ class Gateway:
             if scheme.lower() != "bearer" or not token.strip():
                 raise TokenRejected("no single bearer token")
             return verifier.verify(token.strip())
-        except TokenRejected as e:
-            # The reason is for the log; the client learns nothing about why.
-            self._audit.log("gateway_auth_failed", request_id=request_id, reason=str(e))
+        except TokenRejected:
+            # A fixed reason: the verifier's message can quote the token's own header (alg).
+            self._log_auth_failed(request_id, "bearer token rejected", _peer(scope))
             raise HttpError(401, "unauthenticated", "unauthenticated", audited=True) from None
 
     def _from_trusted_header(self, scope: Scope) -> tuple[str, tuple[str, ...]]:
@@ -1000,7 +1157,7 @@ class Gateway:
             while True:
                 try:
                     # Each step may wait on the upstream and run validators: off the loop.
-                    event = await asyncio.to_thread(next, events, None)
+                    event = await self._off_loop(self._upstream_pool, next, events, None)
                 except Exception as e:  # noqa: BLE001 - mapped below; never leak internals
                     if not started:
                         raise
@@ -1069,7 +1226,10 @@ class Gateway:
                 raise HttpError(400, "each message needs a valid role", "bad_request")
             if not (m.get("content") is None or isinstance(m.get("content"), str | list)):
                 raise HttpError(400, "message content must be a string or a list", "bad_request")
-            clean.append({k: v for k, v in m.items() if k in _MESSAGE_FIELDS})
+            m = {k: v for k, v in m.items() if k in _MESSAGE_FIELDS}
+            if isinstance(m.get("content"), list):
+                m["content"] = [_content_part(p) for p in m["content"]]
+            clean.append(m)
         req = {k: v for k, v in data.items() if k in _REQUEST_FIELDS}
         req["messages"] = clean
         max_tokens = data.get("max_tokens", self.config.max_tokens_cap)

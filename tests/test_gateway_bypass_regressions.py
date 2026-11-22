@@ -39,7 +39,7 @@ BOB = [(b"x-auth-request-user", b"bob"), (b"x-auth-request-groups", b"eng")]
 UNKNOWN = "agt_" + "A" * 43  # token-shaped, never issued
 OUTSIDE = "10.20.30.40"  # not in trusted_proxies
 # Every audit event a request that was never identified may leave behind.
-REFUSAL_EVENTS = {"gateway_start", "gateway_auth_failed", "gateway_rejected"}
+REFUSAL_EVENTS = {"gateway_start", "gateway_auth_failed", "gateway_rejected", "gateway_error"}
 
 
 def gateway(tmp_path, extra=TOKENS + MCP):

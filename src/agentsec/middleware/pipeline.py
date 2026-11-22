@@ -94,7 +94,9 @@ class AgentMiddleware:
         if self.output_guard is None:
             return GuardResult(text=text, allowed=True)
         result = self.output_guard.process(text)
-        self._log(ev.MODEL_OUTPUT, text=text, delivered=result.allowed)
+        # result.text, never the original: what a validator blocked or redacted (a protected
+        # string, say, which the audit log's own secret masking does not know) stays out.
+        self._log(ev.MODEL_OUTPUT, text=result.text, delivered=result.allowed)
         if result.violations:
             self._log(
                 ev.VALIDATION,

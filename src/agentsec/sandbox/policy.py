@@ -25,6 +25,22 @@ class PolicyError(ValueError):
     """Raised when a policy document is malformed."""
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Safe YAML that refuses duplicate mapping keys (same check as configscan._YamlLoader)."""
+
+    def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
+        # PyYAML keeps the last duplicate, so a second `Bash:` block would silently replace
+        # the first and drop its approval and taint gating. Keys are taken before super()
+        # folds `<<` merges into node.value: overriding a merged key is not a duplicate.
+        key_nodes = [key for key, _ in node.value if key.tag != "tag:yaml.org,2002:merge"]
+        mapping = super().construct_mapping(node, deep)
+        keys = [self.construct_object(key, deep=True) for key in key_nodes]
+        if len(set(keys)) != len(keys):
+            line = node.start_mark.line + 1
+            raise PolicyError(f"duplicate key in the mapping that starts on line {line}")
+        return mapping
+
+
 @dataclass
 class ArgRule:
     type: str = "string"
@@ -100,7 +116,8 @@ class Policy:
     @classmethod
     def from_yaml(cls, path: str | Path) -> Policy:
         with Path(path).open(encoding="utf-8") as fh:
-            return cls.from_dict(yaml.safe_load(fh) or {})
+            data = yaml.load(fh, Loader=_UniqueKeyLoader)  # noqa: S506 - a SafeLoader subclass
+        return cls.from_dict(data or {})
 
     # --------------------------------------------------------------- inspection
     def lint(self) -> list[str]:

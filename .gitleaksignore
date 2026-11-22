@@ -4,3 +4,9 @@ b2e2ebb925a160b3868f9dc93da1c15d22841878:tests/test_security_regressions.py:gitl
 3bc7ed9b777511239b42e518ab767e17a50a97eb:tests/test_security_regressions.py:generic-api-key:1314
 # RFC 6455 sample nonce in a websocket-upgrade test, since built at runtime.
 f8751d35f3bb82a02809fca83d6bf1f83739befa:tests/test_gateway_serve.py:generic-api-key:137
+# Synthetic credentials in the audit-redaction test fixtures, and a comment in redact.py (commit 4f423d5536539f7a8534d91b1ee8bc5d78e51bce). Reviewed: not secrets.
+4f423d5536539f7a8534d91b1ee8bc5d78e51bce:src/agentsec/middleware/redact.py:curl-auth-user:74
+4f423d5536539f7a8534d91b1ee8bc5d78e51bce:tests/test_audit_redaction_hardening.py:curl-auth-user:127
+4f423d5536539f7a8534d91b1ee8bc5d78e51bce:tests/test_audit_redaction_hardening.py:curl-auth-user:128
+4f423d5536539f7a8534d91b1ee8bc5d78e51bce:tests/test_audit_redaction_hardening.py:curl-auth-header:139
+4f423d5536539f7a8534d91b1ee8bc5d78e51bce:tests/test_audit_redaction_hardening.py:curl-auth-header:140

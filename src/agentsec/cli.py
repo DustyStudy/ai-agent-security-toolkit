@@ -329,20 +329,21 @@ def cmd_scan_config(args: argparse.Namespace) -> int:
 
 
 def cmd_scan_workflows(args: argparse.Namespace) -> int:
-    from agentsec.workflowscan import scan_workflows
+    from agentsec.workflowscan import scan_workflows, workflow_files
 
     try:
+        scanned = len(workflow_files(args.path))
         findings = scan_workflows(args.path)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.json:
         rows = [{"item": show(f.item), "kind": f.kind, "detail": f.detail} for f in findings]
-        print(json.dumps({"findings": rows}, indent=2))
+        print(json.dumps({"files_scanned": scanned, "findings": rows}, indent=2))
     else:
         for f in findings:
             print(f"{f.kind.upper()} {show(f.item)}: {f.detail}")
-        print(f"{len(findings)} finding(s)")
+        print(f"{scanned} file(s) scanned, {len(findings)} finding(s)")
     return 1 if findings else 0
 
 

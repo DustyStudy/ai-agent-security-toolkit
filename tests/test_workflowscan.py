@@ -192,7 +192,7 @@ def test_known_limit_plain_pull_request_is_not_reported(tmp_path):
 
 
 def test_cli_exit_codes_json_and_safe_output(tmp_path, capsys):
-    assert main(["scan-workflows", str(tmp_path)]) == 0  # no workflows directory
+    assert main(["scan-workflows", str(tmp_path)]) == 2  # no workflows: nothing was scanned
     assert main(["scan-workflows", str(tmp_path / "missing")]) == 2
     text = 'on: issues\njobs:\n  "evil\\e[2J":\n    steps:\n      - run: claude -p x\n'
     workflow(tmp_path, text)

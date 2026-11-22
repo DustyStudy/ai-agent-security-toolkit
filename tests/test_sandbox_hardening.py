@@ -38,7 +38,9 @@ def test_run_closes_both_output_pipes(tmp_path):
         warnings.simplefilter("always")
         assert runner.run("py", ["-c", "print('ok')"]).stdout.strip() == "ok"
         gc.collect()  # an unclosed pipe warns when it is collected
-    assert not [w for w in caught if issubclass(w.category, ResourceWarning)]
+    # Only pipe leaks count: another test's unclosed sqlite connection can be collected here too.
+    leaks = [w for w in caught if "unclosed file" in str(w.message)]
+    assert not leaks
 
 
 # --------------------------------------------------------------------------- A2

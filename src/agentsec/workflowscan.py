@@ -86,18 +86,20 @@ def _write_access(permissions: Any) -> str:
     return "all" if permissions == "write-all" else "none"
 
 
-def _agent_step(job: Mapping[Any, Any]) -> str | None:
-    """The first ``uses:`` or ``run:`` in the job that names an agent."""
+def _agent_step(job: Mapping[Any, Any]) -> tuple[Mapping[Any, Any], str] | None:
+    """The first step (or the job itself) whose ``uses:`` or ``run:`` names an agent."""
     for step in (job, *_steps(job)):
         for key in ("uses", "run"):
             value = step.get(key)
             if isinstance(value, str) and _AGENT.search(value):
-                return value
+                return step, value
     return None
 
 
-def _gated(job: Mapping[Any, Any]) -> bool:
-    conditions = [job.get("if"), *(s.get("if") for s in _steps(job))]
+def _gated(job: Mapping[Any, Any], step: Mapping[Any, Any]) -> bool:
+    # Only the job's ``if:`` or the agent step's own keeps the agent from running: a condition
+    # on some other step does not.
+    conditions = (job.get("if"), step.get("if"))
     return any(_AUTHOR_GATE.search(c) for c in conditions if isinstance(c, str))
 
 
@@ -107,7 +109,18 @@ def _scan_file(path: Path, rel: str) -> list[ConfigFinding]:
             return [ConfigFinding(rel, "unparsed", f"over {MAX_FILE_BYTES} bytes")]
         text = path.read_text(encoding="utf-8-sig")
         workflow = yaml.safe_load(text)
-    except (OSError, ValueError, yaml.YAMLError, RecursionError) as exc:
+    except (
+        OSError,
+        ValueError,
+        yaml.YAMLError,
+        RecursionError,
+        # PyYAML's constructors leak these for a standard tag on a value it does not fit
+        # (`!!bool maybe` is a KeyError); one such file must not hide the others' results.
+        LookupError,
+        AttributeError,
+        TypeError,
+        OverflowError,
+    ) as exc:
         return [ConfigFinding(rel, "unparsed", f"cannot read: {type(exc).__name__}")]
     jobs = workflow.get("jobs") if isinstance(workflow, Mapping) else None
     if not isinstance(jobs, Mapping):
@@ -122,9 +135,10 @@ def _scan_file(path: Path, rel: str) -> list[ConfigFinding]:
     for name, job in jobs.items():
         if not isinstance(job, Mapping):
             continue
-        step = _agent_step(job)
-        if step is None or _gated(job):
+        match = _agent_step(job)
+        if match is None or _gated(job, match[0]):
             continue
+        step = match[1]
         permissions = job["permissions"] if "permissions" in job else workflow.get("permissions")
         detail = (
             f"runs an agent ({show(step.strip(), 80)}) on {', '.join(events)} with no check on "
@@ -135,15 +149,29 @@ def _scan_file(path: Path, rel: str) -> list[ConfigFinding]:
     return findings
 
 
-def scan_workflows(root: str | Path) -> list[ConfigFinding]:
-    """Scan ``root/.github/workflows`` (or one workflow file)."""
+def workflow_files(root: str | Path) -> list[Path]:
+    """The workflow files :func:`scan_workflows` reads for ``root``."""
     root = Path(root)
     if not root.exists():
         raise FileNotFoundError(f"no such file or directory: {root}")
     if root.is_file():
-        return _scan_file(root, root.name)
+        return [root]
     folder = root / ".github" / "workflows"
+    if not folder.is_dir():
+        folder = root  # a workflows folder passed directly
     files = sorted(p for p in folder.glob("*") if p.suffix.lower() in (".yml", ".yaml"))
+    if not files:
+        # Nothing scanned must not read as nothing found.
+        raise ValueError(f"no workflow files found under {root}")
+    return files
+
+
+def scan_workflows(root: str | Path) -> list[ConfigFinding]:
+    """Scan ``root/.github/workflows`` (or a folder of workflow files, or one file)."""
+    root = Path(root)
+    files = workflow_files(root)
+    if root.is_file():
+        return _scan_file(root, root.name)
     findings: list[ConfigFinding] = []
     for path in files:
         findings += _scan_file(path, path.relative_to(root).as_posix())

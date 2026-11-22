@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -40,10 +41,14 @@ from typing import Any
 
 from agentsec.middleware.audit import AuditLogger, FileSink
 from agentsec.sandbox import Policy, Session, ToolGuard
-from agentsec.sandbox.guard import Verdict
+from agentsec.sandbox.guard import Decision, Verdict
+from agentsec.sandbox.validators import Resolver, _default_resolver, check_arg
 from agentsec.types import ToolCall
 
 BLOCK = 2  # the only exit code Claude Code treats as "do not run the tool"
+# Events that name a tool but have nothing left to gate: the tool has already run.
+NOT_GATED = frozenset({"PostToolUse", "PostToolUseFailure"})
+DNS_TIMEOUT = 5.0  # seconds per host
 
 
 @dataclass(frozen=True)
@@ -101,6 +106,53 @@ def load_session(path: Path, session_id: str) -> Session:
     return session
 
 
+def _resolve(host: str) -> list[str]:
+    """Resolve ``host`` within DNS_TIMEOUT, or raise OSError, which the URL check denies on.
+
+    getaddrinfo has no timeout of its own, so it runs in a daemon thread that is abandoned
+    when it is late; the hook process exits right after.
+    """
+    found: list[list[str]] = []
+
+    def work() -> None:
+        try:
+            found.append(_default_resolver(host))
+        except (OSError, UnicodeError):
+            pass  # reported below as "did not resolve"
+
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    thread.join(DNS_TIMEOUT)
+    if not found:
+        raise OSError(f"{host} did not resolve within {DNS_TIMEOUT:g}s")
+    return found[0]
+
+
+def _resolve_urls(policy: Policy, name: str, args: Any) -> Resolver:
+    """Resolve the call's URL hosts now, and return a resolver that only replays the answers.
+
+    A slow DNS server would otherwise stall every other hook process behind the lock. A host
+    that failed or timed out is absent from the answers and fails again on replay: denied.
+    """
+    answers: dict[str, list[str]] = {}
+
+    def lookup(host: str) -> list[str]:
+        answers[host] = _resolve(host)
+        return answers[host]
+
+    def replay(host: str) -> list[str]:
+        if host not in answers:
+            raise OSError(f"{host} did not resolve")
+        return answers[host]
+
+    rule = policy.tools.get(name)
+    if rule is not None and isinstance(args, dict):
+        for arg_name, arg_rule in rule.args.items():
+            if arg_rule.type == "url" and arg_name in args:
+                check_arg(args[arg_name], arg_rule, resolver=lookup)  # for its DNS lookups only
+    return replay
+
+
 def handle(
     event: Mapping[str, Any],
     policy: Policy,
@@ -115,20 +167,28 @@ def handle(
     made, so it has to be made inside the lock or two parallel hooks would chain off the same
     record.
     """
-    if event.get("hook_event_name") != "PreToolUse":
+    event_name = event.get("hook_event_name")
+    # Fail closed: an input that names a tool is a call to gate unless its event is known not
+    # to be one. A missing or misspelt event name must not wave a tool call through unaudited.
+    if event_name != "PreToolUse" and (event_name in NOT_GATED or "tool_name" not in event):
         return HookResult()  # registered on another event by mistake: nothing to decide
     name, session_id = event.get("tool_name"), event.get("session_id")
     if not (isinstance(name, str) and isinstance(session_id, str) and session_id):
         raise ValueError("hook input lacks tool_name or session_id")
     state_dir = Path(state_dir)
     path = _state_file(state_dir, session_id)
+    resolver = _resolve_urls(policy, name, event.get("tool_input", {}))
     with _locked(state_dir / ".lock"):
         logger = AuditLogger(FileSink(audit), actor="claude-code") if audit else None
-        guard = ToolGuard(policy, audit=logger)
+        guard = ToolGuard(policy, audit=logger, resolver=resolver)
         session = load_session(path, session_id)
         call = ToolCall(name, event.get("tool_input", {}), id=str(event.get("tool_use_id", "")))
         guard._audit("tool_request", session, tool=name, arguments=call.arguments)
-        decision = guard.evaluate(call, session)
+        if event_name == "PreToolUse":
+            decision = guard.evaluate(call, session)
+        else:
+            reason = f"hook event {event_name!r} is not PreToolUse"
+            decision = Decision(Verdict.DENY, name, (reason,))
         guard._audit(
             "tool_decision",
             session,

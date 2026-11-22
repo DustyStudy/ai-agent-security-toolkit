@@ -9,7 +9,7 @@ from collections import Counter
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agentsec import __version__
 from agentsec.configscan import (
@@ -38,6 +38,9 @@ from agentsec.threatmodel import (
     render_markdown,
 )
 from agentsec.types import ToolCall
+
+if TYPE_CHECKING:
+    from agentsec.gateway.tokens import TokenSettings
 
 
 def _csv(value: str | None) -> list[str] | None:
@@ -428,6 +431,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if args.check:
         print(f"config ok: {len(config.upstreams)} upstream(s), policy {config.policies.revision}")
         return 0
+    if config.bundle is not None and config.bundle.state_file is not None:
+        from agentsec.gateway.bundle import write_state
+
+        try:
+            # Before the bundle is enforced, and only here: load_config has other callers.
+            write_state(config.bundle.state_file, config.policies)
+        except OSError as e:
+            print(f"invalid gateway config: bundle: {e}", file=sys.stderr)
+            return 2
     serve(config)
     return 0
 
@@ -474,17 +486,32 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     return 0
 
 
+def _token_settings(path: str) -> TokenSettings:
+    """Only the tokens section: a token command must not depend on the bundle or the policy."""
+    import yaml
+
+    from agentsec.gateway.config import ConfigError, _tokens
+
+    try:
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        raise ConfigError(f"{path} is not valid YAML: {e}") from None
+    if not isinstance(data, dict):
+        raise ConfigError(f"{path}: config must be a mapping")
+    tokens = _tokens(data, Path(path).parent)
+    if tokens is None:
+        raise ConfigError(f"{path} has no tokens section")
+    return tokens
+
+
 def cmd_token(args: argparse.Namespace) -> int:
     from datetime import UTC, datetime
 
-    from agentsec.gateway.config import ConfigError, load_config
+    from agentsec.gateway.config import ConfigError
     from agentsec.gateway.tokens import TokenStore
 
     try:
-        settings = load_config(args.config).tokens
-        if settings is None:
-            raise ConfigError("the config has no tokens section")
-        store = TokenStore(settings.store)
+        store = TokenStore(_token_settings(args.config).store)
     except (ConfigError, OSError, ValueError) as e:
         print(f"token {args.action} failed: {e}", file=sys.stderr)
         return 1
@@ -500,43 +527,67 @@ def cmd_token(args: argparse.Namespace) -> int:
             print(f"{t.id}  {t.user:<24} {state:<7} expires {when(t.expires)}  "
                   f"last used {when(t.last_used)}  {t.name}")  # fmt: skip
         return 0
+    if args.action == "enable":
+        # Undoes only the block that offboarding recorded; revoked tokens stay revoked.
+        enabled = store.enable_user(args.user)
+        print(f"{args.user}: {'enabled' if enabled else 'was not disabled'}")
+        return 0 if enabled else 1
     if (args.id is None) == (args.user is None):
         print("token revoke takes --id ID or --user USER", file=sys.stderr)
         return 2
     count = int(store.revoke(args.id)) if args.id else store.revoke_user(args.user)
     print(f"revoked {count} token(s)")
-    return 0
+    return 0 if count else 1  # a mistyped id or user must not look like a revocation
 
 
 def cmd_token_offboard(args: argparse.Namespace) -> int:
-    """Exit 0: nothing overdue; 1: bad input; 3: a revocation is pending past its deadline."""
+    """Exit 0: nothing overdue; 1: bad input, an unreadable config or a missing store;
+    3: a revocation is pending past its deadline."""
     from agentsec.gateway import offboard
-    from agentsec.gateway.config import ConfigError, load_config
+    from agentsec.gateway.config import ConfigError
 
     try:
-        settings = []
-        for path in args.config:
-            tokens = load_config(path).tokens
-            if tokens is None:
-                raise ConfigError(f"{path} has no tokens section")
-            settings.append(tokens)
         text = (
             sys.stdin.read()
             if args.events == "-"
             else (Path(args.events).read_text(encoding="utf-8") if args.events else "")
         )
         events = offboard.parse_events(text) if text.strip() else []
-        deadline = args.deadline_s or min(t.offboarding_deadline_s for t in settings)
-        out = offboard.run(args.ledger, [t.store for t in settings], events, deadline_s=deadline)
+        # Before any config is read: stdin cannot be replayed, a broken gateway config can.
+        offboard.record(args.ledger, events)
+        settings, unread = [], {}
+        for path in args.config:
+            try:
+                settings.append(_token_settings(path))
+            except (ConfigError, OSError, ValueError) as e:
+                unread[path] = f"{type(e).__name__}: {e}"[:200]
+                print(f"token offboard: config not read: {e}", file=sys.stderr)
+        deadline = args.deadline_s or min(
+            (t.offboarding_deadline_s for t in settings), default=offboard.DEFAULT_DEADLINE_S
+        )
+        out = offboard.run(
+            args.ledger, [t.store for t in settings], [], deadline_s=deadline, unread=unread
+        )
         if args.metrics_file:
             Path(args.metrics_file).write_text(offboard.metrics_text(out), encoding="utf-8")
     except (ConfigError, offboard.OffboardError, OSError, ValueError) as e:
         print(f"token offboard failed: {e}", file=sys.stderr)
         return 1
     print(f"revoked {out.revoked} token(s); {len(out.pending)} pending, {len(out.overdue)} overdue")
+    for (kind, user, group), count in out.counts.items():
+        what = f"user {user}" if kind == "user" else f"user {user}, group {group}"
+        print(f"  {what}: revoked {count} token(s)")
+    for kind, user, group in out.unmatched:
+        what = f"user {user}" if kind == "user" else f"user {user}, group {group}"
+        print(
+            f"warning: {what} matched no token in any store (names are compared exactly)",
+            file=sys.stderr,
+        )
+    for store in out.missing:
+        print(f"token offboard: token store {store} does not exist on this host", file=sys.stderr)
     for ev in offboard.audit_events(out):
         print(json.dumps(ev), file=sys.stderr)
-    return 3 if out.overdue else 0
+    return 3 if out.overdue else 1 if unread or out.missing else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -718,6 +769,9 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--config", required=True, help="the gateway config with a tokens section")
     tr.add_argument("--id", help="the token id")
     tr.add_argument("--user", help="revoke all of this user's tokens")
+    te = t_sub.add_parser("enable", help="Let a user that offboarding disabled mint tokens again.")
+    te.add_argument("--config", required=True, help="the gateway config with a tokens section")
+    te.add_argument("--user", required=True)
     t.set_defaults(func=cmd_token)
     to = t_sub.add_parser(
         "offboard",

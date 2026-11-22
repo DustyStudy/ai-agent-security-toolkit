@@ -14,7 +14,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import yaml
 
@@ -39,6 +39,11 @@ class _UniqueKeyLoader(yaml.SafeLoader):
             line = node.start_mark.line + 1
             raise PolicyError(f"duplicate key in the mapping that starts on line {line}")
         return mapping
+
+
+def load_yaml_strict(text: str | bytes | IO[str]) -> Any:
+    """``yaml.safe_load`` that raises PolicyError on a duplicate mapping key."""
+    return yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 - a SafeLoader subclass
 
 
 @dataclass
@@ -116,7 +121,7 @@ class Policy:
     @classmethod
     def from_yaml(cls, path: str | Path) -> Policy:
         with Path(path).open(encoding="utf-8") as fh:
-            data = yaml.load(fh, Loader=_UniqueKeyLoader)  # noqa: S506 - a SafeLoader subclass
+            data = load_yaml_strict(fh)
         return cls.from_dict(data or {})
 
     # --------------------------------------------------------------- inspection

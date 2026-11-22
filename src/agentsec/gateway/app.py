@@ -565,6 +565,9 @@ class Gateway:
                     tokens.issue, user, groups, name, ttl_s, settings.max_per_user,
                 )  # fmt: skip
             except TokenError as e:
+                # Disabled after this request was identified: not the per-user limit.
+                if await self._off_loop(self._control_pool, tokens.is_user_disabled, user):
+                    raise HttpError(403, "user disabled", "user_disabled") from None
                 raise HttpError(409, str(e), "too_many_tokens") from None
             log.log("gateway_token_issued", token_id=info.id, name=name, expires=info.expires)
             await self._json(
@@ -886,10 +889,20 @@ class Gateway:
                 user, groups = await self._off_loop(
                     self._control_pool, self._from_token, self._oidc, scope, request_id
                 )
+        e = None
+        # The disabled list lives in the token store: without a `tokens` section there is none,
+        # and a disabled user's SSO identity is accepted. An access token was checked by verify().
+        if (
+            self._tokens is not None
+            and token_id is None
+            and await self._off_loop(self._control_pool, self._tokens.is_user_disabled, user)
+        ):
+            e = HttpError(403, "user disabled", "user_disabled", audited=True)
         allowed = self.config.allowed_groups
-        if allowed and not set(groups) & set(allowed):
-            # Audited here, where the user is known: the caller only sees the error.
+        if e is None and allowed and not set(groups) & set(allowed):
             e = HttpError(403, "forbidden", "forbidden", audited=True)
+        if e is not None:
+            # Audited here, where the user is known: the caller only sees the error.
             self._log_rejection(e, request_id, user, peer)
             raise e
         return user, groups, token_id

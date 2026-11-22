@@ -60,7 +60,7 @@ def test_a_disabled_user_cannot_mint_or_use_tokens_until_enabled(tmp_path, capsy
     old = issue(app)[1]["token"]
     ev = _events(tmp_path, {"disabled_users": ["alice", "carol"]})
     assert _offboard(tmp_path, [cfg], "--events", ev) == 0
-    assert issue(app)[0] == 409  # no new token after offboarding
+    assert issue(app)[0] == 403  # no new token after offboarding
     assert call(app, body=chat(), headers=bearer(old), peer="10.0.0.9")[0] == 401
 
     store = TokenStore(tmp_path / "tokens.db")

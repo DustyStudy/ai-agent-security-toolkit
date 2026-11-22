@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import textwrap
 
 import pytest
+import yaml
 
 from agentsec.gateway import ConfigError, Gateway, UpstreamError, load_config, serve
 from agentsec.gateway.app import _Limiter
@@ -31,9 +33,8 @@ USER = [(b"x-auth-request-user", b"alice"), (b"x-auth-request-groups", b"eng, ml
 
 def write_config(tmp_path, extra: str = "", mode: str = "enforce"):
     (tmp_path / "policy.yaml").write_text(POLICY)
-    (tmp_path / "gateway.yaml").write_text(
-        textwrap.dedent(
-            f"""
+    base = textwrap.dedent(
+        f"""
             identity:
               trusted_proxies: [127.0.0.1/32]
             policy: policy.yaml
@@ -45,9 +46,12 @@ def write_config(tmp_path, extra: str = "", mode: str = "enforce"):
             audit:
               file: audit.jsonl
             """
-        )
-        + textwrap.dedent(extra)
     )
+    # A section in `extra` replaces the base one: the loader refuses a duplicate key.
+    extra = textwrap.dedent(extra)
+    for key in yaml.safe_load(extra) or {}:
+        base = re.sub(rf"^{re.escape(str(key))}:.*\n(?: .*\n)*", "", base, flags=re.MULTILINE)
+    (tmp_path / "gateway.yaml").write_text(base + extra)
     return load_config(tmp_path / "gateway.yaml")
 
 

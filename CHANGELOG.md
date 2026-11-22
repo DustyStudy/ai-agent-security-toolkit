@@ -9,12 +9,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `locked_install_rules()` resolves its requirements path against `cwd` (default: the process working directory when the rule is built). A caller cannot pass a different `cwd` to a locked rule.
 - `identity.trusted_proxies` rejects host bits and prefixes broader than /16 (IPv4) or /48 (IPv6); fix any such entry before upgrading.
 - Gateway content parts are an allowlist: `text`, and inline `data:` images. Video, audio, file and remote image parts get a 400.
-- Tool policies loaded with `Policy.from_yaml` refuse duplicate mapping keys. Previously the last duplicate silently replaced an earlier block. **Known gap:** gateway policy and bundle loading still accept duplicate keys; that follows in a separate change.
+- Tool policies loaded with `Policy.from_yaml` refuse duplicate mapping keys. Previously the last duplicate silently replaced an earlier block. The gateway refuses them too, in its config, its tool policy and a bundle's manifest and policies.
 - `agentsec scan-workflows` exits 2 when no workflow file is found, and its output includes the file count and a `files_scanned` JSON key. An unrelated step's `if:` no longer hides an ungated agent step.
 - `agentsec fuzz --max-asr` exits 2 when no case was scored or any case errored. Unknown category, scenario and mutator names exit 2.
 - `agentsec audit verify` exits 2 on an empty file unless `--allow-empty` is passed.
 - `agentsec token offboard` no longer creates a missing token store (the row stays pending and the command exits 1), and an unreadable gateway config no longer blocks the other gateways. Only `serve` writes the bundle state file. `agentsec token revoke` exits 1 when nothing was revoked.
-- `agentsec token enable --user` re-enables a user; a disabled user cannot be issued access tokens until then. **Known gap:** an OIDC JWT of a disabled user stays valid until its own expiry.
+- `agentsec token enable --user` re-enables a user; a disabled user cannot be issued access tokens until then. With a `tokens` section, the gateway also refuses a disabled user's OIDC or trusted-header sign-in with 403 `user_disabled`, and `POST /tokens` answers the same instead of 409 `too_many_tokens`. A gateway without a `tokens` section has no disabled list and still accepts that user.
 - Claude Code hook: an input that names a tool is gated unless its event is a known non-gating one. The example policy marks Edit and Write as side-effecting and Bash output as untrusted, which asks for approval after the first shell command.
 - The command runner closes its pipes and no longer searches the current directory for executables on Windows. URL arguments with a non-ASCII host are refused. On Windows a path component ending in a dot or space is refused.
 

@@ -1,6 +1,6 @@
 # Design: data-loss prevention for credentials, non-human identities and PII
 
-Status: draft for review, not implemented. Owner: TBD.
+Status: design approved 2026-11-23, not implemented. Owner: TBD.
 
 ## Problem
 
@@ -224,11 +224,13 @@ All hermetic. Every secret-looking test value is built at test time (concatenati
 3. Allowlist (bundle schema, expiry, `agentsec dlp hash`, `policy check` warning) and custom detectors.
 4. Docs: GATEWAY.md and REFERENCE.md sections, a PRODUCTION.md note on rolling out in `monitor` first, CHANGELOG entry describing the two closed gaps.
 
-## Open questions
+## Decisions
 
-1. **Email in answers**: default `monitor` (proposed) or `redact`?
-2. **Redact in tool arguments**: always treated as block (proposed), or allow a per-tool opt-in for tools where a redacted value is still safe to send (a ticket body, say)?
-3. **Fingerprints**: require an operator key and omit fingerprints without one (proposed), or ship a default?
-4. **PII to model providers**: should `upstream` PII default to `monitor` (proposed), or should a third-party upstream block PII unless an operator opts in?
-5. **Allowlist expiry cap**: 180 days (proposed), shorter, or none?
-6. **Scope of phase 1**: are the new NHI formats and the email detector wanted in the first release, or should phase 1 only rewire the existing detectors behind the policy?
+Approved by Dusty on 2026-11-23 (the proposed answer to each open question):
+
+1. **Email in answers**: `monitor` by default. Operators switch it to `redact` per kind.
+2. **Redact in tool arguments**: always treated as `block`. There is no per-tool opt-in.
+3. **Fingerprints**: recorded only with an operator-supplied `fingerprint_key`. Without one the field is omitted and the gateway warns at startup. There is no default key.
+4. **PII to model providers**: the `upstream` surface defaults to `monitor` for PII. Operators block it per upstream with `outbound.on_pii`.
+5. **Allowlist expiry**: required on every entry, at most 180 days after the policy's issue date.
+6. **Phase 1 scope**: the new detectors (email, card issuer prefixes, spaced SSN, new NHI formats) ship in phase 1 together with the policy wiring.

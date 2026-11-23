@@ -267,12 +267,29 @@ class ToolGuard:
         reason = f"approver failed ({type(exc).__name__}); refused"
         return Decision(Verdict.DENY, call.name, (*decision.reasons, reason))
 
+    def logged_arguments(self, call: ToolCall) -> Any:
+        """Arguments as audited: URL arguments become ``sha256:<hex>``, whatever log_content says.
+
+        Query strings carry tokens and personal data, and short strings are kept verbatim even
+        with log_content off, so a URL argument is never written to the audit trail.
+        """
+        rule = self.policy.tools.get(call.name) if isinstance(call.name, str) else None
+        args = call.arguments
+        if rule is None or not isinstance(args, dict):
+            return args
+        return {
+            k: "sha256:" + hashlib.sha256(v.encode("utf-8", "surrogatepass")).hexdigest()
+            if isinstance(v, str) and k in rule.args and rule.args[k].type == "url"
+            else v
+            for k, v in args.items()
+        }
+
     def _begin(self, call: ToolCall, session: Session) -> Decision:
-        self._audit("tool_request", session, tool=call.name, arguments=call.arguments)
+        self._audit("tool_request", session, tool=call.name, arguments=self.logged_arguments(call))
         return self.evaluate(call, session)
 
     async def _abegin(self, call: ToolCall, session: Session) -> Decision:
-        self._audit("tool_request", session, tool=call.name, arguments=call.arguments)
+        self._audit("tool_request", session, tool=call.name, arguments=self.logged_arguments(call))
         if self._blocking_eval:
             return await asyncio.to_thread(self.evaluate, call, session)
         return self.evaluate(call, session)

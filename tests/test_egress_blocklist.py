@@ -596,3 +596,20 @@ def test_dashboard_shows_feed_status(tmp_path, keys):
     )
     _, page = admin(app, "/dashboard")
     assert "stale (warn)" in page
+
+
+def test_tool_request_records_hash_url_arguments_whatever_log_content_says():
+    from agentsec.middleware.audit import AuditLogger, MemorySink
+
+    sink = MemorySink()
+    policy = Policy.from_dict(
+        {"tools": {"fetch": {"args": {"url": {"type": "url"}, "note": {"type": "string"}}}}}
+    )
+    guard = ToolGuard(
+        policy, audit=AuditLogger(sink, log_content=True), resolver=lambda h: [GOOD_IP]
+    )
+    url = "https://ok.test/?t=hunter2"
+    guard.authorize(ToolCall(name="fetch", arguments={"url": url, "note": "hi"}))
+    (req,) = [r["data"] for r in sink.records if r["event"] == "tool_request"]
+    assert req["arguments"]["url"].startswith("sha256:") and req["arguments"]["note"] == "hi"
+    assert "hunter2" not in json.dumps(sink.records)

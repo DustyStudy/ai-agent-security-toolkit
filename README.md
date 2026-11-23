@@ -335,6 +335,8 @@ CI runs lint, type-check and tests on Linux (Python 3.11 to 3.14) and Windows an
 
 The [OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/DustyStudy/ai-agent-security-toolkit) badge reflects a young, solo-maintained project. Code-Review and Contributors need other people, and Maintained scores 0 for any repository under 90 days old. The checks about the code and supply chain (pinned dependencies, fuzzing, signed releases, token permissions, SAST, vulnerabilities) are the informative ones. `codeql-action` is left on its major tag deliberately, because GitHub gates some features on the tag.
 
+**Test evidence.** [docs/evidence/](docs/evidence/) holds dated results for each release: the test suite and coverage on the tagged commit, the simulator fuzz matrix, and live-model runs, each as Markdown, a self-contained HTML page and a screenshot. Every CI run publishes the same report on its summary page and as a `test-report-*` artifact.
+
 ## License
 
 MIT

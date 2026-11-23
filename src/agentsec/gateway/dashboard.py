@@ -5,7 +5,7 @@ summary of one fuzz report. Rendered on the server with no JavaScript: the page 
 itself every few seconds, and a strict CSP forbids scripts, frames, forms and every fetch.
 
 The fuzz report is read through an allowlist of summary fields. Its per-case ``results`` (the
-attack payloads and agent replies, which can hold canary secrets) are never read.
+attack payloads and agent replies, which can hold canary secrets) are dropped on load and never shown.
 """
 
 from __future__ import annotations

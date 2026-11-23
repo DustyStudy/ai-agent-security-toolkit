@@ -118,6 +118,31 @@ curl -X POST https://llm-gateway.corp.example/tokens \
   - **Ledger.** Each (event, store) pair is a row in the SQLite `--ledger` that stays pending until that store accepts the revocation, so a store that is down is retried on the next run (run it from cron or a timer, with no `--events`, as well as from the IdP automation). Replays are safe; if a finished event arrives again, for a user who was re-enabled and then disabled, it is applied again. A pending row is not dropped when its config is no longer passed.
   - **Alert.** A row pending longer than `tokens.offboarding_deadline_s` (default 3600; `--deadline-s` overrides) makes the command exit 3 and print one `offboarding_overdue` JSON line per row on stderr. `--metrics-file` writes `agentsec_offboarding_pending` and `agentsec_offboarding_overdue` for node_exporter's textfile collector; alert on `agentsec_offboarding_overdue > 0` or on the exit code. Exit 1 means bad input, an unreadable config, or a token store that does not exist (its row stays pending, and the file is never created). The gateway's audit chain is not written (it belongs to the gateway process). Tokens stay valid until the command runs, so the real exposure is the time to your automation plus the deadline.
 
+## Egress blocklist
+
+The gateway can deny tool calls whose URL arguments point at hosts that threat feeds list as malicious: Spamhaus DROP (hijacked IP ranges) and abuse.ch host lists (malware and botnet domains), or any list in the same simple formats. Design and rationale: [design/EGRESS_BLOCKLIST.md](design/EGRESS_BLOCKLIST.md).
+
+```yaml
+# gateway.yaml
+egress:
+  public_key_file: feeds.pub        # Ed25519 key of the FEED signer (not the bundle key)
+  blocklists:
+    - {name: drop, kind: ip, file: /var/lib/agentsec/feeds/drop.txt, max_age_h: 48}
+    - {name: urlhaus, kind: domain, file: /var/lib/agentsec/feeds/urlhaus-hosts.txt}
+  except_hosts: []                  # never blocked by a feed, for false positives ("*.x" allowed)
+  on_stale: warn                    # warn (default): keep the last good list | deny: refuse URL calls
+  check_model_links: true           # also redact listed links in model answers
+  state_file: egress-state.json     # optional: refuse a feed rollback across restarts
+  reload_interval_s: 10
+```
+
+- **What is checked.** Every `type: url` argument, on the model path (the call is stripped in `enforce`, audited in `monitor`) and the MCP path (the upstream is never called). The host and every parent domain are matched against domain lists. An IP literal, and every address a name resolves to, are matched against IP lists; the lookup is shared with the private-address check. With `check_model_links`, links and images in model text are redacted if their host is listed; those hosts are never resolved.
+- **The gateway never downloads feeds.** A job you run fetches each feed, signs it with `agentsec egress sign-feed FILE --kind ip --name drop --key file:/path/feeds.key`, and moves `FILE` and `FILE.sig` into place. [examples/egress/fetch-feeds.sh](../examples/egress/fetch-feeds.sh) is a starting point. Keep the feed key off the gateway host and away from the policy bundle key. `agentsec egress check-feed FILE --kind ip --name drop --public-key feeds.pub` checks a file without the gateway.
+- **Feed format.** One entry per line. `#` and `;` start comments, also after an entry (`1.2.3.0/24 ; SBL123`). IP lists take addresses or CIDRs (host bits set is an error); domain lists take names or hosts-file lines (`0.0.0.0 evil.example`), in punycode. One malformed line rejects the file.
+- **Failures.** A missing, unsigned, badly signed or invalid feed refuses startup (`serve --check` reports it). On refresh, the same failures and a feed older than the loaded one (rollback) keep the last good list and are audited once as `gateway_blocklist_reload_failed`. Age comes from the signed `issued_at`. A feed older than `max_age_h` is stale: `on_stale: warn` keeps blocking with the last good list, audits `gateway_blocklist_stale` hourly and lists it under `blocklist_stale` in `/readyz` (still 200); `on_stale: deny` refuses every URL argument until a fresh feed arrives.
+- **Audit and metrics.** Each match is an `egress_blocked` record: `source` (`tool_call` or `model_text`), `tool`, `argument`, `host`, `url_sha256` (the URL itself is not in this record), `matched`, `match_value`, `entry`, `list`, `list_sha256`, `list_age_s`, `resolved`. The request's `gateway_request` record carries the mode. `/metrics` adds `agentsec_gateway_blocklist_age_seconds{list=...}`; matches count under `agentsec_gateway_events_total{event="egress_blocked"}`.
+- **Limits.** This checks the argument, not the connection: the client or MCP server resolves the name again later, redirects are not followed, URLs inside free-form strings are not seen, and feeds lag new attacker infrastructure. Apply the same feeds at your egress firewall, and use a filtering resolver (see docs/PRODUCTION.md).
+
 ## Testing the gateway with the fuzzer
 
 `agentsec fuzz` can attack the gateway like any OpenAI-compatible endpoint, so you can compare the attack-success rate with and without it:

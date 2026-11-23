@@ -1,6 +1,11 @@
 # Design: egress blocklist for known-bad IPs and domains
 
-Status: design approved 2026-11-23, not implemented. Owner: TBD.
+Status: design approved 2026-11-23; implemented (unreleased). Owner: TBD.
+
+Where the implementation differs from the text below:
+- The rollback floor is kept in its own `egress.state_file`, not the bundle's state file, so the bundle state format is unchanged.
+- `egress_blocked` has no `enforced` field: the record is written by `ToolGuard`, which does not know the group's mode. The request's `gateway_request` record carries `mode`.
+- Metrics: matches count under the existing `agentsec_gateway_events_total{event="egress_blocked"}` rather than a per-list counter; per-list age is `agentsec_gateway_blocklist_age_seconds{list}`. The dashboard does not show feeds yet; `/readyz` lists stale ones.
 
 ## Problem
 

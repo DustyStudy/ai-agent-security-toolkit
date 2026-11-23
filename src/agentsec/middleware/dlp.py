@@ -82,6 +82,7 @@ _DEFAULT_MODES: dict[str, dict[str, str]] = {
 _DEFAULT_KIND_MODES: dict[str, dict[str, str]] = {"email": dict.fromkeys(SURFACES, "monitor")}
 
 MAX_ALLOW_DAYS = 180
+EXPIRY_WARN_DAYS = 14  # warn this far ahead of an allowlist entry's expiry
 MAX_UNIT_CHARS = 1_000_000  # all strings in one tool call
 MAX_UNIT_STRINGS = 10_000
 MAX_MATCH_RECORDS = 50  # per unit; the rest are counted, not described
@@ -271,6 +272,14 @@ class DlpPolicy:
         if key is None and any(e.hmac_sha256 for e in allow):
             raise DlpConfigError("dlp.allow: match.hmac_sha256 needs dlp.fingerprint_key")
         return cls(modes, kind_modes, allow, key, clock, detectors, custom)
+
+    def allow_expiry(self) -> tuple[list[AllowEntry], list[AllowEntry]]:
+        """Allowlist entries that have expired (they no longer match) and those that expire
+        within EXPIRY_WARN_DAYS."""
+        today = self.clock().date()
+        soon = today + timedelta(days=EXPIRY_WARN_DAYS)
+        expired = [e for e in self.allow if e.expires < today]
+        return expired, [e for e in self.allow if today <= e.expires <= soon]
 
     # ------------------------------------------------------------------ checks
     def category(self, kind: str) -> str:

@@ -598,6 +598,21 @@ class Gateway:
         )
         for event, data in self._feeds.loaded_events() if self._feeds else ():
             self._audit.log(event, **data)
+        self._log_allow_expiry(config.policies)
+
+    def _log_allow_expiry(self, policies: PolicySet) -> None:
+        """At start and on each bundle load: allowlist entries that no longer match, and
+        those about to stop, so an operator renews or drops them before traffic changes."""
+        for gp in policies.groups:
+            expired, soon = gp.dlp.allow_expiry()
+            for event, entries in (("dlp_allow_expired", expired), ("dlp_allow_expiring", soon)):
+                if entries:
+                    self._audit.log(
+                        event,
+                        policy_group=gp.group,
+                        policy_rev=policies.revision,
+                        entries=[{"id": e.id, "expires": e.expires.isoformat()} for e in entries],
+                    )
 
     def _blocklist(self) -> Blocklist | None:
         return None if self._feeds is None else self._feeds.current
@@ -1014,6 +1029,7 @@ class Gateway:
                 groups=[g.group for g in new.groups],
                 unpinned_mcp_upstreams=missing,
             )
+            self._log_allow_expiry(new)
         finally:
             self._reload_lock.release()
 

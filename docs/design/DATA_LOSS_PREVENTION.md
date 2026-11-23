@@ -154,7 +154,7 @@ dlp:
 ```
 
 - **No plaintext secrets in config.** A specific credential or NHI value can only be allowlisted by `hmac_sha256` of the matched span under `fingerprint_key` (`agentsec dlp hash --key <ref>` reads it from stdin and prints the digest). An unkeyed `sha256` was the first design and is refused: like the fingerprint, a plain hash of a password, SSN or card number is reversed by brute force. `pattern` is refused for `credentials` and `nhi`, because a pattern broad enough to be useful there is an off switch.
-- **Expiry is enforced.** An expired entry stops matching and the gateway audits `dlp_allow_expired` once per reload; `agentsec policy check` warns 14 days ahead. The limit keeps forgotten exceptions from becoming permanent holes.
+- **Expiry is enforced.** An expired entry stops matching and the gateway audits `dlp_allow_expired` at start and on each bundle load, along with `dlp_allow_expiring` for entries within 14 days of expiry; `agentsec bundle verify` warns about both (the allowlist lives in the bundle, which `policy check` does not read). The limit keeps forgotten exceptions from becoming permanent holes.
 - **Every allowlisted hit is audited** as a `dlp_match` with `action: allowed` and `allowed_by: <id>`. The allowlist suppresses the action, never the record.
 - **Changes are reviewable.** The allowlist lives in the signed policy bundle, so every change has a revision and a signature, and `policy_rev` on each request ties a decision to the allowlist that made it.
 

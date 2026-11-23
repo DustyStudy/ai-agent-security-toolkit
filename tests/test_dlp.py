@@ -371,16 +371,33 @@ def test_no_sensitive_value_reaches_the_audit_log(monkeypatch):
             assert form not in raw
 
 
-def test_the_audit_log_hashes_addresses_in_content_but_keeps_the_actor():
+def test_the_audit_log_hides_addresses_in_content_but_keeps_the_actor():
     sink = MemorySink()
-    AuditLogger(sink, actor=EMAIL).log("tool_request", arguments={"to": EMAIL.upper()})
+    AuditLogger(sink, actor=EMAIL).log("tool_request", arguments={"to": EMAIL})
     record = sink.records[0]
     assert record["actor"] == EMAIL
-    hashed = record["data"]["arguments"]["to"]
-    assert hashed.startswith("[EMAIL:") and EMAIL.upper() not in json.dumps(record)
-    sink2 = MemorySink()
-    AuditLogger(sink2).log("x", a=EMAIL)
-    assert sink2.records[0]["data"]["a"] == hashed  # same address, same hash
+    # No key: a fixed marker, never an unkeyed hash that a guess could confirm.
+    assert record["data"]["arguments"]["to"] == "[REDACTED:email]"
+
+
+def test_with_a_key_addresses_get_the_same_hmac_as_their_dlp_fingerprint():
+    sink = MemorySink()
+    AuditLogger(sink, email_key=KEY.encode()).log("x", a=f"to {EMAIL}")
+    logged = sink.records[0]["data"]["a"]
+    policy = DlpPolicy(fingerprint_key=KEY.encode())
+    fingerprint = policy.scan(EMAIL, "output").matches[0].fingerprint
+    assert logged == f"to [EMAIL:{fingerprint}]" and EMAIL not in logged
+    other = MemorySink()
+    AuditLogger(other, email_key=b"j" * 32).log("x", a=f"to {EMAIL}")
+    assert other.records[0]["data"]["a"] != logged
+
+
+def test_the_gateway_audit_uses_the_dlp_key_for_addresses(tmp_path, monkeypatch):
+    from tests.test_gateway import gateway
+
+    monkeypatch.setenv("DLP_FP_KEY", KEY)
+    app, _ = gateway(tmp_path, extra="dlp: {fingerprint_key: env:DLP_FP_KEY}\n")
+    assert app._audit.email_key == KEY.encode()
 
 
 def test_dlp_matches_rank_by_action_in_cef():

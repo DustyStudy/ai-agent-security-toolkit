@@ -613,9 +613,11 @@ def load_config(path: str | Path) -> GatewayConfig:
         _require_secure_upstream(f"upstreams.{name}", url)
         outbound = _section(u, "outbound")
         on_secret, on_pii = outbound.get("on_secret", "off"), outbound.get("on_pii", "off")
-        for key, value in (("on_secret", on_secret), ("on_pii", on_pii)):
+        for option, value in (("on_secret", on_secret), ("on_pii", on_pii)):
             if value not in ("off", "block", "redact"):
-                raise ConfigError(f"upstreams.{name}.outbound.{key} must be off, block or redact")
+                raise ConfigError(
+                    f"upstreams.{name}.outbound.{option} must be off, block or redact"
+                )
         upstreams[str(name)] = Upstream(
             outbound_on_secret=on_secret,
             outbound_on_pii=on_pii,

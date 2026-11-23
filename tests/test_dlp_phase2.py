@@ -171,6 +171,12 @@ def test_on_pii_is_validated(tmp_path):
         app_with(tmp_path, outbound="{on_pii: maybe}")
 
 
+def test_outbound_validation_leaves_the_tls_key_unset():
+    # Regression: the validation loop once reused `key` and set the TLS key file to "on_pii".
+    config = load_config("examples/gateway.container.yaml")
+    assert config.tls_cert_file is None and config.tls_key_file is None
+
+
 def test_a_secret_to_the_provider_is_recorded_even_with_on_secret_off(tmp_path):
     secret = fake_aws_key()
     app, up, sink = app_with(tmp_path)

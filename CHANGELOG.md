@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- `scripts/evidence_report.py` renders pytest JUnit XML, coverage XML and `agentsec fuzz --json` reports as Markdown and as one self-contained HTML page, with a *containment* column (tool misuse, exfiltration, prompt leak) per fuzz run. CI writes it to each run's summary page and uploads a `test-report-py*` artifact (HTML page, JUnit XML, coverage XML and HTML), and the self-checks job adds a fuzz summary. Dated evidence for v0.12.0, including the live Llama 3.1 8B run and screenshots, is in `docs/evidence/`.
+
 ## [0.12.0] - 2026-11-23
 
 ### Changed (breaking)

@@ -1,0 +1,169 @@
+<!doctype html><html lang='en'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>agentsec 0.12.0: tests, coverage and simulator fuzz</title><style>
+:root{--bg:#fbfbfa;--fg:#1d1d1b;--muted:#6b6a66;--line:#e3e2de;--card:#ffffff;
+--pass:#1f7a4d;--pass-bg:#e5f3ea;--fail:#b3261e;--fail-bg:#fbe9e7;--bar:#3a6ea5}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161615;--fg:#ecebe7;
+--muted:#9c9a94;--line:#2c2b29;--card:#1f1e1c;--pass:#6fcf97;--pass-bg:#16301f;--fail:#f28b82;
+--fail-bg:#3a1714;--bar:#7aa7d6}}
+:root[data-theme="dark"]{--bg:#161615;--fg:#ecebe7;--muted:#9c9a94;--line:#2c2b29;--card:#1f1e1c;
+--pass:#6fcf97;--pass-bg:#16301f;--fail:#f28b82;--fail-bg:#3a1714;--bar:#7aa7d6}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
+font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:960px;margin:0 auto;padding:32px 16px}h1{font-size:24px;margin:0 0 4px}
+h2{font-size:17px;margin:32px 0 12px}.meta{color:var(--muted);font-size:13px}
+code{font:13px ui-monospace,SFMono-Regular,Consolas,monospace}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:20px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.tile b{display:block;font-size:26px;font-variant-numeric:tabular-nums}.tile span{color:var(--muted);font-size:13px}
+.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-weight:600;font-size:13px}
+.pass{color:var(--pass);background:var(--pass-bg)}.fail{color:var(--fail);background:var(--fail-bg)}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);
+border-radius:10px;overflow:hidden;font-variant-numeric:tabular-nums}
+th,td{padding:7px 12px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
+th{color:var(--muted);font-weight:600}td.n,th.n{text-align:right}
+.bar{height:6px;background:var(--line);border-radius:3px;min-width:80px}
+.bar i{display:block;height:6px;background:var(--bar);border-radius:3px}
+.scroll{overflow-x:auto}details{margin-top:12px}
+</style></head><body><main>
+<h1>agentsec 0.12.0: tests, coverage and simulator fuzz</h1>
+<div class='meta'>Commit <code>51b535c (v0.12.0)</code> · 2026-11-23 UTC · Python 3.13.18, Linux x86_64 (release session); the 32-check CI matrix is the authoritative run</div>
+<p><span class='badge pass'>Tests PASS</span></p>
+<div class='tiles'>
+<div class='tile'><b>1872</b><span>passed</span></div>
+<div class='tile'><b>0</b><span>failed or errored</span></div>
+<div class='tile'><b>5</b><span>skipped</span></div>
+<div class='tile'><b>95.8%</b><span>line coverage</span></div>
+</div>
+<h2>Fuzz runs</h2><div class='scroll'><table><tr><th>Target</th>
+<th class='n'>Cases</th><th class='n'>Successes</th><th class='n'>Containment</th><th class='n'>Blocked</th><th class='n'>Errors</th><th class='n'>ASR</th></tr>
+<tr><td><code>builtin:guarded</code></td><td class='n'>500</td><td class='n'>171</td><td class='n'><b>0</b> / 200</td><td class='n'>329</td><td class='n'>0</td><td class='n'>34.2%</td></tr>
+<tr><td><code>builtin:guarded --scenarios tool_result</code></td><td class='n'>250</td><td class='n'>85</td><td class='n'><b>0</b> / 100</td><td class='n'>164</td><td class='n'>0</td><td class='n'>34.0%</td></tr>
+<tr><td><code>builtin:naive</code></td><td class='n'>500</td><td class='n'>500</td><td class='n'><b>200</b> / 200</td><td class='n'>0</td><td class='n'>0</td><td class='n'>100.0%</td></tr>
+</table></div>
+<p class='meta'>ASR: attack-success rate over scored cases. Containment: successes in tool_misuse, exfiltration and prompt_leak, the outcomes the controls exist to stop; echoing an injected phrase is not one of them.</p>
+<h2>Successes by category</h2><div class='scroll'><table><tr><th>Category</th>
+<th class='n'>Run 1</th>
+<th class='n'>Run 2</th>
+<th class='n'>Run 3</th>
+</tr>
+<tr><td>authority_claim</td><td class='n'>24 / 40</td><td class='n'>12 / 20</td><td class='n'>40 / 40</td></tr>
+<tr><td>context_manipulation</td><td class='n'>16 / 20</td><td class='n'>8 / 10</td><td class='n'>20 / 20</td></tr>
+<tr><td>delimiter_escape</td><td class='n'>11 / 40</td><td class='n'>6 / 20</td><td class='n'>40 / 40</td></tr>
+<tr><td><b>exfiltration</b></td><td class='n'>0 / 40</td><td class='n'>0 / 20</td><td class='n'>40 / 40</td></tr>
+<tr><td>fake_conversation</td><td class='n'>8 / 20</td><td class='n'>4 / 10</td><td class='n'>20 / 20</td></tr>
+<tr><td>hidden_instruction</td><td class='n'>8 / 20</td><td class='n'>4 / 10</td><td class='n'>20 / 20</td></tr>
+<tr><td>instruction_override</td><td class='n'>32 / 60</td><td class='n'>15 / 30</td><td class='n'>60 / 60</td></tr>
+<tr><td>multilingual</td><td class='n'>48 / 60</td><td class='n'>24 / 30</td><td class='n'>60 / 60</td></tr>
+<tr><td><b>prompt_leak</b></td><td class='n'>0 / 60</td><td class='n'>0 / 30</td><td class='n'>60 / 60</td></tr>
+<tr><td>role_hijack</td><td class='n'>24 / 40</td><td class='n'>12 / 20</td><td class='n'>40 / 40</td></tr>
+<tr><td><b>tool_misuse</b></td><td class='n'>0 / 100</td><td class='n'>0 / 50</td><td class='n'>100 / 100</td></tr>
+</table></div><p class='meta'>
+Run 1: <code>builtin:guarded</code>; Run 2: <code>builtin:guarded --scenarios tool_result</code>; Run 3: <code>builtin:naive</code>
+. Containment categories in bold.</p>
+<h2>Tests by file</h2><div class='scroll'><table><tr><th>File</th>
+<th class='n'>Passed</th><th class='n'>Failed</th><th class='n'>Skipped</th></tr>
+<tr><td><code>?</code></td><td class='n'>0</td><td class='n'>0</td><td class='n'>1</td></tr>
+<tr><td><code>test_async</code></td><td class='n'>24</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_audit</code></td><td class='n'>17</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_audit_redaction_hardening</code></td><td class='n'>55</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_cef</code></td><td class='n'>32</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_claude_code_hook</code></td><td class='n'>24</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_claude_code_hook_fail_closed</code></td><td class='n'>22</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_claude_code_hook_hardening</code></td><td class='n'>24</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_cli_exit_codes</code></td><td class='n'>10</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_configscan</code></td><td class='n'>113</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_configscan_hardening</code></td><td class='n'>26</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_examples</code></td><td class='n'>10</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_formats</code></td><td class='n'>10</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_fuzz_regressions</code></td><td class='n'>40</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_fuzz_targets</code></td><td class='n'>23</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_fuzzer</code></td><td class='n'>26</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_fuzzer_provider_failures</code></td><td class='n'>85</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_fuzzer_tool_result</code></td><td class='n'>8</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway</code></td><td class='n'>55</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_bundle</code></td><td class='n'>34</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_bypass_regressions</code></td><td class='n'>396</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_followups</code></td><td class='n'>9</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_holdback</code></td><td class='n'>43</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_mcp</code></td><td class='n'>36</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_mcp_pins</code></td><td class='n'>7</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_mcp_results</code></td><td class='n'>13</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_metrics</code></td><td class='n'>15</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_offboarding_hardening</code></td><td class='n'>8</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_oidc</code></td><td class='n'>42</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_oidc_hardening</code></td><td class='n'>7</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_origin_host</code></td><td class='n'>16</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_outbound</code></td><td class='n'>23</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_probe</code></td><td class='n'>5</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_request_hardening</code></td><td class='n'>33</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_serve</code></td><td class='n'>7</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_tokens</code></td><td class='n'>32</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_gateway_upstream_failures</code></td><td class='n'>35</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_grafana_examples</code></td><td class='n'>2</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_hygiene</code></td><td class='n'>1</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_injection</code></td><td class='n'>9</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_integration_mcp</code></td><td class='n'>4</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_locked_install</code></td><td class='n'>18</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_mcp</code></td><td class='n'>23</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_openai_compat_target</code></td><td class='n'>26</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_redact_and_validators</code></td><td class='n'>17</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_release_authz_secrets</code></td><td class='n'>61</td><td class='n'>0</td><td class='n'>2</td></tr>
+<tr><td><code>test_sandbox</code></td><td class='n'>53</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_sandbox_hardening</code></td><td class='n'>23</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_security_regressions</code></td><td class='n'>200</td><td class='n'>0</td><td class='n'>2</td></tr>
+<tr><td><code>test_taint_adapters_hardening</code></td><td class='n'>13</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_threatmodel_and_cli</code></td><td class='n'>24</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_workflowscan</code></td><td class='n'>29</td><td class='n'>0</td><td class='n'>0</td></tr>
+<tr><td><code>test_workflowscan_hardening</code></td><td class='n'>4</td><td class='n'>0</td><td class='n'>0</td></tr>
+</table></div>
+<details><summary>Coverage by module</summary><div class='scroll'><table>
+<tr><th>Module</th><th class='n'>Lines covered</th><th></th></tr>
+<tr><td><code>src/agentsec/__init__.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/cli.py</code></td><td class='n'>98.2%</td><td><div class="bar"><i style="width:98.2%"></i></div></td></tr>
+<tr><td><code>src/agentsec/configscan.py</code></td><td class='n'>98.5%</td><td><div class="bar"><i style="width:98.5%"></i></div></td></tr>
+<tr><td><code>src/agentsec/fuzzer/__init__.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/fuzzer/formats.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/fuzzer/harness.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/fuzzer/mock_agents.py</code></td><td class='n'>95.5%</td><td><div class="bar"><i style="width:95.5%"></i></div></td></tr>
+<tr><td><code>src/agentsec/fuzzer/mutators.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/fuzzer/payloads.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/fuzzer/report.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/fuzzer/targets.py</code></td><td class='n'>97.3%</td><td><div class="bar"><i style="width:97.3%"></i></div></td></tr>
+<tr><td><code>src/agentsec/gateway/__init__.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/gateway/app.py</code></td><td class='n'>94.7%</td><td><div class="bar"><i style="width:94.7%"></i></div></td></tr>
+<tr><td><code>src/agentsec/gateway/bundle.py</code></td><td class='n'>86.6%</td><td><div class="bar"><i style="width:86.6%"></i></div></td></tr>
+<tr><td><code>src/agentsec/gateway/config.py</code></td><td class='n'>95.4%</td><td><div class="bar"><i style="width:95.4%"></i></div></td></tr>
+<tr><td><code>src/agentsec/gateway/holdback.py</code></td><td class='n'>98.8%</td><td><div class="bar"><i style="width:98.8%"></i></div></td></tr>
+<tr><td><code>src/agentsec/gateway/mcp.py</code></td><td class='n'>98.7%</td><td><div class="bar"><i style="width:98.7%"></i></div></td></tr>
+<tr><td><code>src/agentsec/gateway/metrics.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/gateway/offboard.py</code></td><td class='n'>95.3%</td><td><div class="bar"><i style="width:95.3%"></i></div></td></tr>
+<tr><td><code>src/agentsec/gateway/oidc.py</code></td><td class='n'>89.3%</td><td><div class="bar"><i style="width:89.3%"></i></div></td></tr>
+<tr><td><code>src/agentsec/gateway/outbound.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/gateway/policyset.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/gateway/probe.py</code></td><td class='n'>93.9%</td><td><div class="bar"><i style="width:93.9%"></i></div></td></tr>
+<tr><td><code>src/agentsec/gateway/tokens.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/integrations/__init__.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/integrations/claude_code.py</code></td><td class='n'>96.5%</td><td><div class="bar"><i style="width:96.5%"></i></div></td></tr>
+<tr><td><code>src/agentsec/integrations/langchain.py</code></td><td class='n'>0.0%</td><td><div class="bar"><i style="width:0.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/integrations/mcp.py</code></td><td class='n'>98.5%</td><td><div class="bar"><i style="width:98.5%"></i></div></td></tr>
+<tr><td><code>src/agentsec/middleware/__init__.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/middleware/audit.py</code></td><td class='n'>95.3%</td><td><div class="bar"><i style="width:95.3%"></i></div></td></tr>
+<tr><td><code>src/agentsec/middleware/cef.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/middleware/injection.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/middleware/pipeline.py</code></td><td class='n'>96.3%</td><td><div class="bar"><i style="width:96.3%"></i></div></td></tr>
+<tr><td><code>src/agentsec/middleware/redact.py</code></td><td class='n'>97.3%</td><td><div class="bar"><i style="width:97.3%"></i></div></td></tr>
+<tr><td><code>src/agentsec/middleware/validators.py</code></td><td class='n'>97.4%</td><td><div class="bar"><i style="width:97.4%"></i></div></td></tr>
+<tr><td><code>src/agentsec/sandbox/__init__.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/sandbox/adapters.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/sandbox/guard.py</code></td><td class='n'>99.2%</td><td><div class="bar"><i style="width:99.2%"></i></div></td></tr>
+<tr><td><code>src/agentsec/sandbox/policy.py</code></td><td class='n'>96.0%</td><td><div class="bar"><i style="width:96.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/sandbox/subprocess_runner.py</code></td><td class='n'>97.1%</td><td><div class="bar"><i style="width:97.1%"></i></div></td></tr>
+<tr><td><code>src/agentsec/sandbox/validators.py</code></td><td class='n'>92.9%</td><td><div class="bar"><i style="width:92.9%"></i></div></td></tr>
+<tr><td><code>src/agentsec/threatmodel/__init__.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/threatmodel/crosswalk.py</code></td><td class='n'>100.0%</td><td><div class="bar"><i style="width:100.0%"></i></div></td></tr>
+<tr><td><code>src/agentsec/threatmodel/render.py</code></td><td class='n'>98.2%</td><td><div class="bar"><i style="width:98.2%"></i></div></td></tr>
+<tr><td><code>src/agentsec/types.py</code></td><td class='n'>97.1%</td><td><div class="bar"><i style="width:97.1%"></i></div></td></tr>
+<tr><td><code>src/agentsec/workflowscan.py</code></td><td class='n'>97.7%</td><td><div class="bar"><i style="width:97.7%"></i></div></td></tr>
+</table></div></details>
+</main></body></html>

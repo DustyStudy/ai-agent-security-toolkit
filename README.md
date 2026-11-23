@@ -77,6 +77,7 @@ The scanner and output checks are pattern-based and can miss variants. The libra
 
 - [Command and integration reference](docs/REFERENCE.md) for install options, configuration, and examples
 - [Framework crosswalk](docs/threat-model/frameworks.md) for OWASP and MITRE ATLAS mappings
+- [Test evidence](docs/evidence/) with dated test, coverage and live-model results for each release, including screenshots
 - [Changelog](CHANGELOG.md) and [releases](https://github.com/DustyStudy/ai-agent-security-toolkit/releases)
 
 <a name="project-health"></a>

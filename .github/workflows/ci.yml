@@ -55,7 +55,30 @@ jobs:
         run: mypy src
 
       - name: Pytest
-        run: pytest -v --cov=agentsec --cov-report=term-missing --cov-fail-under=90
+        run: >
+          pytest -v --cov=agentsec --cov-report=term-missing --cov-fail-under=90
+          --junitxml=reports/junit.xml --cov-report=xml:reports/coverage.xml
+          --cov-report=html:reports/htmlcov
+
+      - name: Test report (job summary and artifact)
+        # The Pytest step above is the gate; this only renders what it wrote, so it never
+        # fails the job itself.
+        if: always()
+        run: |
+          python scripts/evidence_report.py --junit reports/junit.xml --coverage reports/coverage.xml \
+            --title "Tests on Python ${PY_VERSION}" --md reports/summary.md --html reports/report.html || true
+          if [ -f reports/summary.md ]; then cat reports/summary.md >> "$GITHUB_STEP_SUMMARY"; fi
+        env:
+          PY_VERSION: ${{ matrix.python-version }}
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-report-py${{ matrix.python-version }}
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 30
 
   cross-platform:
     # The path-confinement and subprocess guards depend on OS path and process
@@ -272,11 +295,23 @@ jobs:
           agentsec fuzz --target builtin:naive --quiet --json naive.json
           python -c 'import json; d = json.load(open("naive.json")); assert d["asr"] == 1.0, d["asr"]'
 
+      - name: Fuzz summary (job summary and HTML page)
+        if: always()
+        run: |
+          python scripts/evidence_report.py --title "Simulator fuzz (containment gates)" \
+            --fuzz "builtin:guarded (containment categories)=fuzz.json" \
+            --fuzz "builtin:naive=naive.json" --md fuzz-summary.md --html fuzz-report.html || true
+          if [ -f fuzz-summary.md ]; then cat fuzz-summary.md >> "$GITHUB_STEP_SUMMARY"; fi
+
       - name: Upload fuzz report
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-report
-          path: fuzz.json
+          path: |
+            fuzz.json
+            fuzz-report.html
+          if-no-files-found: ignore
           retention-days: 14
 
   container:

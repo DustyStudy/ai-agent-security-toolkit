@@ -41,5 +41,5 @@ python scripts/evidence_report.py --junit reports/junit.xml --coverage reports/c
 
 `reports/` is git-ignored. To add a release here, generate into `docs/evidence/vX.Y.Z/` with
 `--commit` naming the tagged commit, take a screenshot of the HTML page, and add a row above.
-Raw fuzz JSON is not committed: it holds every attack prompt and model answer, and the
+The `readme-*.png` images (light and `-dark`) are cropped from the same pages for the main README; regenerate them with the release. Raw fuzz JSON is not committed: it holds every attack prompt and model answer, and the
 summaries are what a reader needs. Keep it with the release artifacts if you need it.

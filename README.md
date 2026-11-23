@@ -47,6 +47,18 @@ In the 0.12.0 release-candidate evaluation of **Llama 3.1 8B**, attack success f
 
 The evaluation used a 500-case matrix with a fixed model and prompt. Rates exclude cases that errored, and tool calls were recorded without execution. See the [results and error details](docs/PROOF.md#rerun-on-the-0120-release-candidate) for the full evaluation, including separate tool-result experiments. The quickstart above uses a deterministic simulator.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/evidence/v0.12.0/readme-live-llama-dark.png">
+  <img alt="Live Llama 3.1 8B fuzz results for 0.12.0: model alone 35.5% attack success with 66 of 198 containment hits; behind the toolkit 0.4% with 0 containment hits; tool-result delivery 4.0% and 0.0%." src="docs/evidence/v0.12.0/readme-live-llama.png" width="660">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/evidence/v0.12.0/readme-tests-dark.png">
+  <img alt="0.12.0 test results: 1872 passed, 0 failed or errored, 5 skipped, 95.8% line coverage." src="docs/evidence/v0.12.0/readme-tests.png" width="660">
+</picture>
+
+Full reports, including results by attack category and the simulator runs, are in [docs/evidence/v0.12.0](docs/evidence/v0.12.0/).
+
 <a name="why-this-exists"></a>
 
 ## How it works

@@ -242,6 +242,14 @@ class FeedSet:
         now = self._wall()
         return [f.name for f in self.current.feeds if f.stale(now)]
 
+    def status(self) -> list[dict[str, Any]]:
+        now = self._wall()
+        return [
+            {"list": f.name, "kind": f.kind, "entries": f.entries, "age_s": f.age(now) or 0.0,
+             "stale": f.stale(now), "on_stale": f.on_stale}
+            for f in self.current.feeds
+        ]  # fmt: skip
+
     def ages(self) -> dict[str, float]:
         now = self._wall()
         return {f.name: f.age(now) or 0.0 for f in self.current.feeds}

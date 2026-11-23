@@ -6,6 +6,7 @@ resolver and clocks; nothing here touches the network.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import textwrap
 
@@ -581,3 +582,17 @@ def test_mcp_gateway_denies_a_blocklisted_url_before_the_upstream(tmp_path, keys
     assert fetched == [f"https://{GOOD_IP}/"]  # the listed URL never reached the upstream
     (rec,) = [r["data"] for r in sink.records if r["event"] == "egress_blocked"]
     assert rec["tool"] == "web__fetch" and "hunter2" not in json.dumps(rec)
+
+
+def test_dashboard_shows_feed_status(tmp_path, keys):
+    from tests.test_gateway_metrics import admin
+
+    app, _ = gw(tmp_path, keys, None, extra="admin: {port: 9}\n")
+    status, page = admin(app, "/dashboard")
+    assert status == 200 and "Egress feeds" in page
+    assert "<td>urlhaus</td><td>domain</td><td>1</td>" in page and "fresh" in page
+    app._feeds.current = Blocklist(
+        [dataclasses.replace(f, max_age_s=1.0) for f in app._feeds.current.feeds]
+    )
+    _, page = admin(app, "/dashboard")
+    assert "stale (warn)" in page

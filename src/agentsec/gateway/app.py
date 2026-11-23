@@ -918,7 +918,8 @@ class Gateway:
                 self._control_pool, list_evidence, self.config.admin_evidence_dir
             )
             snap = self.metrics.snapshot()
-            body = render_dashboard(payload, policies, snap, report, listing).encode()
+            feeds = None if self._feeds is None else self._feeds.status()
+            body = render_dashboard(payload, policies, snap, report, listing, feeds).encode()
             await send(
                 {
                     "type": "http.response.start",

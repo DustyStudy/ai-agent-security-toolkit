@@ -1,6 +1,7 @@
 """A read-only HTML status page for the admin listener (``GET /dashboard``).
 
-It shows what /readyz and /metrics already expose, the policy group names and modes, and the
+It shows what /readyz and /metrics already expose (including DLP findings per category and
+action), the policy group names and modes, and the
 summary of one fuzz report (flagged stale after a day), and links to the evidence pages in
 ``admin.evidence_dir``. Rendered on the server with no JavaScript: the page reloads
 itself every few seconds, and a strict CSP forbids scripts, frames, forms and every fetch.
@@ -168,6 +169,7 @@ expires {_e(expires)}.</p>
 <table><tr><th>Group</th><th>Mode</th></tr>{groups}</table></section>
 <section><h2>Audit events</h2>{_table(("Event", "Count"), sorted(events.items()))}</section>
 <section><h2>Responses</h2>{_table(("Status", "Count"), sorted(responses.items()))}</section>
+<section><h2>Data-loss prevention</h2>{_dlp(snap.get("dlp", {}))}</section>
 <section><h2>Egress feeds</h2>{_feeds(feeds)}</section>
 <section><h2>Containment (fuzz report)</h2>{_report(report)}</section>
 <section><h2>Evidence reports</h2>{_evidence(evidence)}</section>
@@ -198,6 +200,21 @@ def _report(report: dict[str, Any] | None) -> str:
         (n, r["cases"], r["successes"], _pct(r["asr"])) for n, r in report["by_category"].items()
     ]
     return head + _table(("Category", "Cases", "Bypasses", "Attack success rate"), rows)
+
+
+def _dlp(counts: dict[tuple[str, str, str], int]) -> str:
+    """One row per category: findings by action, summed over surfaces (counts only, no content)."""
+    rows: dict[str, dict[str, int]] = {}
+    for (category, _surface, action), n in counts.items():
+        row = rows.setdefault(category, dict.fromkeys(_DLP_ACTIONS, 0))
+        row[action] = row.get(action, 0) + n
+    return _table(
+        ("Category", *(a.capitalize() for a in _DLP_ACTIONS)),
+        [(c, *(r[a] for a in _DLP_ACTIONS)) for c, r in sorted(rows.items())],
+    )
+
+
+_DLP_ACTIONS = ("block", "redact", "monitor", "allowed")
 
 
 def _feeds(feeds: list[dict[str, Any]] | None) -> str:

@@ -200,3 +200,17 @@ def test_evidence_is_get_only_and_off_without_config(tmp_path):
     app, _ = gateway(tmp_path)
     assert admin(app, "/evidence/v0.12.0/tests.html")[0] == 404
     assert "admin.evidence_dir" in admin(app)[2]
+
+
+def test_dashboard_shows_dlp_findings_per_category_without_values(tmp_path):
+    ssn = "123-45-" + "6789"
+    app, _ = gateway(tmp_path, extra="admin: {port: 9090}\n")
+    _, _, before = admin(app)
+    assert "Data-loss prevention" in before and "None yet." in before
+    body = {"model": "local", "messages": [{"role": "user", "content": f"my ssn is {ssn}"}]}
+    assert call(app, body=body)[0] == 200
+    _, _, html = admin(app)
+    section = html.split("Data-loss prevention", 1)[1].split("</section>", 1)[0]
+    assert "<th>Block</th><th>Redact</th><th>Monitor</th><th>Allowed</th>" in section
+    assert "<tr><td>pii</td><td>0</td><td>0</td><td>1</td><td>0</td></tr>" in section
+    assert ssn not in html and "6789" not in html

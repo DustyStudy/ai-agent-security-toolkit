@@ -219,7 +219,7 @@ All hermetic. Every secret-looking test value is built at test time (concatenati
 
 ## Phasing
 
-Phase 1 shipped in #148 (detectors, `DlpPolicy`, allowlist, `output` and `tool_args`, gateway config). Phase 2 adds the `tool_results` and `upstream` surfaces, `on_pii`, metrics and per-group email keys in the audit log; the dashboard row, custom detectors and `agentsec dlp hash` remain.
+Phase 1 shipped in #148 (detectors, `DlpPolicy`, allowlist, `output` and `tool_args`, gateway config). Phase 2 adds the `tool_results` and `upstream` surfaces, `on_pii`, metrics and per-group email keys in the audit log; the dashboard row is in; custom detectors and `agentsec dlp hash` remain.
 
 1. `dlp.py` (category map, `DlpPolicy`, single-pass scan, audit events, fingerprint), detector changes, `ToolGuard(dlp=...)` and `OutputGuard.default(dlp=...)` for library users, with tests and benchmarks.
 2. Gateway: `dlp` in bundle entries and single-policy config, `tool_results` and `upstream` surfaces, `on_pii`, metrics, CEF, dashboard row.

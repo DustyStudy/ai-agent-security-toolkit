@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-23
+
 ### Changed (breaking)
 - `ToolGuard`: only a boolean `True` from an approver approves a call. Any other answer (`"n"` from `input()`, `1`, an object) is refused and audited; `bool(answer)` used to approve all of them.
 - `agentsec fuzz`: the `http(s)://`, `ollama:` and `openai-compat:` targets bound each case by wall-clock time (connect, retries and the whole body) instead of per socket read. `--timeout SECONDS` sets it (defaults unchanged: 60 for `http(s)://`, 300 for the model targets) and is passed to the Anthropic SDK for `anthropic:`. An `http(s)://` target answering 200 with an `error` field, or with none of `text`, `tool_calls` and `blocked`, is an error, not an empty answer.
@@ -315,7 +317,8 @@ Tagged but never released; use 0.4.1.
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.2...v0.9.0

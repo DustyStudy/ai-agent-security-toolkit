@@ -8,6 +8,7 @@ It implements phases 1 to 3 of [the design](design/GATEWAY.md), including an MCP
 
 ```bash
 pip install "ai-agent-security-toolkit[gateway]"
+export AGENTSEC_DLP_FINGERPRINT_KEY="$(openssl rand -hex 32)"   # the example's dlp.fingerprint_key
 agentsec serve --config examples/gateway.yaml --check   # validate, then drop --check to run
 ```
 

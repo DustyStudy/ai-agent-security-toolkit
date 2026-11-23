@@ -48,6 +48,17 @@ output:
   stream_mode: buffer               # holdback: stream text once checked and holdback_chars behind
   # holdback_chars: 256             # 32-8192; secrets shorter than this are caught before release
 
+dlp:                       # data-loss prevention (see docs/GATEWAY.md, "Data-loss prevention")
+  fingerprint_key: env:AGENTSEC_DLP_FINGERPRINT_KEY   # at least 32 bytes; keys audit fingerprints
+  categories:
+    credentials: {output: redact, tool_args: block}   # password=, Authorization, cookies, JWTs, private keys
+    nhi: {output: redact, tool_args: block}           # AWS, GitHub, GitLab, Slack, Stripe, OpenAI, ... keys
+    pii:
+      output: redact                                  # SSNs and payment cards
+      tool_args: monitor
+      kinds:
+        email: {output: monitor}                      # addresses are normal in answers and send_email
+
 limits:
   max_body_bytes: 1048576
   body_timeout_s: 30       # a slow or stalled upload gets a 408

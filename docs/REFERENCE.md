@@ -227,6 +227,7 @@ The library protects an app only if that app's team wires it in. `agentsec serve
 
 ```bash
 pip install "ai-agent-security-toolkit[gateway,mcp]"
+export AGENTSEC_DLP_FINGERPRINT_KEY="$(openssl rand -hex 32)"   # the example's dlp.fingerprint_key
 agentsec serve --config examples/gateway.yaml --check   # validate, then drop --check to run
 ```
 

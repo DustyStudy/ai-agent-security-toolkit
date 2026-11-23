@@ -5,6 +5,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ## [Unreleased]
 
 ### Added
+- `examples/gateway.yaml` has a `dlp` section (credentials and non-human identities redacted in answers and blocked in tool arguments, PII redacted in answers and monitored in tool arguments, email monitored) with `fingerprint_key: env:AGENTSEC_DLP_FINGERPRINT_KEY`, so `--check` on the example needs that variable set.
 - DLP allowlist expiry: the gateway audits `dlp_allow_expired` and `dlp_allow_expiring` (within 14 days) per group at start and on each bundle load, and `agentsec bundle verify` warns about both.
 - `agentsec dlp hash --key <fingerprint_key>`: prints the HMAC-SHA256 of a value read from stdin (no echo at a terminal) for a `dlp.allow` entry's `match.hmac_sha256`, and says which built-in kind matches the whole value. The value is never printed. **Changed:** allowlist entries no longer accept an unkeyed `match.sha256` (a plain hash of a password, SSN or card number in the bundle is reversed by guessing); use `hmac_sha256`, which needs `dlp.fingerprint_key`.
 - Data-loss prevention custom detectors: `dlp.detectors` adds operator patterns (kind, category, pattern, examples, counter-examples) that get their category's modes, per-kind overrides and the allowlist, and are redacted in the audit log too. Each pattern is checked at load: it compiles, is at most 512 characters, matches its examples and no counter-example, and passes a ReDoS check on 64 KB adversarial input in a separate process.

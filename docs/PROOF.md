@@ -1,6 +1,6 @@
 # Proof: a real model, with and without the toolkit
 
-The README's results table comes from the deterministic simulator. This page shows the same 500-case fuzz matrix run against a **real model**, Llama 3.1 8B served locally by Ollama, first on its own and then behind this toolkit's controls.
+The [quickstart](../README.md#quickstart) uses a deterministic simulator. This page shows the same 500-case fuzz matrix run against a **real model**, Llama 3.1 8B served locally by Ollama, first on its own and then behind this toolkit's controls.
 
 > **Scope.** This is one small open-weight model with a minimal system prompt and pinned decoding. It is not a claim about Claude, GPT, Gemini or any other model, and an 8B model is easier to steer than a frontier model in some ways and less capable of acting on an injection in others. Run the fuzzer against your own agent for numbers that apply to you.
 

@@ -251,7 +251,7 @@ def keys(tmp_path):
 
 
 def write_feed(path, text, pem, name, issued_at):
-    path.write_text(text)
+    path.write_bytes(text.encode())  # no newline translation on Windows
     sign_feed(path, pem, name, issued_at=issued_at)
 
 

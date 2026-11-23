@@ -468,3 +468,48 @@ def test_each_bundle_group_carries_its_own_dlp_policy(tmp_path):
     bad = "  - group: x\n    tools: policies/eng.yaml\n    dlp: {categories: {secrets: {}}}\n"
     with pytest.raises(BundleError, match="secrets|category"):
         load(bundle_with_group(tmp_path / "c", bad))
+
+
+# --------------------------------------------------------------------- DLP allowlist expiry
+
+
+def _allow_group(today):
+    def entry(id_, days):
+        return (
+            f"          - {{id: {id_}, reason: r, owner: sec, kinds: [email],\n"
+            f"             expires: '{(today + timedelta(days=days)).isoformat()}',\n"
+            f"             match: {{email_domain: {id_}.example.org}}}}\n"
+        )
+
+    return (
+        "# textwrap.dedent keeps the indentation\n  - group: support\n    tools: policies/eng.yaml\n    models: [local]\n"
+        "    dlp:\n      allow:\n" + entry("old", -1) + entry("soon", 14) + entry("later", 15)
+    )
+
+
+def test_expired_and_expiring_allowlist_entries_are_audited_on_start_and_reload(tmp_path):
+    today = datetime.now(UTC).date()
+    root = make_bundle(tmp_path / "b", extra_entries=_allow_group(today))
+    app, sink, clock = gateway(tmp_path, root)
+
+    def records(event):
+        return [r["data"] for r in sink.records if r["event"] == event]
+
+    (expired,) = records("dlp_allow_expired")
+    assert expired["policy_group"] == "support"
+    assert [e["id"] for e in expired["entries"]] == ["old"]
+    assert [e["id"] for e in records("dlp_allow_expiring")[0]["entries"]] == ["soon"]
+    make_bundle(root, revision=2, extra_entries=_allow_group(today))
+    clock.t = 11
+    call(app, body=chat(), headers=who("eng"))
+    assert len(records("dlp_allow_expired")) == 2 and len(records("dlp_allow_expiring")) == 2
+
+
+def test_bundle_verify_warns_about_allowlist_expiry(tmp_path, capsys):
+    from agentsec.cli import main
+
+    root = make_bundle(tmp_path / "b", extra_entries=_allow_group(datetime.now(UTC).date()))
+    assert main(["bundle", "verify", str(root), "--public-key", str(pub(tmp_path))]) == 0
+    out = capsys.readouterr().out
+    assert "support: dlp.allow old expired" in out and "support: dlp.allow soon expires" in out
+    assert "later" not in out

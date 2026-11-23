@@ -65,6 +65,8 @@ dlp:
       match: {email_domain: support.example.com}      # or hmac_sha256: <hex>, or pattern: (PII only)
 ```
 
+**Allowlist expiry.** An entry stops matching the day after its `expires` date. At start and on every bundle load, the gateway writes `dlp_allow_expired` (entries that no longer match) and `dlp_allow_expiring` (entries that expire within 14 days) for each group, with the entry ids and dates. `agentsec bundle verify` prints the same as warnings. A gateway that runs for days without a reload logs these only at its last start or reload.
+
 To allowlist one specific credential, token or number, put its keyed hash in `match.hmac_sha256`: `agentsec dlp hash --key env:AGENTSEC_DLP_FINGERPRINT_KEY` (the same reference as the policy's `fingerprint_key`, which such entries require) reads the value from stdin (without echo when typed at a terminal, so it stays out of shell history and the config), prints only its HMAC-SHA256, and says on stderr which built-in kind matches the whole value, or warns when none does (the hash must be of the exact matched span; for cards and SSNs, separators included). One trailing newline is dropped, so `agentsec dlp hash --key ... < value.txt` works. A plain `sha256` is refused: the bundle is readable by everyone who deploys it, and an unkeyed hash of a password, SSN or card number is reversed by trying every value. Rotating `fingerprint_key` invalidates these entries; re-hash them.
 
 The values above are the defaults. `redact` in `tool_args` means block, because a rewritten argument changes the action. Text over the scan limit is blocked unless every kind on that surface is only monitored. References such as `$API_TOKEN` or `${{ secrets.X }}` are not findings.

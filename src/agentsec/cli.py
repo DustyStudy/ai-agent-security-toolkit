@@ -504,6 +504,12 @@ def cmd_bundle(args: argparse.Namespace) -> int:
                 policies = load_bundle(args.dir, load_public_key(fh.read()))
             groups = ", ".join(g.group for g in policies.groups)
             print(f"bundle ok: {policies.revision}, expires {policies.expires}, groups {groups}")
+            for g in policies.groups:
+                expired, soon = g.dlp.allow_expiry()
+                for e in expired:
+                    print(f"  warning: {g.group}: dlp.allow {e.id} expired {e.expires}")
+                for e in soon:
+                    print(f"  warning: {g.group}: dlp.allow {e.id} expires {e.expires}")
     except (BundleError, ConfigError, OSError, ValueError) as e:
         print(f"bundle {args.action} failed: {e}", file=sys.stderr)
         return 1

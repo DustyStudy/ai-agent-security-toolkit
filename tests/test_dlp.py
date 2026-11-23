@@ -6,6 +6,7 @@ Every secret-shaped value is built at run time so no scanner trips on this file.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import hmac
 import json
@@ -247,6 +248,9 @@ def test_allowlist_by_hash_for_secrets_never_by_pattern():
     # Unkeyed: a password or SSN in the bundle would be reversed by guessing.
     with pytest.raises(DlpConfigError, match="sha256 is not accepted"):
         allow(kinds=["aws_access_key_id"], match={"sha256": hashlib.sha256(b"x").hexdigest()})
+    # Built without from_dict and without a key, the entry never matches.
+    unkeyed = dataclasses.replace(policy, fingerprint_key=None)
+    assert unkeyed.scan(AWS_KEY, "output").matches[0].allowed_by is None
     with pytest.raises(DlpConfigError, match="needs dlp.fingerprint_key"):
         DlpPolicy.from_dict({"allow": [{"id": "a", "reason": "r", "owner": "o",
                              "expires": (date.today() + timedelta(days=1)).isoformat(),

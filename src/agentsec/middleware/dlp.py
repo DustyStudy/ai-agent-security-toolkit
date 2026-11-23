@@ -183,7 +183,8 @@ class AllowEntry:
         if self.email_domain is not None:
             return value.rpartition("@")[2].lower() == self.email_domain
         if self.hmac_sha256 is not None:
-            return hmac.compare_digest(allow_digest(key, value), self.hmac_sha256)
+            # No key, no match: an empty key would make the digest as weak as a plain hash.
+            return bool(key) and hmac.compare_digest(allow_digest(key, value), self.hmac_sha256)
         return self.pattern is not None and self.pattern.fullmatch(value) is not None
 
 

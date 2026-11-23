@@ -44,12 +44,25 @@ class Metrics:
         with self._lock:
             self._write_failures += 1
 
-    def render(self, policies: PolicySet) -> str:
+    def snapshot(self) -> dict[str, Any]:
+        """One consistent read of every counter (for /metrics and /dashboard)."""
         with self._lock:
             events, responses = dict(self._events), dict(self._responses)
             failures = self._write_failures
         backlog = self.delivery.backlog if self.delivery else 0
         age = self.delivery.last_delivery_age if self.delivery and backlog else 0.0
+        return {
+            "events": events,
+            "responses": responses,
+            "write_failures": failures,
+            "siem_backlog": backlog,
+            "siem_age": age,
+        }
+
+    def render(self, policies: PolicySet) -> str:
+        snap = self.snapshot()
+        events, responses = snap["events"], snap["responses"]
+        failures, backlog, age = snap["write_failures"], snap["siem_backlog"], snap["siem_age"]
         lines = [
             "# HELP agentsec_gateway_events_total Audit events written, by event name.",
             "# TYPE agentsec_gateway_events_total counter",

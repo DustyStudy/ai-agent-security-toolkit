@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- Gateway: `GET /dashboard` on the admin listener, a read-only status page (readiness, policy revision and groups, audit event and response counters, audit write failures, SIEM backlog) that reloads itself every 5 seconds. Set `admin.fuzz_report` to an `agentsec fuzz --json` file to show its containment summary; only the summary fields are read, never the per-case payloads. No JavaScript, a CSP that forbids scripts, forms and fetches, and GET only, on the existing loopback-only listener.
+
 ## [0.12.0] - 2026-11-23
 
 ### Changed (breaking)

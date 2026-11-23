@@ -6,7 +6,9 @@ Every secret-shaped value is built at run time so no scanner trips on this file.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
+import hmac
 import json
 import time
 from datetime import UTC, date, datetime, timedelta
@@ -190,6 +192,9 @@ def test_config_is_strict():
 # ------------------------------------------------------------------------ allowlist
 
 
+KEY = "k" * 32
+
+
 def allow(**over):
     entry = {
         "id": "support",
@@ -200,7 +205,14 @@ def allow(**over):
         "match": {"email_domain": "corp-mail.com"},
     }
     entry.update(over)
-    return DlpPolicy.from_dict({"categories": {"pii": {"output": "block"}}, "allow": [entry]})
+    return DlpPolicy.from_dict(
+        {
+            "categories": {"pii": {"output": "block"}},
+            "allow": [entry],
+            "fingerprint_key": "env:DLP_TEST_KEY",
+        },
+        resolve_secret=lambda ref: KEY,
+    )
 
 
 def test_allowlisted_values_pass_but_are_still_recorded():
@@ -230,9 +242,19 @@ def test_allowlist_scope_by_surface_and_tool():
 
 
 def test_allowlist_by_hash_for_secrets_never_by_pattern():
-    digest = hashlib.sha256(AWS_KEY.encode()).hexdigest()
-    policy = allow(kinds=["aws_access_key_id"], match={"sha256": digest})
+    digest = hmac.new(KEY.encode(), AWS_KEY.encode(), hashlib.sha256).hexdigest()
+    policy = allow(kinds=["aws_access_key_id"], match={"hmac_sha256": digest})
     assert policy.scan(AWS_KEY, "output").action is None
+    # Unkeyed: a password or SSN in the bundle would be reversed by guessing.
+    with pytest.raises(DlpConfigError, match="sha256 is not accepted"):
+        allow(kinds=["aws_access_key_id"], match={"sha256": hashlib.sha256(b"x").hexdigest()})
+    # Built without from_dict and without a key, the entry never matches.
+    unkeyed = dataclasses.replace(policy, fingerprint_key=None)
+    assert unkeyed.scan(AWS_KEY, "output").matches[0].allowed_by is None
+    with pytest.raises(DlpConfigError, match="needs dlp.fingerprint_key"):
+        DlpPolicy.from_dict({"allow": [{"id": "a", "reason": "r", "owner": "o",
+                             "expires": (date.today() + timedelta(days=1)).isoformat(),
+                             "kinds": ["aws_access_key_id"], "match": {"hmac_sha256": digest}}]})  # fmt: skip
     with pytest.raises(DlpConfigError, match="pii kinds only"):
         allow(kinds=["aws_access_key_id"], match={"pattern": "AKIA.*"})
     assert (

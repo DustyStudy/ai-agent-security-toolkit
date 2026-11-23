@@ -360,15 +360,17 @@ def find_sensitive(
     include_pii: bool = True,
     max_scan_chars: int = DEFAULT_MAX_SCAN_CHARS,
     include_email: bool = False,
+    extra: tuple[_Rule, ...] = (),
 ) -> list[Finding]:
-    """Return non-overlapping findings, ordered by position.
+    """Return non-overlapping findings, ordered by position. ``extra``: more rules (DLP's
+    custom detectors), run after the built-in ones.
 
     Only the first ``max_scan_chars`` characters are scanned; pass ``max_scan_chars=len(text)``
     (or ``math.inf``) to scan all of it regardless of size.
     """
     scanned = text if len(text) <= max_scan_chars else text[:max_scan_chars]
     found: list[Finding] = []
-    rules = (*_RULES, _EMAIL) if include_email and include_pii else _RULES
+    rules = (*((*_RULES, _EMAIL) if include_email and include_pii else _RULES), *extra)
     for rule in rules:
         if rule.category == "pii" and not include_pii:
             continue

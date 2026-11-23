@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
-from agentsec.middleware.dlp import CATEGORY_OF, DlpMatch, DlpPolicy
+from agentsec.middleware.dlp import DlpMatch, DlpPolicy
 
 MODES = ("off", "block", "redact")
 
@@ -33,7 +33,7 @@ def upstream_policy(dlp: DlpPolicy, cred_mode: str, pii_mode: str) -> DlpPolicy:
     if pii_mode != "off":
         modes["pii"]["upstream"] = pii_mode
         for kind, override in kinds.items():
-            if CATEGORY_OF.get(kind) == "pii":
+            if dlp.category(kind) == "pii":
                 override.pop("upstream", None)
     return dataclasses.replace(dlp, modes=modes, kind_modes=kinds)
 

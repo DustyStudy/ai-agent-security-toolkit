@@ -1029,7 +1029,9 @@ class Gateway:
     ) -> None:  # fmt: skip
         """The record of a request that is not a chat completion, shaped like gateway_request."""
         key = gp.dlp.fingerprint_key
-        self._audit.bind(actor=user, session_id=request_id, email_key=key).log(
+        self._audit.bind(
+            actor=user, session_id=request_id, email_key=key, detectors=gp.dlp.detectors
+        ).log(
             event,
             groups=list(groups),
             policy_group=gp.group,
@@ -1181,7 +1183,9 @@ class Gateway:
         cfg = self.config
         # Email addresses in this request's records: the group's DLP fingerprint key.
         key = gp.dlp.fingerprint_key
-        log = self._audit.bind(actor=user, session_id=request_id, email_key=key)
+        log = self._audit.bind(
+            actor=user, session_id=request_id, email_key=key, detectors=gp.dlp.detectors
+        )
         enforce = gp.mode == "enforce"
         req = self._parse(body, gp)
         stream = req.pop("stream")

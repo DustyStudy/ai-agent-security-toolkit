@@ -12,15 +12,24 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import re
+import subprocess  # noqa: S404 - a custom pattern's ReDoS check runs in a killable child
+import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from agentsec.middleware.redact import _EMAIL, _RULES, DEFAULT_MAX_SCAN_CHARS, find_sensitive
+from agentsec.middleware.redact import (
+    _EMAIL,
+    _RULES,
+    DEFAULT_MAX_SCAN_CHARS,
+    _Rule,
+    find_sensitive,
+)
 
 SURFACES = ("output", "tool_args", "tool_results", "upstream")
 CATEGORIES = ("credentials", "nhi", "pii")
@@ -76,6 +85,12 @@ MAX_ALLOW_DAYS = 180
 MAX_UNIT_CHARS = 1_000_000  # all strings in one tool call
 MAX_UNIT_STRINGS = 10_000
 MAX_MATCH_RECORDS = 50  # per unit; the rest are counted, not described
+MAX_PATTERN_CHARS = 512  # custom detector pattern
+REDOS_PROBE_CHARS = 64 * 1024
+REDOS_BUDGET_MS = 50.0  # per adversarial probe
+REDOS_TIMEOUT_S = 10.0  # the whole check, then the child is killed
+_KIND_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_RESERVED_KINDS = frozenset({"scan_limit", "unscanned"})
 
 # $TOKEN, ${TOKEN}, %TOKEN%, {{ secrets.X }}: a reference to a secret, not the secret.
 _REFERENCE = re.compile(r"\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%|\{\{[^{}]{1,200}\}\}")
@@ -155,18 +170,21 @@ class AllowEntry:
     surfaces: frozenset[str] = frozenset(SURFACES)
     tools: frozenset[str] | None = None
     email_domain: str | None = None
-    sha256: str | None = None
+    hmac_sha256: str | None = None  # under the policy's fingerprint_key
     pattern: re.Pattern[str] | None = None
 
-    def matches(self, value: str, kind: str, surface: str, tool: str | None, today: date) -> bool:
+    def matches(
+        self, value: str, kind: str, surface: str, tool: str | None, today: date, key: bytes
+    ) -> bool:
         if today > self.expires or kind not in self.kinds or surface not in self.surfaces:
             return False
         if self.tools is not None and tool not in self.tools:
             return False
         if self.email_domain is not None:
             return value.rpartition("@")[2].lower() == self.email_domain
-        if self.sha256 is not None:
-            return hmac.compare_digest(hashlib.sha256(value.encode()).hexdigest(), self.sha256)
+        if self.hmac_sha256 is not None:
+            # No key, no match: an empty key would make the digest as weak as a plain hash.
+            return bool(key) and hmac.compare_digest(allow_digest(key, value), self.hmac_sha256)
         return self.pattern is not None and self.pattern.fullmatch(value) is not None
 
 
@@ -185,6 +203,8 @@ class DlpPolicy:
     allow: tuple[AllowEntry, ...] = ()
     fingerprint_key: bytes | None = None
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC), compare=False)
+    detectors: tuple[_Rule, ...] = ()  # custom detectors, run after the built-in ones
+    custom_categories: dict[str, str] = field(default_factory=dict)  # their kind -> category
 
     # ------------------------------------------------------------------ loading
     @classmethod
@@ -202,7 +222,9 @@ class DlpPolicy:
         """
         clock = clock or (lambda: datetime.now(UTC))
         data = data or {}
-        _only(data, {"categories", "allow", "fingerprint_key"}, "dlp")
+        _only(data, {"categories", "detectors", "allow", "fingerprint_key"}, "dlp")
+        detectors, custom = _detectors(data.get("detectors"))
+        category_of = {**CATEGORY_OF, **custom}
         modes, kind_modes = _copy(_DEFAULT_MODES), _copy(_DEFAULT_KIND_MODES)
         cats = data.get("categories") or {}
         if not isinstance(cats, dict):
@@ -225,7 +247,7 @@ class DlpPolicy:
             if not isinstance(kinds, dict):
                 raise DlpConfigError(f"{where}.kinds must be a mapping")
             for kind, override in kinds.items():
-                if CATEGORY_OF.get(kind) != cat:
+                if category_of.get(kind) != cat:
                     raise DlpConfigError(f"{where}.kinds: {kind!r} is not a {cat} kind")
                 if not isinstance(override, dict):
                     raise DlpConfigError(f"{where}.kinds.{kind} must be a mapping")
@@ -236,7 +258,7 @@ class DlpPolicy:
         if not isinstance(raw_allow, list):
             raise DlpConfigError("dlp.allow must be a list")
         today = clock().date()
-        allow = tuple(_allow_entry(e, i, today) for i, e in enumerate(raw_allow))
+        allow = tuple(_allow_entry(e, i, today, category_of) for i, e in enumerate(raw_allow))
         ids = [e.id for e in allow]
         if len(set(ids)) != len(ids):
             raise DlpConfigError("dlp.allow: entry ids must be unique")
@@ -245,14 +267,17 @@ class DlpPolicy:
         if ref is not None:
             if not isinstance(ref, str):
                 raise DlpConfigError("dlp.fingerprint_key must be 'env:NAME' or 'file:/path'")
-            key = (resolve_secret or _resolve)(ref).encode()
-            if len(key) < 32:
-                raise DlpConfigError("dlp.fingerprint_key must be at least 32 bytes")
-        return cls(modes, kind_modes, allow, key, clock)
+            key = resolve_key(ref, resolve_secret)
+        if key is None and any(e.hmac_sha256 for e in allow):
+            raise DlpConfigError("dlp.allow: match.hmac_sha256 needs dlp.fingerprint_key")
+        return cls(modes, kind_modes, allow, key, clock, detectors, custom)
 
     # ------------------------------------------------------------------ checks
+    def category(self, kind: str) -> str:
+        return self.custom_categories.get(kind) or CATEGORY_OF.get(kind, "credentials")
+
     def mode(self, kind: str, surface: str) -> str:
-        category = CATEGORY_OF.get(kind, "credentials")
+        category = self.category(kind)
         mode = self.kind_modes.get(kind, {}).get(surface) or self.modes[category][surface]
         # A rewritten argument changes the action (a payment to "[REDACTED:...]"), so redact
         # in tool arguments means block.
@@ -260,7 +285,8 @@ class DlpPolicy:
 
     def strictest(self, surface: str) -> str:
         """The strictest mode any kind can get on ``surface``."""
-        return max((self.mode(k, surface) for k in CATEGORY_OF), key=_RANK.__getitem__)
+        kinds = (*CATEGORY_OF, *self.custom_categories)
+        return max((self.mode(k, surface) for k in kinds), key=_RANK.__getitem__)
 
     def scan(self, text: str, surface: str, *, tool: str | None = None) -> DlpResult:
         """Find, decide and (for ``redact``) rewrite. One pass over the detectors."""
@@ -274,7 +300,7 @@ class DlpPolicy:
         """Every string (keys included) in a tool call's arguments. Never rewrites them."""
         matches: list[DlpMatch] = []
         total = count = 0
-        for path, text in _strings(arguments, "arguments"):
+        for path, text in _strings(arguments, "arguments", self.detectors):
             total += len(text)
             count += 1
             if (
@@ -291,14 +317,17 @@ class DlpPolicy:
         self, text: str, surface: str, tool: str | None, location: str | None
     ) -> Iterator[DlpMatch]:
         today = self.clock().date()
-        for f in find_sensitive(text, max_scan_chars=len(text), include_email=True):
+        found = find_sensitive(
+            text, max_scan_chars=len(text), include_email=True, extra=self.detectors
+        )
+        for f in found:
             value = text[f.start : f.end]
             if _REFERENCE.fullmatch(value):
                 continue
             allowed_by = self._allowed_by(value, f.kind, surface, tool, today)
             yield DlpMatch(
                 kind=f.kind,
-                category=CATEGORY_OF.get(f.kind, "credentials"),
+                category=self.category(f.kind),
                 surface=surface,
                 offset=f.start,
                 length=f.end - f.start,
@@ -315,7 +344,7 @@ class DlpPolicy:
         if _builtin(value, kind):
             return "builtin"
         for entry in self.allow:
-            if entry.matches(value, kind, surface, tool, today):
+            if entry.matches(value, kind, surface, tool, today, self.fingerprint_key or b""):
                 return entry.id
         return None
 
@@ -391,7 +420,7 @@ def _names(value: Any, where: str, allowed: Any = None) -> frozenset[str]:
     return frozenset(value)
 
 
-def _allow_entry(entry: Any, i: int, today: date) -> AllowEntry:
+def _allow_entry(entry: Any, i: int, today: date, category_of: dict[str, str]) -> AllowEntry:
     where = f"dlp.allow[{i}]"
     if not isinstance(entry, dict):
         raise DlpConfigError(f"{where} must be a mapping")
@@ -407,12 +436,14 @@ def _allow_entry(entry: Any, i: int, today: date) -> AllowEntry:
     if expires > today + timedelta(days=MAX_ALLOW_DAYS):
         # A forgotten exception must not become a permanent hole.
         raise DlpConfigError(f"{where}.expires is more than {MAX_ALLOW_DAYS} days away")
-    kinds = _names(entry.get("kinds"), f"{where}.kinds", CATEGORY_OF)
+    kinds = _names(entry.get("kinds"), f"{where}.kinds", category_of)
     surfaces = _names(entry.get("surfaces", list(SURFACES)), f"{where}.surfaces", SURFACES)
     tools = None if entry.get("tools") is None else _names(entry["tools"], f"{where}.tools")
     match = entry.get("match")
     if not isinstance(match, dict) or len(match) != 1:
-        raise DlpConfigError(f"{where}.match takes exactly one of email_domain, sha256, pattern")
+        raise DlpConfigError(
+            f"{where}.match takes exactly one of email_domain, hmac_sha256, pattern"
+        )
     ((how, value),) = match.items()
     if not isinstance(value, str) or not value:
         raise DlpConfigError(f"{where}.match.{how} must be a non-empty string")
@@ -422,19 +453,27 @@ def _allow_entry(entry: Any, i: int, today: date) -> AllowEntry:
             raise DlpConfigError(f"{where}: email_domain only applies to kinds [email]")
         fields["email_domain"] = value.lower().rstrip(".")
     elif how == "sha256":
+        # A plain hash of a password, SSN or card number is reversed by trying every value.
+        raise DlpConfigError(
+            f"{where}.match.sha256 is not accepted: use hmac_sha256 from "
+            "'agentsec dlp hash --key <fingerprint_key>'"
+        )
+    elif how == "hmac_sha256":
         if not re.fullmatch(r"[0-9a-f]{64}", value):
-            raise DlpConfigError(f"{where}.match.sha256 must be 64 lowercase hex characters")
-        fields["sha256"] = value
+            raise DlpConfigError(f"{where}.match.hmac_sha256 must be 64 lowercase hex characters")
+        fields["hmac_sha256"] = value
     elif how == "pattern":
         # A pattern broad enough to be useful for a credential is an off switch.
-        if any(CATEGORY_OF[k] != "pii" for k in kinds):
-            raise DlpConfigError(f"{where}: pattern is for pii kinds only; use sha256")
+        if any(category_of[k] != "pii" for k in kinds):
+            raise DlpConfigError(f"{where}: pattern is for pii kinds only; use hmac_sha256")
         try:
             fields["pattern"] = re.compile(value)
         except re.error as e:
             raise DlpConfigError(f"{where}.match.pattern: {e}") from None
     else:
-        raise DlpConfigError(f"{where}.match takes exactly one of email_domain, sha256, pattern")
+        raise DlpConfigError(
+            f"{where}.match takes exactly one of email_domain, hmac_sha256, pattern"
+        )
     return AllowEntry(
         id=_text(entry, "id", where),
         reason=_text(entry, "reason", where),
@@ -447,6 +486,19 @@ def _allow_entry(entry: Any, i: int, today: date) -> AllowEntry:
     )
 
 
+def allow_digest(key: bytes, value: str) -> str:
+    """What ``match.hmac_sha256`` holds: the full HMAC-SHA256 of the exact matched span."""
+    return hmac.new(key, value.encode(), hashlib.sha256).hexdigest()
+
+
+def resolve_key(ref: str, resolve_secret: Callable[[str], str] | None = None) -> bytes:
+    """``fingerprint_key``: an ``env:NAME`` or ``file:/path`` reference, at least 32 bytes."""
+    key = (resolve_secret or _resolve)(ref).encode()
+    if len(key) < 32:
+        raise DlpConfigError("dlp.fingerprint_key must be at least 32 bytes")
+    return key
+
+
 def _builtin(value: str, kind: str) -> bool:
     if kind == "email":
         domain = value.rpartition("@")[2].lower()
@@ -456,7 +508,9 @@ def _builtin(value: str, kind: str) -> bool:
     return value in _BUILTIN_VALUES
 
 
-def _strings(value: Any, path: str, depth: int = 0) -> Iterator[tuple[str, str]]:
+def _strings(
+    value: Any, path: str, extra: tuple[_Rule, ...] = (), depth: int = 0
+) -> Iterator[tuple[str, str]]:
     """(path, string) for every string and key, depth-first. Deep nesting is scanned as text."""
     if depth > 64:
         yield path, repr(value)
@@ -466,17 +520,115 @@ def _strings(value: Any, path: str, depth: int = 0) -> Iterator[tuple[str, str]]
         for k, v in value.items():
             key = str(k)
             yield f"{path}.<key>", key
-            yield from _strings(v, f"{path}.{_safe_key(key)}", depth + 1)
+            yield from _strings(v, f"{path}.{_safe_key(key, extra)}", extra, depth + 1)
     elif isinstance(value, list | tuple):
         for i, v in enumerate(value):
-            yield from _strings(v, f"{path}[{i}]", depth + 1)
+            yield from _strings(v, f"{path}[{i}]", extra, depth + 1)
 
 
-def _safe_key(key: str) -> str:
+def _safe_key(key: str, extra: tuple[_Rule, ...] = ()) -> str:
     # The path is audited: a key that is itself a secret must not be copied into it.
-    return (
-        f"[REDACTED:{find[0].kind}]" if (find := find_sensitive(key, include_email=True)) else key
+    find = find_sensitive(key, include_email=True, extra=extra)
+    return f"[REDACTED:{find[0].kind}]" if find else key
+
+
+def _detectors(raw: Any) -> tuple[tuple[_Rule, ...], dict[str, str]]:
+    """Custom detectors, each checked at load: it compiles, is short, matches its examples and
+    none of its counter-examples, and stays fast on adversarial input."""
+    if raw is None:
+        return (), {}
+    if not isinstance(raw, list):
+        raise DlpConfigError("dlp.detectors must be a list")
+    rules: list[_Rule] = []
+    custom: dict[str, str] = {}
+    for i, entry in enumerate(raw):
+        where = f"dlp.detectors[{i}]"
+        if not isinstance(entry, dict):
+            raise DlpConfigError(f"{where} must be a mapping")
+        _only(entry, {"kind", "category", "pattern", "examples", "counter_examples"}, where)
+        kind = _text(entry, "kind", where)
+        if not _KIND_NAME.fullmatch(kind):
+            raise DlpConfigError(f"{where}.kind must be lowercase letters, digits and _")
+        if kind in CATEGORY_OF or kind in _RESERVED_KINDS:
+            raise DlpConfigError(f"{where}.kind {kind!r} is a built-in kind")
+        if kind in custom:
+            raise DlpConfigError(f"{where}.kind {kind!r} is defined twice")
+        category = entry.get("category")
+        if category not in CATEGORIES:
+            raise DlpConfigError(f"{where}.category must be one of {', '.join(CATEGORIES)}")
+        source = _text(entry, "pattern", where)
+        if len(source) > MAX_PATTERN_CHARS:
+            raise DlpConfigError(f"{where}.pattern is longer than {MAX_PATTERN_CHARS} characters")
+        try:
+            pattern = re.compile(source)
+        except re.error as e:
+            raise DlpConfigError(f"{where}.pattern: {e}") from None
+        if pattern.search("") is not None:
+            raise DlpConfigError(f"{where}.pattern matches the empty string")
+        for ex in _names(entry.get("examples"), f"{where}.examples"):
+            m = pattern.search(ex)
+            if m is None or m.end() == m.start():
+                raise DlpConfigError(f"{where}: pattern does not match example {ex!r}")
+        counter = entry.get("counter_examples")
+        for ex in () if counter in (None, []) else _names(counter, f"{where}.counter_examples"):
+            if pattern.search(ex) is not None:
+                raise DlpConfigError(f"{where}: pattern matches counter-example {ex!r}")
+        _redos_check(source, where)
+        rules.append(_Rule(kind, "pii" if category == "pii" else "secret", pattern))
+        custom[kind] = category
+    return tuple(rules), custom
+
+
+def _probe_chars(source: str) -> list[str]:
+    """The pattern's own literal characters, plus a letter, a digit and a space for classes
+    like \\w and \\d. Long runs of these, with and without a tail that cannot match, are
+    the shapes that make a backtracking pattern explode."""
+    return list(dict.fromkeys(c for c in source + "a0 " if c not in "\\^$.|?*+()[]{}"))[:48]
+
+
+# faulthandler's watchdog is a C thread that needs no GIL, so it ends a probe stuck inside re.
+_REDOS_CHILD = """
+import faulthandler, json, re, sys, time
+job = json.load(sys.stdin)
+pattern, n, chars = re.compile(job["pattern"]), job["n"], job["chars"]
+bases = [c * n for c in chars] + [("".join(chars) * (n // len(chars) + 1))[:n]]
+for probe in (p for b in bases for p in (b, b[:-1] + "\\x00")):
+    faulthandler.dump_traceback_later(job["budget_ms"] / 1000, exit=True)
+    start = time.perf_counter()
+    for _ in pattern.finditer(probe):
+        pass
+    faulthandler.cancel_dump_traceback_later()
+    if (time.perf_counter() - start) * 1000 > job["budget_ms"]:
+        sys.exit(3)
+"""
+
+
+def _redos_check(source: str, where: str) -> None:
+    # A catastrophic pattern cannot be interrupted in-process, so it runs in a child we can kill.
+    job = json.dumps(
+        {
+            "pattern": source,
+            "chars": _probe_chars(source),
+            "n": REDOS_PROBE_CHARS,
+            "budget_ms": REDOS_BUDGET_MS,
+        }
     )
+    try:
+        done = subprocess.run(  # noqa: S603 - our own interpreter, fixed code, data on stdin
+            [sys.executable, "-I", "-c", _REDOS_CHILD],
+            input=job,
+            capture_output=True,
+            text=True,
+            timeout=REDOS_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise DlpConfigError(f"{where}.pattern is too slow on adversarial input") from None
+    if done.returncode != 0:
+        raise DlpConfigError(
+            f"{where}.pattern takes over {REDOS_BUDGET_MS:.0f} ms on a "
+            f"{REDOS_PROBE_CHARS // 1024} KB adversarial input"
+        )
 
 
 def _resolve(ref: str) -> str:

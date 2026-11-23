@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import getpass
+import hashlib
 import json
 import sys
 import time
@@ -30,6 +32,7 @@ from agentsec.fuzzer.harness import DEFAULT_SCENARIOS, NOT_RUN_PREFIX, SCENARIOS
 from agentsec.fuzzer.payloads import categories
 from agentsec.fuzzer.targets import redact_spec
 from agentsec.middleware.audit import VerifyResult, read_records, verify_file
+from agentsec.middleware.redact import find_sensitive
 from agentsec.sandbox import Policy, PolicyError, ToolGuard
 from agentsec.threatmodel import (
     SYSTEM_TEMPLATE,
@@ -555,6 +558,40 @@ def _token_settings(path: str) -> TokenSettings:
     return tokens
 
 
+def cmd_dlp_hash(args: argparse.Namespace) -> int:
+    """SHA-256 of one value from stdin, for a ``dlp.allow`` entry's ``match.sha256``.
+
+    The value is never echoed or printed: from a terminal it is read without echo (so it is
+    not in shell history), and only the hash goes to stdout.
+    """
+    if sys.stdin.isatty():
+        value = getpass.getpass("value to hash (not echoed): ")
+    else:
+        # Bytes, decoded as UTF-8: the gateway hashes value.encode(), whatever the locale.
+        value = sys.stdin.buffer.read().decode("utf-8")
+        # One trailing newline is the shell's (echo, a file's last line), not the value's.
+        value = value[:-2] if value.endswith("\r\n") else value.removesuffix("\n")
+    if not value:
+        print("error: no value on stdin", file=sys.stderr)
+        return 2
+    print(hashlib.sha256(value.encode()).hexdigest())
+    kinds = [
+        f.kind
+        for f in find_sensitive(value, include_email=True, max_scan_chars=len(value))
+        if f.start == 0 and f.end == len(value)
+    ]
+    if kinds:
+        print(f"matches built-in kind {kinds[0]}", file=sys.stderr)
+    else:
+        print(
+            "warning: no built-in detector matches the whole value (custom detectors are not "
+            "checked here). The allowlist compares the exact span a detector matched: for "
+            "cards and SSNs that includes the spaces or dashes.",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def cmd_token(args: argparse.Namespace) -> int:
     from datetime import UTC, datetime
 
@@ -834,6 +871,12 @@ def build_parser() -> argparse.ArgumentParser:
         else:
             ep.add_argument("--public-key", help="Ed25519 public key PEM file of the feed key")
     eg.set_defaults(func=cmd_egress)
+
+    d = sub.add_parser("dlp", help="Data-loss prevention utilities.")
+    d_sub = d.add_subparsers(dest="action", required=True)
+    d_sub.add_parser(
+        "hash", help="Print the SHA-256 of a value read from stdin, for dlp.allow match.sha256."
+    ).set_defaults(func=cmd_dlp_hash)
 
     t = sub.add_parser("token", help="List or revoke gateway access tokens (admin).")
     t_sub = t.add_subparsers(dest="action", required=True)

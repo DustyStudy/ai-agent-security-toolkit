@@ -65,6 +65,8 @@ dlp:
       match: {email_domain: support.example.com}      # or sha256: <hex>, or pattern: (PII only)
 ```
 
+To allowlist one specific credential or token, put its hash in `match.sha256`: `agentsec dlp hash` reads the value from stdin (without echo when typed at a terminal, so it stays out of shell history and the config), prints only its SHA-256, and says on stderr which built-in kind matches the whole value, or warns when none does (the hash must be of the exact matched span; for cards and SSNs, separators included). One trailing newline is dropped, so `agentsec dlp hash < value.txt` works.
+
 The values above are the defaults. `redact` in `tool_args` means block, because a rewritten argument changes the action. Text over the scan limit is blocked unless every kind on that surface is only monitored. References such as `$API_TOKEN` or `${{ secrets.X }}` are not findings.
 
 **Custom detectors.** Add patterns for your own token formats or IDs under `dlp.detectors`. Each one takes the modes of its category (and can be overridden under `categories.<category>.kinds.<kind>`, or allowlisted, like a built-in kind):

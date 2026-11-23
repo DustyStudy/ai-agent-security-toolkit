@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Protocol
 
-from agentsec.middleware.redact import find_sensitive, redact_text
+from agentsec.middleware.redact import _EMAIL, find_sensitive, redact_text
 
 _LOG = logging.getLogger("agentsec.audit")
 
@@ -457,6 +457,9 @@ class AuditLogger:
     def _clean_str(self, text: str, keep: bool = False) -> Any:
         if self._redact:
             text, _ = redact_text(text)
+            # Addresses in content are hashed, so repeats still correlate. Only values: the
+            # actor (often an address) goes through _clean_key and stays readable.
+            text = _EMAIL.pattern.sub(lambda m: f"[EMAIL:{_sha256(m[0].lower())[:16]}]", text)
         if not self._log_content and not keep and len(text) > self._preview_chars:
             return {"sha256": _sha256(text), "length": len(text)}
         if len(text) > self._max_field_chars:

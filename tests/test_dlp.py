@@ -366,11 +366,21 @@ def test_no_sensitive_value_reaches_the_audit_log(monkeypatch):
         guard.authorize(ToolCall("search", {"q": v}))
     raw = json.dumps(sink.records)
     assert raw.count('"dlp_match"') == 2 * len(values)
-    # Email is the exception by design: the audit log's own redaction leaves addresses alone
-    # (the actor is often one), so the tool_request record keeps it. See the design note.
-    for v in values[:-1]:
+    for v in values:
         for form in (v, base64.b64encode(v.encode()).decode(), v.encode().hex(), KEY):
             assert form not in raw
+
+
+def test_the_audit_log_hashes_addresses_in_content_but_keeps_the_actor():
+    sink = MemorySink()
+    AuditLogger(sink, actor=EMAIL).log("tool_request", arguments={"to": EMAIL.upper()})
+    record = sink.records[0]
+    assert record["actor"] == EMAIL
+    hashed = record["data"]["arguments"]["to"]
+    assert hashed.startswith("[EMAIL:") and EMAIL.upper() not in json.dumps(record)
+    sink2 = MemorySink()
+    AuditLogger(sink2).log("x", a=EMAIL)
+    assert sink2.records[0]["data"]["a"] == hashed  # same address, same hash
 
 
 def test_dlp_matches_rank_by_action_in_cef():

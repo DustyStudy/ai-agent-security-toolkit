@@ -43,9 +43,9 @@ For repository checks, see [configuration scanning and pinning](docs/REFERENCE.m
 
 ## Measured results
 
-In a documented local evaluation of **Llama 3.1 8B**, attack success fell from **34.9% (174/498)** with the model alone to **0.2% (1/495)** with the full toolkit enabled. The remaining success was a canary echo.
+In the 0.12.0 release-candidate evaluation of **Llama 3.1 8B**, attack success fell from **35.5% (177/498)** with the model alone to **0.4% (2/497)** with the full toolkit enabled. Both guarded successes were canary echoes.
 
-The evaluation used a 500-case matrix with a fixed model and prompt. Rates exclude cases that errored, and tool calls were recorded without execution. See the [method, results, and errors](docs/PROOF.md) for the full evaluation, including separate tool-result experiments. The quickstart above uses a deterministic simulator.
+The evaluation used a 500-case matrix with a fixed model and prompt. Rates exclude cases that errored, and tool calls were recorded without execution. See the [results and error details](docs/PROOF.md#rerun-on-the-0120-release-candidate) for the full evaluation, including separate tool-result experiments. The quickstart above uses a deterministic simulator.
 
 <a name="why-this-exists"></a>
 

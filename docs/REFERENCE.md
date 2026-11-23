@@ -67,6 +67,8 @@ agentsec fuzz --target mypkg.agent:respond --scenarios direct,indirect,tool_resu
 
 `--max-asr 0.05` makes the command exit `1` above 5%, so it can gate a release. It exits `2` instead when no case was scored or any case errored, because then the gate could not be evaluated. Add `--categories tool_misuse,exfiltration,prompt_leak --max-asr 0` to gate specifically on containment.
 
+`--timeout SECONDS` bounds each case against an HTTP or model target, retries included (defaults: 60 for `http(s)://`, 300 for `ollama:` and `openai-compat:`). 429 and 503 answers are retried at most twice, honouring `Retry-After` within that budget. A provider that refuses the run (rejected credentials, exhausted quota, unknown model) stops it: the remaining cases are recorded as errors, so `--max-asr` exits 2. A stream that fails after some text counts only if that text already shows a hit; otherwise the case is an error, never a defence.
+
 **CI reports.** `--sarif report.sarif` writes SARIF 2.1.0 for GitHub code scanning and `--junit report.xml` writes JUnit XML for any CI test UI. Successful attacks become findings (`error` for tool misuse, exfiltration and prompt leak; `warning` for instruction-following), each tagged with its OWASP LLM Top 10 (2025) id. Fuzz findings have no source location, so pass `--sarif-artifact path/to/agent.py` (repo-relative) to say which file the alerts attach to.
 
 ```yaml

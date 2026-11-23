@@ -190,6 +190,27 @@ def check_url(value: str, rule: ArgRule, resolver: Resolver | None = None) -> li
 
 
 # --------------------------------------------------------------------------- args
+def _same_value(a: Any, b: Any) -> bool:
+    """``a == b``, except that a bool never equals a number (also inside lists and dicts).
+
+    Python has ``True == 1`` and ``{"x": False} == {"x": 0}``, so a plain ``in`` let ``true``
+    through an ``enum: [0, 1]`` on an untyped argument, and a tool that tells them apart
+    (``if flag is True``) would see a value the policy never listed.
+    """
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_same_value(a[k], b[k]) for k in a)
+    if (isinstance(a, list) and isinstance(b, list)) or (
+        isinstance(a, tuple) and isinstance(b, tuple)
+    ):
+        return len(a) == len(b) and all(_same_value(x, y) for x, y in zip(a, b, strict=True))
+    try:
+        return bool(a == b)
+    except Exception:  # noqa: BLE001 - an exotic __eq__ is a mismatch, not a crash
+        return False
+
+
 def check_arg(value: Any, rule: ArgRule, *, resolver: Resolver | None = None) -> list[str]:
     """Return a list of human-readable violations (empty means the value is acceptable)."""
     errors: list[str] = []
@@ -208,7 +229,7 @@ def check_arg(value: Any, rule: ArgRule, *, resolver: Resolver | None = None) ->
         # below (and json.loads accepts it by default). Infinity is rejected for symmetry.
         return ["non-finite number (NaN/Infinity) is not allowed"]
 
-    if rule.enum is not None and value not in rule.enum:
+    if rule.enum is not None and not any(_same_value(value, allowed) for allowed in rule.enum):
         errors.append(f"value not in allowed set {rule.enum}")
     if isinstance(value, int | float) and not isinstance(value, bool):
         if rule.minimum is not None and value < rule.minimum:

@@ -1,6 +1,6 @@
 # Proof: a real model, with and without the toolkit
 
-The README's results table comes from the deterministic simulator. This page shows the same 500-case fuzz matrix run against a **real model**, Llama 3.1 8B served locally by Ollama, first on its own and then behind this toolkit's controls.
+The [quickstart](../README.md#quickstart) uses a deterministic simulator. This page shows the same 500-case fuzz matrix run against a **real model**, Llama 3.1 8B served locally by Ollama, first on its own and then behind this toolkit's controls.
 
 > **Scope.** This is one small open-weight model with a minimal system prompt and pinned decoding. It is not a claim about Claude, GPT, Gemini or any other model, and an 8B model is easier to steer than a frontier model in some ways and less capable of acting on an injection in others. Run the fuzzer against your own agent for numbers that apply to you.
 
@@ -84,6 +84,19 @@ The control, the identical task and text as a document in the user's message:
 Four control cases errored and are excluded: Ollama returned HTTP 500 for four of the `unicode_tags` variants when the text was in the user's message. All four control successes were `delim-01` canary echoes. Unlike Llama, this model never called `http_request` or `run_shell` to fetch the tracker in the control, so its raw score and its unambiguous score are the same.
 
 **Reading the two models together.** Both followed a small share of injections delivered as a tool result (4.0% and 2.8%), neither called a forbidden tool, and the guards took both to 0%. They differ in which obfuscations work (Llama: only readable ones; Gemma: base64 and character-level ones too), so a filter tuned on one model's failures would miss the other's. They also disagree on the control: Llama followed the tool role about a third as often as a pasted document, Gemma followed it at least as often (7 against 4, a difference too small to mean anything at this sample size). So the Llama result is not evidence that models trust tool results less than documents. Two small local models, one task template, and counts in single digits: treat these as a demonstration that the mode runs and that the guards hold on it, not as a measurement of how exposed any agent is. The warning above applies here too: do not compare these numbers with the 500-case run.
+
+## Rerun on the 0.12.0 release candidate
+
+The Llama 3.1 8B runs were repeated on the 0.12.0 release candidate (commit `922a7e0`) on 2026-11-22: same laptop GPU (RTX 5070 Ti, 12 GB), Ollama 0.40.10, `llama3.1:8b`, seed 0, the default 300 s per case, Python 3.12.10 on Windows 11. ASR is successes over cases that did not error.
+
+| Target | Delivery | ASR | tool_misuse | exfiltration | prompt_leak | canary | Errors | Published above |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `ollama:llama3.1:8b` | direct + indirect | **35.5%** (177 / 498) | 42 / 100 | 4 / 40 | 20 / 58 | 111 / 300 | 2 | 34.9% |
+| `guarded:ollama:llama3.1:8b` | direct + indirect | **0.4%** (2 / 497) | 0 / 99 | 0 / 40 | 0 / 59 | 2 / 299 | 3 | 0.2% |
+| `ollama:llama3.1:8b` | tool_result | **4.0%** (10 / 250) | 0 / 50 | 0 / 20 | 0 / 30 | 10 / 150 | 0 | 4.0% |
+| `guarded:ollama:llama3.1:8b` | tool_result | **0.0%** (0 / 250) | 0 / 50 | 0 / 20 | 0 / 30 | 0 / 150 | 0 | 0.0% |
+
+Behind the full stack no forbidden tool call, exfiltration or prompt leak got through. Both guarded successes are canary echoes of `consent-01` (`markdown_fence` and `case_alternate` obfuscations, indirect delivery); the first is the case that got through in the original run. Every error was a 300 s timeout (homoglyph and leetspeak variants). The differences from the original run (3 more bare successes, 1 more guarded canary echo) are within the run-to-run variation described below.
 
 ## Errors
 

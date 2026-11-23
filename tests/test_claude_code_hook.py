@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from agentsec.cli import main
+from agentsec.integrations import claude_code
 from agentsec.integrations.claude_code import BLOCK, handle, load_session
 from agentsec.middleware.audit import verify_file
 from agentsec.sandbox import Policy
@@ -34,6 +35,24 @@ def pre(tool: str, session: str = "s1", **tool_input) -> dict:
         "tool_input": tool_input,
         "tool_use_id": "toolu_1",
     }
+
+
+# The hook resolves URL hosts before it allows a call. Answer from a fixed table so these
+# tests do not depend on the machine's DNS (CI runners resolve example.com; sandboxed or
+# offline machines do not, and the hook then correctly denies). Unknown names fail, as
+# they would offline. tests/test_claude_code_hook_fail_closed.py covers the real resolver.
+FAKE_DNS = {"example.com": ["93.184.215.14"]}
+
+
+def _fake_resolver(host: str) -> list[str]:
+    if host not in FAKE_DNS:
+        raise OSError(f"{host} is not in the test DNS table")
+    return FAKE_DNS[host]
+
+
+@pytest.fixture(autouse=True)
+def hermetic_dns(monkeypatch):
+    monkeypatch.setattr(claude_code, "_default_resolver", _fake_resolver)
 
 
 @pytest.fixture

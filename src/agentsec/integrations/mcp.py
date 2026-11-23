@@ -365,21 +365,18 @@ class GuardedMCPClient:
             # values: redaction cannot see a {"password": ...} pair as one assignment.
             self._audit("mcp_call_options", tool=name, options=sorted(kwargs))
 
-        reached_server = False
-
         async def invoke(**args: Any) -> Any:
-            nonlocal reached_server
-            reached_server = True
+            # Taint before the request goes out, as the guard does for returns_untrusted tools,
+            # not after the result is back: a side-effecting call authorized while this one is
+            # in flight would otherwise pass, and so would one that follows a call that raised
+            # or was cancelled after the server sent content. A refused call never gets here.
+            if self._taint:
+                self._session.mark_untrusted(f"mcp:{name}")
             return await self._client.call_tool(name, args, **kwargs)
 
-        try:
-            return await self._guard.aexecute(
-                ToolCall(name=name, arguments=dict(arguments or {})), invoke, self._session
-            )
-        finally:
-            # Taint only if the call was actually made: a call the guard refused fetched nothing.
-            if self._taint and reached_server:
-                self._session.mark_untrusted(f"mcp:{name}")
+        return await self._guard.aexecute(
+            ToolCall(name=name, arguments=dict(arguments or {})), invoke, self._session
+        )
 
     def _audit(self, event: str, **data: Any) -> None:
         if self._guard.audit is not None:

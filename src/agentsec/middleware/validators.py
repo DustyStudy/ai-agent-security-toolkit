@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -422,6 +423,43 @@ def _not_json(constant: str) -> Any:
     raise ValueError(f"{constant} is not a JSON value")
 
 
+def _finite_float(text: str) -> float:
+    # "1e400" is valid JSON syntax but parses to inf, which then passes a schema with no
+    # maximum and re-serialises as the non-JSON token Infinity.
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("number out of range (parses to Infinity)")
+    return value
+
+
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    # Parsers disagree on {"role": "user", "role": "admin"}: this one keeps the last, others
+    # keep the first or reject it. A consumer could act on a value the schema never saw.
+    doc: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in doc:
+            raise ValueError("duplicate key in an object")
+        doc[key] = value
+    return doc
+
+
+# Deeper documents are refused whatever the Python version: before 3.14 the json module
+# raised RecursionError on deep nesting, 3.14 parses it, and the consumer's parser may not.
+MAX_JSON_DEPTH = 256
+
+
+def _too_deep(doc: Any, limit: int = MAX_JSON_DEPTH) -> bool:
+    stack: list[tuple[Any, int]] = [(doc, 1)]
+    while stack:
+        value, depth = stack.pop()
+        if isinstance(value, dict | list):
+            if depth > limit:
+                return True
+            children = value.values() if isinstance(value, dict) else value
+            stack.extend((child, depth + 1) for child in children)
+    return False
+
+
 class JsonSchemaValidator:
     """For agents whose output feeds a parser: require valid JSON matching a schema."""
 
@@ -435,17 +473,36 @@ class JsonSchemaValidator:
     def check(self, text: str) -> list[Violation]:
         try:
             # NaN and Infinity are not JSON, and NaN passes every minimum and maximum.
-            doc = json.loads(text, parse_constant=_not_json)
+            doc = json.loads(
+                text,
+                parse_constant=_not_json,
+                parse_float=_finite_float,
+                object_pairs_hook=_unique_keys,
+            )
         except ValueError as exc:
             reason = getattr(exc, "msg", exc)
             return [Violation(self.name, f"output is not valid JSON: {reason}", self.action)]
+        except RecursionError:
+            # "[[[[...": deep nesting exhausts the stack. Report it; raising would crash the
+            # caller's pipeline instead of withholding the output.
+            return [
+                Violation(self.name, "output is not valid JSON: nested too deeply", self.action)
+            ]
+        if _too_deep(doc):
+            return [
+                Violation(self.name, "output is not valid JSON: nested too deeply", self.action)
+            ]
+        try:
+            errors = sorted(self._validator.iter_errors(doc), key=lambda e: list(e.path))
+        except RecursionError:
+            return [Violation(self.name, "output is nested too deeply to validate", self.action)]
         return [
             Violation(
                 self.name,
                 f"{'/'.join(str(p) for p in err.absolute_path) or '<root>'}: {err.message}",
                 self.action,
             )
-            for err in sorted(self._validator.iter_errors(doc), key=lambda e: list(e.path))
+            for err in errors
         ]
 
     def sanitize(self, text: str) -> str:

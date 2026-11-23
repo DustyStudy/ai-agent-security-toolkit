@@ -25,8 +25,9 @@ from agentsec.configscan import (
 )
 from agentsec.fuzzer import CORPUS, MUTATORS, FuzzConfig, load_target, run
 from agentsec.fuzzer.formats import clean
-from agentsec.fuzzer.harness import DEFAULT_SCENARIOS, SCENARIOS, build_cases
+from agentsec.fuzzer.harness import DEFAULT_SCENARIOS, NOT_RUN_PREFIX, SCENARIOS, build_cases
 from agentsec.fuzzer.payloads import categories
+from agentsec.fuzzer.targets import redact_spec
 from agentsec.middleware.audit import VerifyResult, read_records, verify_file
 from agentsec.sandbox import Policy, PolicyError, ToolGuard
 from agentsec.threatmodel import (
@@ -75,10 +76,13 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
         print(f"selected: {len(cases)} cases")
         print("mutators:", ", ".join(MUTATORS))
         return 0
+    if args.timeout is not None and not 0 < args.timeout < float("inf"):
+        print("error: --timeout must be a positive number of seconds", file=sys.stderr)
+        return 2
     try:
-        target = load_target(args.target)
+        target = load_target(args.target, timeout=args.timeout)
         report = run(target, config)
-    except (ValueError, ImportError, AttributeError) as exc:
+    except (ValueError, ImportError, AttributeError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.json:
@@ -87,7 +91,7 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
         Path(args.md).write_text(report.to_markdown(), encoding="utf-8", newline="\n")
     if args.sarif:
         Path(args.sarif).write_text(
-            report.to_sarif(artifact_uri=args.sarif_artifact, target=args.target),
+            report.to_sarif(artifact_uri=args.sarif_artifact, target=redact_spec(args.target)),
             encoding="utf-8",
             newline="\n",
         )
@@ -100,6 +104,10 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
     if not args.quiet:
         print()
         print(report.to_markdown(max_bypasses=8))
+    not_run = [r.error for r in report.results if r.error and r.error.startswith(NOT_RUN_PREFIX)]
+    if not_run:  # the target refused the run (credentials, quota): the rest were not attempted
+        stop = clean(not_run[0].removeprefix(NOT_RUN_PREFIX), 300)
+        print(f"warning: {stop}; {len(not_run)} case(s) not run", file=sys.stderr)
     if report.total and report.errors == report.total:
         # Zero successes out of zero scored cases would pass any --max-asr gate.
         print("FAIL: every case errored; nothing was evaluated", file=sys.stderr)
@@ -612,6 +620,12 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--seed", type=int, default=0)
     f.add_argument("--max-cases", type=int, help="randomly sample at most N cases")
     f.add_argument("--max-asr", type=float, help="exit 1 if attack-success rate exceeds this (0-1)")
+    f.add_argument(
+        "--timeout",
+        type=float,
+        help="wall-clock seconds per case for HTTP and model targets, retries included "
+        "(default: 60 for http(s)://, 300 for ollama: and openai-compat:; per request for anthropic:)",
+    )
     f.add_argument("--json", help="write full JSON report to this path")
     f.add_argument("--md", help="write Markdown report to this path")
     f.add_argument("--sarif", help="write a SARIF 2.1.0 report (GitHub code scanning)")

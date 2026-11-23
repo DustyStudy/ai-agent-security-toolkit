@@ -4,7 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-23
+
 ### Changed (breaking)
+- `ToolGuard`: only a boolean `True` from an approver approves a call. Any other answer (`"n"` from `input()`, `1`, an object) is refused and audited; `bool(answer)` used to approve all of them.
+- `agentsec fuzz`: the `http(s)://`, `ollama:` and `openai-compat:` targets bound each case by wall-clock time (connect, retries and the whole body) instead of per socket read. `--timeout SECONDS` sets it (defaults unchanged: 60 for `http(s)://`, 300 for the model targets) and is passed to the Anthropic SDK for `anthropic:`. An `http(s)://` target answering 200 with an `error` field, or with none of `text`, `tool_calls` and `blocked`, is an error, not an empty answer.
+- `agentsec fuzz` stops a run the provider refuses: 401, 402, 404 (and 403 from a model API), or a quota error such as `insufficient_quota` or `billing_error`. The remaining cases are recorded as `NotRun:` errors, a warning names the cause, and `--max-asr` exits 2. 429 and 503 are retried at most twice, honouring `Retry-After` within the case's time budget. `TargetUnavailable` is exported from `agentsec.fuzzer` for targets of your own.
 - `agentsec scan-config --accept` requires `--reason`. Pin files are version 2 and version-1 pin files are refused: delete the old file and re-pin, recording a reason for each acceptance.
 - `locked_install_rules()` resolves its requirements path against `cwd` (default: the process working directory when the rule is built). A caller cannot pass a different `cwd` to a locked rule.
 - `identity.trusted_proxies` rejects host bits and prefixes broader than /16 (IPv4) or /48 (IPv6); fix any such entry before upgrading.
@@ -29,9 +34,21 @@ A second review of `scan-config` (Codex, on the `--accept`, YAML and empty-entry
 - `agentsec audit summary <file>`: counts of audit records by event and by decision (`verdict`, or the `allowed` flag of `gateway_mcp_call` and `validation` records), and the ten most-denied tools and actors. `--since`, `--until`, `--actor` and `--event` filter the records and `--json` prints JSON. The hash chain is verified in the same pass: a log that fails gets no summary and exit code 1 unless `--no-verify` is passed, and then the output is marked `UNVERIFIED`. The file is streamed, and values read from the log are stripped of control characters and bounded before printing. `verify_file` takes an optional `records` wrapper for reading the records it verifies, and `agentsec.middleware.audit.read_records` is the file reader it uses.
 
 ### Fixed
+- `agentsec fuzz`: an `openai-compat:` stream that failed after some text (a backend error event, or `finish_reason: "error"`) counted as a finished answer, so a harmless prefix scored as a successful defence and could pass `--max-asr`. Such a case now scores only if what arrived already shows a hit, and is an error otherwise. A missing or unreadable `token=file:` file exits 2 instead of printing a traceback.
+- Gateway: the upstream deadline covers connect, status line and headers. An upstream that sent its headers a byte at a time held a worker thread without limit; it is now cut at `upstream_timeout_s` (504). A connect timeout is a 504, not a 502. Truncated chunked bodies, bad status lines, over-deep JSON and a `choices` that is not a list are 502 upstream errors instead of 500s.
+- Gateway (holdback): an upstream error event mid-stream (vLLM and LiteLLM send one, then `[DONE]`) ended the stream as a finished answer. It is now an upstream error. A stream cut short after text was released is audited: the delivered text is recorded and checked (`gateway_output_violation_after_delivery` with `interrupted: true`), `gateway_upstream_error` carries `released_chars`, and an unexpected failure writes `gateway_error`.
+- Several `AuditLogger`s on one non-file sink share one hash chain instead of each starting at `seq` 0, so the chain verifies.
+- `guard_tool` supports single-input LangChain `Tool`s (the policy names the argument `tool_input`) and tools whose schema uses field aliases.
+- Tests no longer need public DNS: the Claude Code hook tests answer from a fixed resolver table.
 - `agentsec audit verify` crashed with a `ValueError` on a line holding an integer too long for Python to convert (more than 4300 digits). Such a line is now reported as `not valid JSON`, like any other malformed line, and the `TAMPERED` message is bounded and stripped of control characters.
 
 ### Security
+- `ToolGuard`: an approver that raises (including a timeout) refuses the call with an audited decision instead of propagating; a non-string tool name is denied instead of raising. `enum` checks no longer treat booleans and numbers as equal (`true` passed `enum: [0, 1]`), including inside lists and dicts. All guards share one commit lock, so a `Session` shared between guards keeps its limits under concurrency.
+- `GuardedMCPClient` taints the session before the request is sent, so a side-effecting call that overlaps a running untrusted MCP call is refused.
+- `JsonSchemaValidator` refuses numbers that overflow to infinity (`1e400`) and duplicate object keys, and refuses documents nested deeper than 256 levels (`MAX_JSON_DEPTH`) on every Python version; it raised `RecursionError` before 3.14 and accepted any depth on 3.14.
+- Redaction covers short `Authorization` credentials after a known scheme, Slack `xapp-`/`xoxe-` tokens and webhook URLs, Google `ya29.` tokens, `*_KEY` credential fields (`SECRET_KEY`, `private_key`, `signing_key`, `access_key`) and `Cookie`/`Set-Cookie` values. Tokens ending in `-` are redacted whole. The audit log redacts `auth` values and (name, value) credential pairs.
+- Gateway: an upstream API key that is not a valid header value (an `env:` secret with a trailing newline) is refused before sending; http.client's error quoted it into the gateway log. An unreadable key file is a 502 audited as `gateway_upstream_error`, not a 503. Upstream failures keep only the exception type, never the upstream's text.
+- `agentsec fuzz`: credentials in a target URL are refused (the password went to the DNS resolver as part of a hostname), and a `header=` value that is not a valid header is refused at load instead of being quoted in every case's error. The SARIF `target` property hides query and `header=` values. An error message that quotes the bearer token is withheld, and recorded errors are capped at 500 characters.
 - CI uses Trivy for blocking high and critical vulnerability and misconfiguration findings. Trivy also runs the configuration check under its existing branch-protection name. This retires the Checkov dependency lock and its advisory exception. Releases scan the Alpine gateway image before publication.
 - Remote model and MCP upstreams require HTTPS. Move HTTP-only services behind a TLS endpoint or run them on gateway loopback.
 - OIDC rejects padded user identifiers and excludes keys whose declared operations omit verification. Audit and output redaction recognize gateway access tokens. The bounded redactor withholds oversized fields as a whole.
@@ -300,7 +317,8 @@ Tagged but never released; use 0.4.1.
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.8.2...v0.9.0

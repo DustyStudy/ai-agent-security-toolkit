@@ -24,7 +24,8 @@ from collections.abc import Iterable
 from typing import Any
 
 try:
-    from langchain_core.tools import BaseTool, StructuredTool, ToolException
+    from langchain_core.tools import BaseTool, StructuredTool, Tool, ToolException
+    from pydantic import BaseModel
 except ImportError as exc:  # pragma: no cover - exercised only without the optional extra
     raise ImportError(
         'agentsec.integrations.langchain needs LangChain: pip install "ai-agent-security-toolkit[langchain]"'
@@ -36,8 +37,32 @@ from agentsec.types import ToolCall
 __all__ = ["guard_tool", "guard_tools"]
 
 
+_SINGLE_INPUT = "tool_input"
+
+
 def _refusal(exc: ToolDenied) -> ToolException:
     return ToolException(f"Tool call refused by security policy: {exc.decision.message()}")
+
+
+def _by_alias(schema: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Rename validated fields back to the names the tool's schema accepts as input.
+
+    LangChain hands the guard (and so the tool) field names, but a field declared
+    ``Field(alias="recipient")`` only validates under its alias: every call the guard allowed
+    failed in the original tool with a ValidationError.
+    """
+    if not (isinstance(schema, type) and issubclass(schema, BaseModel)):
+        return arguments
+    if schema.model_config.get("populate_by_name") or schema.model_config.get("validate_by_name"):
+        return arguments
+    out: dict[str, Any] = {}
+    for key, value in arguments.items():
+        info = schema.model_fields.get(key)
+        alias = None
+        if info is not None:
+            alias = info.validation_alias if isinstance(info.validation_alias, str) else info.alias
+        out[alias or key] = value
+    return out
 
 
 def guard_tool(
@@ -46,7 +71,7 @@ def guard_tool(
     session: Session | None = None,
     *,
     name: str | None = None,
-) -> StructuredTool:
+) -> BaseTool:
     """Return ``tool`` guarded as policy tool ``name`` (default: the tool's own name).
 
     The guard sees the arguments the model supplied after LangChain's own validation, including
@@ -54,12 +79,19 @@ def guard_tool(
     The original tool then validates them once more: a schema validator that changes its input
     (dollars to cents, say) must give the same result when run twice.
     Tool artifacts (``response_format="content_and_artifact"``) are not passed through.
+    The policy names arguments by field name, also for a field with an alias.
+
+    A single-input ``Tool`` (no ``args_schema``) keeps its one-string schema; the policy
+    names its argument ``tool_input``.
     """
     policy_name = name or tool.name
+    if tool.args_schema is None:
+        return _guard_single_input(tool, guard, session, policy_name)
+    schema = tool.args_schema
 
     def run(**kwargs: Any) -> Any:
         def call(**arguments: Any) -> Any:
-            return tool.invoke(arguments)
+            return tool.invoke(_by_alias(schema, arguments))
 
         try:
             return guard.execute(ToolCall(name=policy_name, arguments=kwargs), call, session)
@@ -68,7 +100,7 @@ def guard_tool(
 
     async def arun(**kwargs: Any) -> Any:
         async def call(**arguments: Any) -> Any:
-            return await tool.ainvoke(arguments)
+            return await tool.ainvoke(_by_alias(schema, arguments))
 
         try:
             return await guard.aexecute(ToolCall(name=policy_name, arguments=kwargs), call, session)
@@ -89,8 +121,51 @@ def guard_tool(
     )
 
 
+def _guard_single_input(
+    tool: BaseTool, guard: ToolGuard, session: Session | None, policy_name: str
+) -> Tool:
+    """Guard a legacy single-input tool as a ``Tool`` with the same one-string schema.
+
+    A ``StructuredTool`` built from it advertised a schema of ``args``/``config``/``kwargs``
+    to the model and raised TypeError on the string input such tools take.
+    """
+
+    def run(tool_input: Any) -> Any:
+        def call(**arguments: Any) -> Any:
+            return tool.invoke(arguments[_SINGLE_INPUT])
+
+        try:
+            return guard.execute(
+                ToolCall(name=policy_name, arguments={_SINGLE_INPUT: tool_input}), call, session
+            )
+        except ToolDenied as exc:
+            raise _refusal(exc) from None
+
+    async def arun(tool_input: Any) -> Any:
+        async def call(**arguments: Any) -> Any:
+            return await tool.ainvoke(arguments[_SINGLE_INPUT])
+
+        try:
+            return await guard.aexecute(
+                ToolCall(name=policy_name, arguments={_SINGLE_INPUT: tool_input}), call, session
+            )
+        except ToolDenied as exc:
+            raise _refusal(exc) from None
+
+    return Tool(
+        name=tool.name,
+        func=run,
+        coroutine=arun,
+        description=tool.description,
+        return_direct=tool.return_direct,
+        handle_tool_error=True,
+        metadata=tool.metadata,
+        tags=tool.tags,
+    )
+
+
 def guard_tools(
     tools: Iterable[BaseTool], guard: ToolGuard, session: Session | None = None
-) -> list[StructuredTool]:
+) -> list[BaseTool]:
     """Guard every tool in ``tools``. See :func:`guard_tool`."""
     return [guard_tool(t, guard, session) for t in tools]

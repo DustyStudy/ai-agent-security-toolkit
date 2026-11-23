@@ -11,12 +11,14 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import hashlib
+import http.client
 import ipaddress
 import json
 import logging
 import math
 import os
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -122,49 +124,182 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+# The deadline of the upstream call running on this thread: the connection classes below hand
+# it their socket, so it can cut a call that is still waiting at the deadline.
+_DEADLINE = threading.local()
+
+
+def _shut(sock: socket.socket) -> None:
+    try:
+        # The plain socket's shutdown, also for TLS: a read blocked in another thread returns.
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+    except OSError:
+        pass  # already closed
+
+
+class _Deadline:
+    """A total deadline for one upstream call, headers and connect included.
+
+    The socket timeout bounds each read, not the call: an upstream that sends its status line
+    and headers a byte at a time, or a chunked body's size lines, would hold a worker thread
+    for as long as it liked. At the deadline the call's socket is shut down, so the blocked
+    read returns and the caller sees ``expired``.
+    """
+
+    def __init__(self, timeout: float) -> None:
+        self.at = time.monotonic() + timeout
+        self.expired = False
+        self._socks: list[socket.socket] = []
+        self._lock = threading.Lock()
+        self._timer = threading.Timer(timeout, self._expire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def watch(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._socks.append(sock)
+            expired = self.expired
+        if expired:
+            _shut(sock)
+
+    def _expire(self) -> None:
+        with self._lock:
+            self.expired = True
+            socks = list(self._socks)
+        for sock in socks:
+            _shut(sock)
+
+    def cancel(self) -> None:
+        self._timer.cancel()
+
+    def check(self) -> None:
+        if self.expired or time.monotonic() > self.at:
+            raise TimeoutError
+
+
+def _watch(sock: socket.socket | None) -> None:
+    deadline = getattr(_DEADLINE, "current", None)
+    if deadline is not None and sock is not None:
+        deadline.watch(sock)
+
+
+class _WatchedHTTPConnection(http.client.HTTPConnection):
+    def connect(self) -> None:
+        super().connect()
+        _watch(self.sock)
+
+
+class _WatchedHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self) -> None:
+        super().connect()  # self.sock is the TLS socket from here on
+        _watch(self.sock)
+
+
+class _HTTPHandler(urllib.request.HTTPHandler):
+    def do_open(self, http_class: Any, req: Any, **kw: Any) -> Any:
+        return super().do_open(_WatchedHTTPConnection, req, **kw)
+
+
+class _HTTPSHandler(urllib.request.HTTPSHandler):
+    def do_open(self, http_class: Any, req: Any, **kw: Any) -> Any:
+        return super().do_open(_WatchedHTTPSConnection, req, **kw)
+
+
 # No proxies: HTTP(S)_PROXY from the environment would send prompts and the upstream key through
 # the corporate proxy, even for a 127.0.0.1 upstream.
-_OPENER = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
+_OPENER = urllib.request.build_opener(
+    _NoRedirect, urllib.request.ProxyHandler({}), _HTTPHandler, _HTTPSHandler
+)
+# What an API key may hold to be sent as a header: visible ASCII. http.client refuses anything
+# else with an error that quotes the header, key included, into the gateway's own log.
+_KEY_CHARS = re.compile(r"[\x21-\x7e]+")
+
+
+def _upstream_request(upstream: Upstream, body: bytes, accept: str) -> urllib.request.Request:
+    headers = {"Content-Type": "application/json", "Accept": accept}
+    try:
+        key = upstream.api_key()
+    except (OSError, ValueError) as e:  # ConfigError is a ValueError; neither names the key
+        raise UpstreamError(f"upstream api key unavailable: {type(e).__name__}") from None
+    if key:
+        if not _KEY_CHARS.fullmatch(key):
+            raise UpstreamError("upstream api key is not a valid header value")
+        headers["Authorization"] = f"Bearer {key}"
+    return urllib.request.Request(  # noqa: S310 - URL is from config and checked as http(s)
+        upstream.url + "/chat/completions", data=body, headers=headers, method="POST"
+    )
+
+
+def _open(req: urllib.request.Request, timeout: float, deadline: _Deadline) -> Any:
+    _DEADLINE.current = deadline
+    try:
+        return _OPENER.open(req, timeout=timeout)
+    finally:
+        _DEADLINE.current = None
+
+
+def _upstream_failure(e: Exception, deadline: _Deadline) -> Exception:
+    """The error to raise for a failed upstream call: never the upstream's own text.
+
+    Messages from urllib and http.client can quote what the upstream sent or the request
+    headers (the API key), so only the exception type is kept.
+    """
+    if deadline.expired:
+        return TimeoutError()  # the watchdog cut the call; whatever broke next is its doing
+    if isinstance(e, TimeoutError | UpstreamError):
+        return e
+    if isinstance(e, urllib.error.HTTPError):
+        e.close()  # the error body is never read; release the connection
+        return UpstreamError(f"upstream returned HTTP {e.code}")
+    if isinstance(e, urllib.error.URLError):
+        reason = e.reason
+        if isinstance(reason, TimeoutError):
+            return TimeoutError()  # a connect timeout is a timeout, not an unreachable host
+        kind = type(reason).__name__ if isinstance(reason, BaseException) else type(e).__name__
+        return UpstreamError(f"upstream unreachable: {kind}")
+    if isinstance(e, http.client.HTTPException):
+        # A bad status line, a cut chunked body (IncompleteRead), an oversized header line.
+        return UpstreamError(f"upstream protocol error: {type(e).__name__}")
+    if isinstance(e, OSError):
+        return UpstreamError(f"upstream unreachable: {type(e).__name__}")
+    if isinstance(e, ValueError):
+        return UpstreamError(f"upstream request failed: {type(e).__name__}")
+    return e
 
 
 def http_transport(upstream: Upstream, body: bytes, timeout: float, max_bytes: int) -> Any:
     # shortcut: blocking urllib in a worker thread; a client disconnect does not cancel the
     # upstream call. Move to an async client when streaming passthrough modes arrive.
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    key = upstream.api_key()
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    req = urllib.request.Request(  # noqa: S310 - URL is from config and checked as http(s)
-        upstream.url + "/chat/completions", data=body, headers=headers, method="POST"
-    )
-    # The socket timeout bounds each read, not the call: an upstream dripping a byte at a time
-    # would otherwise hold the worker. Check a total deadline between reads (worst case about
-    # twice ``timeout``).
-    deadline = time.monotonic() + timeout
+    req = _upstream_request(upstream, body, "application/json")
+    # Each read is bounded by the socket timeout and the whole call by the deadline, which
+    # shuts the socket when it passes (worst case about ``timeout`` plus one read).
+    deadline = _Deadline(timeout)
     try:
-        with _OPENER.open(req, timeout=timeout) as resp:
+        with _open(req, timeout, deadline) as resp:
             if resp.status != 200:
                 raise UpstreamError(f"upstream returned HTTP {resp.status}")
             buf = bytearray()
             while len(buf) <= max_bytes:
-                if time.monotonic() > deadline:
-                    raise TimeoutError
+                deadline.check()
                 chunk = resp.read1(65536)
                 if not chunk:
                     break
                 buf.extend(chunk)
+            if deadline.expired:  # an EOF caused by the watchdog is not the end of the answer
+                raise TimeoutError
             data = bytes(buf)
-    except TimeoutError:
-        raise
-    except urllib.error.HTTPError as e:
-        raise UpstreamError(f"upstream returned HTTP {e.code}") from None
-    except (urllib.error.URLError, OSError) as e:
-        raise UpstreamError(f"upstream unreachable: {type(e).__name__}") from None
+    except Exception as e:
+        failure = _upstream_failure(e, deadline)
+        if failure is e:
+            raise
+        raise failure from None
+    finally:
+        deadline.cancel()
     if len(data) > max_bytes:
         raise UpstreamError("upstream response too large")
     try:
         return json.loads(data)
-    except ValueError:
+    except (ValueError, RecursionError):  # RecursionError: nesting deeper than the parser goes
         raise UpstreamError("upstream response is not JSON") from None
 
 
@@ -172,28 +307,23 @@ def http_stream_transport(
     upstream: Upstream, body: bytes, timeout: float, max_bytes: int
 ) -> Generator[dict[str, Any], None, None]:
     """Yield the upstream's SSE ``data:`` events as JSON. The same deadline and size cap."""
-    headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
-    key = upstream.api_key()
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    req = urllib.request.Request(  # noqa: S310 - URL is from config and checked as http(s)
-        upstream.url + "/chat/completions", data=body, headers=headers, method="POST"
-    )
-    deadline = time.monotonic() + timeout
+    req = _upstream_request(upstream, body, "text/event-stream")
+    deadline = _Deadline(timeout)
     try:
         # Closing this generator (client gone) closes the connection: the upstream stops.
-        with _OPENER.open(req, timeout=timeout) as resp:
+        with _open(req, timeout, deadline) as resp:
             if resp.status != 200:
                 raise UpstreamError(f"upstream returned HTTP {resp.status}")
             total, buf, data = 0, b"", []
             while True:
-                if time.monotonic() > deadline:
-                    raise TimeoutError
+                deadline.check()
                 chunk = resp.read1(65536)
                 total += len(chunk)
                 if total > max_bytes:
                     raise UpstreamError("upstream response too large")
                 if not chunk:
+                    if deadline.expired:  # the watchdog's EOF, not the upstream's
+                        raise TimeoutError
                     if not buf.endswith(b"\r"):
                         # A cut connection must not pass for a finished answer.
                         raise UpstreamError("upstream stream ended without [DONE]")
@@ -215,17 +345,17 @@ def http_stream_transport(
                     if event.strip() == b"[DONE]":
                         return
                     try:
-                        yield json.loads(event)
-                    except ValueError:
+                        parsed = json.loads(event)
+                    except (ValueError, RecursionError):
                         raise UpstreamError("upstream stream event is not JSON") from None
-    except urllib.error.HTTPError as e:
-        raise UpstreamError(f"upstream returned HTTP {e.code}") from None
-    except urllib.error.URLError as e:
-        raise UpstreamError(f"upstream unreachable: {type(e).__name__}") from None
-    except TimeoutError:
-        raise
-    except OSError as e:
-        raise UpstreamError(f"upstream unreachable: {type(e).__name__}") from None
+                    yield parsed
+    except Exception as e:
+        failure = _upstream_failure(e, deadline)
+        if failure is e:
+            raise
+        raise failure from None
+    finally:
+        deadline.cancel()
 
 
 class _Limiter:
@@ -1080,6 +1210,11 @@ class Gateway:
             for event in upstream_events:
                 if not isinstance(event, dict):
                     raise UpstreamError("upstream stream event is not an object")
+                if event.get("error") is not None:
+                    # Servers report a failure mid-stream as an error event, often followed by
+                    # [DONE]: the text so far is a cut-off answer, not a finished one. The
+                    # event's message is upstream text and is not kept.
+                    raise UpstreamError("upstream stream reported an error")
                 if isinstance(event.get("usage"), dict):
                     usage = event["usage"]
                 choices = event.get("choices")
@@ -1104,14 +1239,36 @@ class Gateway:
                     )
                     first = False
         except UpstreamError as e:
-            log.log("gateway_upstream_error", upstream=upstream.name, error=str(e))
+            self._audit_cut_stream(held, mw, log, enforce)
+            log.log(
+                "gateway_upstream_error",
+                upstream=upstream.name,
+                error=str(e),
+                released_chars=len(held.released),
+            )
             raise HttpError(502, "upstream error", "upstream_error", audited=True) from None
         except TimeoutError:
-            log.log("gateway_upstream_error", upstream=upstream.name, error="timeout")
+            self._audit_cut_stream(held, mw, log, enforce)
+            log.log(
+                "gateway_upstream_error",
+                upstream=upstream.name,
+                error="timeout",
+                released_chars=len(held.released),
+            )
             raise HttpError(504, "upstream timeout", "upstream_timeout", audited=True) from None
         except GeneratorExit:
+            self._audit_cut_stream(held, mw, log, enforce)
             log.log("gateway_client_disconnected", released_chars=len(held.released))
             raise
+        except HttpError:
+            raise
+        except Exception as e:
+            # Any other failure mid-stream still gets a record of what was already delivered;
+            # once the stream has started the client only sees an error event.
+            _LOG.error("holdback stream %s failed", request_id, exc_info=e)
+            self._audit_cut_stream(held, mw, log, enforce)
+            log.log("gateway_error", error=type(e).__name__, released_chars=len(held.released))
+            raise HttpError(500, "internal error", "internal_error", audited=True) from None
         finally:
             upstream_events.close()  # client gone or upstream failed: stop the upstream too
 
@@ -1161,6 +1318,33 @@ class Gateway:
             buffered=held.buffering,
         )
 
+    @staticmethod
+    def _audit_cut_stream(
+        held: Holdback, mw: AgentMiddleware, log: AuditLogger, enforce: bool
+    ) -> None:
+        """Record what a holdback stream delivered before it was cut short.
+
+        The final check of a finished answer never runs on a cut stream, so the text the
+        client already has would otherwise be in no record, and a violation in it (a secret
+        longer than the window, say) would go unnoticed. Recorded like a finished answer: the
+        ``model_output`` record holds the checked text, never what a validator removed.
+        """
+        sent = held.released
+        if not sent:
+            return
+        try:
+            checked = mw.screen_output(sent)
+            if not checked.allowed or checked.text != sent:
+                log.log(
+                    "gateway_output_violation_after_delivery",
+                    severity="high",
+                    released_chars=len(sent),
+                    enforced=enforce,
+                    interrupted=True,
+                )
+        except Exception:  # noqa: BLE001 - the stream's own failure is what gets reported
+            _LOG.warning("could not audit a cut-off stream", exc_info=True)
+
     async def _stream_events(
         self, send: Send, events: Generator[dict[str, Any], None, None], request_id: str
     ) -> None:
@@ -1207,7 +1391,12 @@ class Gateway:
                 raise
             # The client went away mid-stream: no second response; finally stops the upstream.
         finally:
-            events.close()  # also audits the disconnect when the stream was cut short
+            try:
+                events.close()  # also audits the disconnect when the stream was cut short
+            except ValueError:
+                # "generator already executing": this task was cancelled while a worker ran a
+                # step. That step ends by the upstream deadline; do not mask the cancellation.
+                _LOG.warning("holdback stream %s cancelled mid-step", request_id)
 
     def _parse(self, body: bytes, gp: GroupPolicy) -> dict[str, Any]:
         try:
@@ -1380,6 +1569,8 @@ class Gateway:
         gp: GroupPolicy,
     ) -> dict[str, Any]:
         choices = raw.get("choices") if isinstance(raw, dict) else None
+        if not isinstance(choices, list):
+            choices = None  # a dict or string here is a malformed answer (502), not a crash
         message = choices[0].get("message") if choices and isinstance(choices[0], dict) else None
         if not isinstance(message, dict):
             log.log("gateway_upstream_error", error="response has no message")

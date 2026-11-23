@@ -10,10 +10,13 @@ import socket
 import unicodedata
 from collections.abc import Callable, Sequence
 from pathlib import PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from agentsec.sandbox.policy import ArgRule, dns_check_enabled
+
+if TYPE_CHECKING:
+    from agentsec.sandbox.blocklist import Blocklist
 
 Resolver = Callable[[str], list[str]]
 
@@ -145,8 +148,17 @@ def _parse_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Addres
     return None
 
 
-def check_url(value: str, rule: ArgRule, resolver: Resolver | None = None) -> list[str]:
+def check_url(
+    value: str,
+    rule: ArgRule,
+    resolver: Resolver | None = None,
+    *,
+    blocklist: Blocklist | None = None,
+    hits: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Violations for a URL argument. Blocklist matches are also appended to ``hits``."""
     errors: list[str] = []
+    addrs: list[str] | None = None  # set once the host was resolved, shared with the blocklist
     try:
         parts = urlsplit(value)
         host = parts.hostname
@@ -176,17 +188,65 @@ def check_url(value: str, rule: ArgRule, resolver: Resolver | None = None) -> li
             # loopback even when resolve_dns is off.
             errors.append(f"host {host!r} is a loopback name")
         elif dns_check_enabled(rule):
-            try:
-                addrs = (resolver or _default_resolver)(ascii_host)
-            except (OSError, UnicodeError):  # a label over 63 chars raises UnicodeError
-                errors.append(f"host {host!r} did not resolve")
-                addrs = []
-            for addr in addrs:
+            addrs = _resolve(ascii_host, host, resolver, errors)
+            for addr in addrs or ():
                 ip = _parse_ip_literal(addr)
                 if ip is not None and _is_nonpublic(ip):
                     errors.append(f"host {host!r} resolves to non-public address {addr}")
                     break
+    if blocklist is not None:
+        errors.extend(
+            _check_blocklist(
+                ascii_host, host, literal, rule, resolver, blocklist, addrs, errors, hits
+            )
+        )
     return errors
+
+
+def _resolve(
+    ascii_host: str, host: str, resolver: Resolver | None, errors: list[str]
+) -> list[str] | None:
+    """Resolve once; on failure record the error and return None."""
+    try:
+        return (resolver or _default_resolver)(ascii_host)
+    except (OSError, UnicodeError):  # a label over 63 chars raises UnicodeError
+        errors.append(f"host {host!r} did not resolve")
+        return None
+
+
+def _check_blocklist(
+    ascii_host: str,
+    host: str,
+    literal: ipaddress.IPv4Address | ipaddress.IPv6Address | None,
+    rule: ArgRule,
+    resolver: Resolver | None,
+    blocklist: Blocklist,
+    addrs: list[str] | None,
+    errors: list[str],
+    hits: list[dict[str, Any]] | None,
+) -> list[str]:
+    from agentsec.sandbox.blocklist import reason
+
+    out = blocklist.stale_errors()
+    if blocklist.excepted(ascii_host):
+        return out
+    found = blocklist.match_domain(ascii_host)
+    if literal is not None:
+        found += blocklist.match_ip(literal)
+    elif not found and blocklist.needs_dns and not rule.hosts and not errors:
+        # An IP list cannot match a name without its addresses. A host allowlist is already the
+        # stronger control, and a URL denied for another reason needs no lookup.
+        if addrs is None:
+            addrs = _resolve(ascii_host, host, resolver, out)
+        for addr in addrs or ():
+            ip = _parse_ip_literal(addr)
+            if ip is not None and (found := blocklist.match_ip(ip)):
+                break  # any listed address denies: the attacker picks which one the client uses
+    for hit in found:
+        out.append(reason(hit, host))
+        if hits is not None:
+            hits.append(blocklist.record(hit, ascii_host, addrs))
+    return out
 
 
 # --------------------------------------------------------------------------- args
@@ -211,7 +271,14 @@ def _same_value(a: Any, b: Any) -> bool:
         return False
 
 
-def check_arg(value: Any, rule: ArgRule, *, resolver: Resolver | None = None) -> list[str]:
+def check_arg(
+    value: Any,
+    rule: ArgRule,
+    *,
+    resolver: Resolver | None = None,
+    blocklist: Blocklist | None = None,
+    hits: list[dict[str, Any]] | None = None,
+) -> list[str]:
     """Return a list of human-readable violations (empty means the value is acceptable)."""
     errors: list[str] = []
     t = rule.type
@@ -257,5 +324,5 @@ def check_arg(value: Any, rule: ArgRule, *, resolver: Resolver | None = None) ->
                     if re.search(pat, normalized, flags):
                         errors.append(f"resolved path matches denied pattern {pat!r}")
         elif t == "url":
-            errors.extend(check_url(value, rule, resolver))
+            errors.extend(check_url(value, rule, resolver, blocklist=blocklist, hits=hits))
     return errors

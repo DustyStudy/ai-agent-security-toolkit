@@ -6,11 +6,12 @@ that markdown rendering opens up for LLM01/LLM02.)
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import math
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
@@ -332,6 +333,57 @@ class ExfilLinkValidator:
             for u in sorted(set(links), key=len, reverse=True):
                 text = text.replace(u, "[removed-external-url]")
         return text
+
+
+class BlocklistLinkValidator(ExfilLinkValidator):
+    """Redacts links and images whose host is on an egress blocklist (docs/design/EGRESS_BLOCKLIST.md).
+
+    Reuses ExfilLinkValidator's browser-accurate host parsing, so both agree on the host. Hosts
+    are matched against domain lists and IP literals only, never resolved: resolving every link
+    in an answer would let a model make the gateway send DNS queries to a domain it chose.
+    ``on_hit`` gets audit fields once per host.
+    """
+
+    name = "egress_blocklist"
+
+    def __init__(
+        self, blocklist: Any, on_hit: Callable[[dict[str, Any]], object] | None = None
+    ) -> None:
+        super().__init__(action=Action.REDACT)
+        self.blocklist = blocklist
+        self._on_hit = on_hit
+        self._reported: set[str] = set()  # holdback rescans the same text; audit each host once
+
+    def _hits(self, url: str) -> list[Any]:
+        from agentsec.sandbox.validators import _ascii_host, _parse_ip_literal
+
+        is_http, raw = self._fetch_host(url)
+        host = _ascii_host(raw) if is_http and raw else None
+        if host is None or self.blocklist.excepted(host):
+            return []  # unreadable hosts are ExfilLinkValidator's to refuse
+        hits = self.blocklist.match_domain(host)
+        literal = _parse_ip_literal(host)
+        if not hits and literal is not None:
+            hits = self.blocklist.match_ip(literal)
+        for hit in hits:
+            if host not in self._reported and self._on_hit is not None:
+                self._reported.add(host)
+                digest = hashlib.sha256(url.encode("utf-8", "surrogatepass")).hexdigest()
+                self._on_hit(
+                    {"source": "model_text", "tool": None, "argument": None,
+                     "url_sha256": digest, **self.blocklist.record(hit, host, None)}
+                )  # fmt: skip
+        return hits
+
+    def _is_external(self, url: str) -> bool:
+        return bool(self._hits(url))
+
+    def check(self, text: str) -> list[Violation]:
+        images, links = self._external_urls(text)
+        return [
+            Violation(self.name, f"blocklisted URL ({self._fetch_host(u)[1]})", self.action)
+            for u in images + links
+        ]
 
 
 def _scheme(word: str) -> re.Pattern[str]:

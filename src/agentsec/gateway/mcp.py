@@ -33,6 +33,7 @@ from agentsec.integrations.mcp import GuardedMCPClient, ToolPins, _strings
 from agentsec.middleware.audit import AuditLogger
 from agentsec.middleware.injection import InjectionScanner, spotlight
 from agentsec.middleware.validators import Action, OutputGuard, Violation
+from agentsec.sandbox.blocklist import Blocklist
 from agentsec.sandbox.guard import Session, ToolDenied, ToolGuard
 
 _LOG = logging.getLogger("agentsec.gateway.mcp")
@@ -223,6 +224,7 @@ class McpGateway:
         *,
         connector: Connector = connect_upstream,
         clock: Callable[[], float] = time.monotonic,
+        blocklist: Callable[[], Blocklist | None] = lambda: None,
     ) -> None:
         require_sdk()
         from mcp import types
@@ -235,6 +237,7 @@ class McpGateway:
         self._scanner = scanner
         self._connector = connector
         self._clock = clock
+        self._blocklist = blocklist  # the gateway's current feeds, read on every call
         self._states: dict[str, _State] = {}
         self._first_seen: dict[str, ToolPins] = {}  # per upstream without reviewed pins
         # MCP session id -> (the user who opened it, last seen). Kept until the SDK would have
@@ -380,9 +383,13 @@ class McpGateway:
             first_seen = self._first_seen.setdefault(name, ToolPins())
             client = GuardedMCPClient(
                 _Namespaced(raw, name),
+                # this request's rules only
                 ToolGuard(
-                    caller.gp.policy, audit=state.audit, dlp=caller.gp.dlp
-                ),  # this request's rules only
+                    caller.gp.policy,
+                    audit=state.audit,
+                    blocklist=self._blocklist(),
+                    dlp=caller.gp.dlp,
+                ),
                 state.session,  # one session across upstreams: what one returns taints the rest
                 pins=first_seen if pins is None else ToolPins(pins),
                 pin_new=pins is None,  # with pins, an unpinned tool is a finding, never trusted
@@ -426,6 +433,7 @@ class McpGateway:
             return self._error(f"unknown tool {name!r}")
         try:
             client = await self._client(caller, state, rev, upstream)
+            client.guard.blocklist = self._blocklist()  # cached clients see refreshed feeds
             result = await asyncio.wait_for(
                 client.call_tool(name, dict(params.arguments or {})),
                 self._config.upstream_timeout_s,

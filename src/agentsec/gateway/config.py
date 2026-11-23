@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from agentsec.gateway.feeds import EgressSettings, FeedConfig
 from agentsec.gateway.oidc import SUPPORTED_ALGORITHMS, OidcSettings
 from agentsec.gateway.policyset import ANY_GROUP, PolicySet, group_policy, stream_settings
 from agentsec.gateway.tokens import TokenSettings
@@ -96,6 +97,7 @@ class GatewayConfig:
     mcp_session_idle_s: float = 3600.0
     mcp_require_pins: bool = False  # set: every mcp_upstream needs reviewed pins, or no start
     tokens: TokenSettings | None = None  # set: users may mint access tokens (POST /tokens)
+    egress: EgressSettings | None = None  # set: URL arguments are checked against signed feeds
 
 
 def resolve_secret(ref: str) -> str:
@@ -126,6 +128,7 @@ _TOP = {
     "tokens",
     "audit",
     "dlp",
+    "egress",
 }
 _SECTIONS: dict[str, set[str]] = {
     "listen": {
@@ -185,6 +188,16 @@ _SECTIONS: dict[str, set[str]] = {
         "offboarding_deadline_s",
     },
     "bundle": {"dir", "public_key_file", "min_revision", "reload_interval_s", "state_file"},
+    "egress": {
+        "blocklists",
+        "except_hosts",
+        "on_stale",
+        "public_key_file",
+        "check_model_links",
+        "state_file",
+        "reload_interval_s",
+    },
+    "blocklist": {"name", "kind", "file", "max_age_h"},
 }
 
 
@@ -401,6 +414,54 @@ def _single_policy(
         revision="sha256:" + hashlib.sha256(raw_policy).hexdigest()[:32],
         groups=(entry,),
         mcp_pins=mcp_pins or {},
+    )
+
+
+def _egress(data: dict[str, Any], base: Path) -> EgressSettings | None:
+    from agentsec.gateway.bundle import BundleError, load_public_key
+
+    if "egress" not in data:
+        return None
+    section = _section(data, "egress")
+    raw = section.get("blocklists")
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError("egress.blocklists must be a non-empty list")
+    feeds: list[FeedConfig] = []
+    for i, entry in enumerate(raw):
+        where = f"egress.blocklists[{i}]"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where} must be a mapping")
+        unknown = set(entry) - _SECTIONS["blocklist"]
+        if unknown:
+            raise ConfigError(f"unknown keys in {where}: {sorted(unknown)}")
+        name = _typed(entry.get("name"), str, f"{where}.name")
+        if not MCP_NAME.fullmatch(name) or name in {f.name for f in feeds}:
+            raise ConfigError(f"{where}.name must be unique, lowercase letters, digits and '-'")
+        kind = _typed(entry.get("kind"), str, f"{where}.kind")
+        if kind not in ("ip", "domain"):
+            raise ConfigError(f"{where}.kind must be 'ip' or 'domain'")
+        file = _typed(entry.get("file"), str, f"{where}.file")
+        max_age_h = _positive(entry, "max_age_h", 48.0, float)
+        feeds.append(FeedConfig(name, kind, str(base / file), float(max_age_h) * 3600))
+    on_stale = section.get("on_stale", "warn")
+    if on_stale not in ("warn", "deny"):
+        raise ConfigError("egress.on_stale must be 'warn' or 'deny'")
+    key_file = _typed(section.get("public_key_file"), str, "egress.public_key_file")
+    try:
+        key = load_public_key((base / key_file).read_bytes())
+    except (BundleError, OSError, ValueError) as e:
+        raise ConfigError(f"egress.public_key_file: {e}") from e
+    state = section.get("state_file")
+    return EgressSettings(
+        feeds=tuple(feeds),
+        public_key=key,
+        except_hosts=_strs(section.get("except_hosts", []), "egress.except_hosts"),
+        on_stale=on_stale,
+        check_model_links=_typed(
+            section.get("check_model_links", True), bool, "egress.check_model_links"
+        ),
+        state_file=None if state is None else str(base / _typed(state, str, "egress.state_file")),
+        reload_interval_s=float(_positive(section, "reload_interval_s", 10.0, float)),
     )
 
 
@@ -625,4 +686,5 @@ def load_config(path: str | Path) -> GatewayConfig:
         mcp_session_idle_s=_positive(limits, "mcp_session_idle_s", 3600.0, float),
         mcp_require_pins=require_pins,
         tokens=_tokens(data, base),
+        egress=_egress(data, base),
     )

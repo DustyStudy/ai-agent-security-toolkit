@@ -183,7 +183,7 @@ def handle(
         guard = ToolGuard(policy, audit=logger, resolver=resolver)
         session = load_session(path, session_id)
         call = ToolCall(name, event.get("tool_input", {}), id=str(event.get("tool_use_id", "")))
-        guard._audit("tool_request", session, tool=name, arguments=call.arguments)
+        guard._audit("tool_request", session, tool=name, arguments=guard.logged_arguments(call))
         if event_name == "PreToolUse":
             decision = guard.evaluate(call, session)
         else:

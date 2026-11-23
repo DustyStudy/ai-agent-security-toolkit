@@ -1,7 +1,7 @@
 """A read-only HTML status page for the admin listener (``GET /dashboard``).
 
-It shows what /readyz and /metrics already expose, plus the summary of one fuzz report, so it
-cannot show anything those do not. Rendered on the server with no JavaScript: the page reloads
+It shows what /readyz and /metrics already expose, the policy group names and modes, and the
+summary of one fuzz report. Rendered on the server with no JavaScript: the page reloads
 itself every few seconds, and a strict CSP forbids scripts, frames, forms and every fetch.
 
 The fuzz report is read through an allowlist of summary fields. Its per-case ``results`` (the

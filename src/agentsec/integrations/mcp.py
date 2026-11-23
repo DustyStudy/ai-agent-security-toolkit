@@ -290,6 +290,10 @@ class GuardedMCPClient:
         self.findings: list[ToolFinding] = []
 
     # ------------------------------------------------------------------- listing
+    @property
+    def guard(self) -> ToolGuard:
+        return self._guard
+
     async def list_tools(self, **kwargs: Any) -> Any:
         """List the server's tools, minus disallowed, changed and suspicious ones."""
         listing = await self._client.list_tools(**kwargs)

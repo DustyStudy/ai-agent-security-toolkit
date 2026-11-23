@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from collections import Counter
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -436,6 +437,18 @@ def cmd_serve(args: argparse.Namespace) -> int:
     except (ConfigError, PolicyError, OSError) as e:
         print(f"invalid gateway config: {e}", file=sys.stderr)
         return 2
+    if config.egress is not None:
+        from agentsec.gateway.feeds import FeedError, verify_feed
+        from agentsec.sandbox.blocklist import parse_feed
+
+        try:
+            # Read-only here; the gateway also refuses to start on a bad feed.
+            for fc in config.egress.feeds:
+                data, _ = verify_feed(fc.file, fc.name, config.egress.public_key, time.time())
+                parse_feed(data, fc.kind, fc.name)
+        except (FeedError, ValueError) as e:
+            print(f"invalid gateway config: egress: {e}", file=sys.stderr)
+            return 2
     if args.check:
         print(f"config ok: {len(config.upstreams)} upstream(s), policy {config.policies.revision}")
         return 0
@@ -490,6 +503,36 @@ def cmd_bundle(args: argparse.Namespace) -> int:
             print(f"bundle ok: {policies.revision}, expires {policies.expires}, groups {groups}")
     except (BundleError, ConfigError, OSError, ValueError) as e:
         print(f"bundle {args.action} failed: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_egress(args: argparse.Namespace) -> int:
+    from agentsec.gateway.bundle import BundleError, load_public_key
+    from agentsec.gateway.config import ConfigError, resolve_secret
+    from agentsec.gateway.feeds import FeedError, sign_feed, verify_feed
+    from agentsec.sandbox.blocklist import parse_feed
+
+    try:
+        if args.action == "sign-feed":
+            with open(args.file, "rb") as fh:
+                parse_feed(
+                    fh.read(), args.kind, args.name
+                )  # never sign a file the gateway would refuse
+            out = sign_feed(args.file, resolve_secret(args.key).encode(), args.name)
+            print(f"signed: {out}")
+        else:
+            if args.public_key:
+                with open(args.public_key, "rb") as fh:
+                    key = load_public_key(fh.read())
+                data, _ = verify_feed(args.file, args.name, key, time.time())
+            else:
+                with open(args.file, "rb") as fh:
+                    data = fh.read()
+            feed = parse_feed(data, args.kind, args.name)
+            print(f"feed ok: {feed.entries} entries, sha256 {feed.sha256}")
+    except (FeedError, BundleError, ConfigError, OSError, ValueError) as e:
+        print(f"egress {args.action} failed: {e}", file=sys.stderr)
         return 1
     return 0
 
@@ -773,6 +816,24 @@ def build_parser() -> argparse.ArgumentParser:
     bv.add_argument("dir")
     bv.add_argument("--public-key", required=True, help="Ed25519 public key PEM file")
     b.set_defaults(func=cmd_bundle)
+
+    eg = sub.add_parser("egress", help="Sign or check a gateway egress blocklist feed.")
+    eg_sub = eg.add_subparsers(dest="action", required=True)
+    for action, help_text in (
+        ("sign-feed", "Validate a feed file and write FILE.sig (run where the feed key lives)."),
+        ("check-feed", "Parse a feed file, and verify FILE.sig when --public-key is given."),
+    ):
+        ep = eg_sub.add_parser(action, help=help_text)
+        ep.add_argument("file")
+        ep.add_argument("--kind", required=True, choices=["ip", "domain"])
+        ep.add_argument("--name", required=True, help="the list name in egress.blocklists")
+        if action == "sign-feed":
+            ep.add_argument(
+                "--key", required=True, help="Ed25519 private key PEM as env:NAME or file:/path"
+            )
+        else:
+            ep.add_argument("--public-key", help="Ed25519 public key PEM file of the feed key")
+    eg.set_defaults(func=cmd_egress)
 
     t = sub.add_parser("token", help="List or revoke gateway access tokens (admin).")
     t_sub = t.add_subparsers(dest="action", required=True)

@@ -33,6 +33,7 @@ from agentsec.middleware import (
     verify_records,
 )
 from agentsec.sandbox import ArgRule, Policy, PolicyError, Session, ToolGuard, Verdict
+from agentsec.sandbox.blocklist import Blocklist
 from agentsec.sandbox.subprocess_runner import CommandDenied, ExecRule, check_options
 from agentsec.sandbox.validators import check_url, path_within_roots
 from agentsec.types import ToolCall
@@ -158,6 +159,8 @@ _URL_RULE = ArgRule(
 )
 _ALLOWED_HOST = "api.example.com"
 _ALLOWED_SUFFIX = ".internal.example.com"
+_BLOCKED = "blocked" + _ALLOWED_SUFFIX  # an allowed host that an egress feed lists
+_BLOCKLIST = Blocklist.from_entries(domains=[_BLOCKED])
 
 
 def _host_for_policy(host: str) -> str | None:
@@ -176,6 +179,9 @@ def url(data: bytes) -> None:
         [
             _ALLOWED_HOST,
             "sub" + _ALLOWED_SUFFIX,
+            r.choice(["", "x.", "X.", r.text(4) + "."])
+            + r.choice([_BLOCKED, _BLOCKED.upper()])
+            + r.choice(["", "."]),
             "evil.com",
             _ALLOWED_HOST + "." + r.text(6),
             r.text(30),
@@ -185,7 +191,7 @@ def url(data: bytes) -> None:
     )
     port = r.choice(["", ":443", ":80", ":" + r.text(4)])
     value = f"{scheme}://{userinfo}{host}{port}/{r.text(20)}"
-    errors = check_url(value, _URL_RULE, resolver=lambda h: ["93.184.216.34"])
+    errors = check_url(value, _URL_RULE, resolver=lambda h: ["93.184.216.34"], blocklist=_BLOCKLIST)
     if errors:
         return
     parts = urlsplit(value)
@@ -196,6 +202,9 @@ def url(data: bytes) -> None:
     assert hostname == _ALLOWED_HOST or (
         hostname.endswith(_ALLOWED_SUFFIX) and hostname != _ALLOWED_SUFFIX[1:]
     ), f"accepted a host outside the allowlist: {value!r} -> {hostname!r}"
+    assert hostname != _BLOCKED and not hostname.endswith("." + _BLOCKED), (
+        f"accepted a blocklisted host: {value!r} -> {hostname!r}"
+    )
 
 
 _PRIVATE_NETWORKS = [

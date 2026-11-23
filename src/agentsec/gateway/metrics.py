@@ -59,7 +59,7 @@ class Metrics:
             "siem_age": age,
         }
 
-    def render(self, policies: PolicySet) -> str:
+    def render(self, policies: PolicySet, blocklist_ages: dict[str, float] | None = None) -> str:
         snap = self.snapshot()
         events, responses = snap["events"], snap["responses"]
         failures, backlog, age = snap["write_failures"], snap["siem_backlog"], snap["siem_age"]
@@ -97,6 +97,15 @@ class Metrics:
                 "# HELP agentsec_gateway_policy_expiry_timestamp_seconds When the policy expires.",
                 "# TYPE agentsec_gateway_policy_expiry_timestamp_seconds gauge",
                 f"agentsec_gateway_policy_expiry_timestamp_seconds {policies.expires.timestamp()}",
+            ]
+        if blocklist_ages:
+            lines += [
+                "# HELP agentsec_gateway_blocklist_age_seconds Age of each egress feed, from its signed issued_at.",
+                "# TYPE agentsec_gateway_blocklist_age_seconds gauge",
+                *(
+                    f'agentsec_gateway_blocklist_age_seconds{{list="{_label(k)}"}} {v:.0f}'
+                    for k, v in sorted(blocklist_ages.items())
+                ),
             ]
         return "\n".join(lines) + "\n"
 

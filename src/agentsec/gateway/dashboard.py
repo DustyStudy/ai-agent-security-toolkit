@@ -134,6 +134,7 @@ def render_dashboard(
     snap: dict[str, Any],
     report: dict[str, Any] | None,
     evidence: list[tuple[str, list[str]]] | None = None,
+    feeds: list[dict[str, Any]] | None = None,
 ) -> str:
     status = str(ready["status"])
     events: dict[str, int] = snap["events"]
@@ -167,6 +168,7 @@ expires {_e(expires)}.</p>
 <table><tr><th>Group</th><th>Mode</th></tr>{groups}</table></section>
 <section><h2>Audit events</h2>{_table(("Event", "Count"), sorted(events.items()))}</section>
 <section><h2>Responses</h2>{_table(("Status", "Count"), sorted(responses.items()))}</section>
+<section><h2>Egress feeds</h2>{_feeds(feeds)}</section>
 <section><h2>Containment (fuzz report)</h2>{_report(report)}</section>
 <section><h2>Evidence reports</h2>{_evidence(evidence)}</section>
 </main></body></html>
@@ -196,6 +198,24 @@ def _report(report: dict[str, Any] | None) -> str:
         (n, r["cases"], r["successes"], _pct(r["asr"])) for n, r in report["by_category"].items()
     ]
     return head + _table(("Category", "Cases", "Bypasses", "Attack success rate"), rows)
+
+
+def _feeds(feeds: list[dict[str, Any]] | None) -> str:
+    if feeds is None:
+        return '<p class="muted">None configured. See <code>egress</code> in docs/GATEWAY.md.</p>'
+    rows = "".join(
+        f"<tr><td>{_e(f['list'])}</td><td>{_e(f['kind'])}</td><td>{_e(f['entries'])}</td>"
+        f"<td>{_e(round(f['age_s'] / 3600, 1))} h</td><td>"
+        + (
+            f'<span class="pill bad">stale ({_e(f["on_stale"])})</span>'
+            if f["stale"]
+            else '<span class="pill ok">fresh</span>'
+        )
+        + "</td></tr>"
+        for f in feeds
+    )
+    head = "<tr><th>List</th><th>Kind</th><th>Entries</th><th>Age</th><th>Status</th></tr>"
+    return f"<table>{head}{rows}</table>"
 
 
 def _evidence(evidence: list[tuple[str, list[str]]] | None) -> str:

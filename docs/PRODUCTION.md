@@ -78,6 +78,14 @@ Scanning and output validation scale with text length; the tool guard does not. 
 - CI runs CodeQL, dependency review (high-severity and GPL/AGPL licence gates) and an OpenSSF Scorecard workflow, Dependabot keeps dependencies current, and tests run on Linux, Windows and macOS.
 - The version is below 1.0, so minor releases may change public APIs. Pin a version and read the [changelog](../CHANGELOG.md) before upgrading.
 
+## Network egress and DNS filtering
+
+The gateway's [egress blocklist](GATEWAY.md#egress-blocklist) catches tool calls to listed hosts early and records who asked. It does not control connections. For that, at the network layer:
+
+- **Filtering resolver.** Point agent hosts, MCP servers and the gateway at a resolver that refuses known-malicious names: a public filtering resolver such as Quad9, or Response Policy Zones (RPZ) on your own resolver. This covers every process on the host, not only tool calls, and needs no toolkit code.
+- **Egress firewall.** Apply the same IP feeds (Spamhaus DROP) at the egress firewall or proxy, so a name that resolved to a clean address at the gateway but a listed one later is still refused.
+- **Default-deny egress for tool runners.** Where possible, let tool processes reach only an allowlisted proxy.
+
 ## Operating checklist
 
 - [ ] Threat model reviewed, with an owner for each open threat

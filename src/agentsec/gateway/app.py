@@ -41,6 +41,13 @@ from agentsec.gateway.bundle import (
     write_state,
 )
 from agentsec.gateway.config import GatewayConfig, Upstream, loopback_hosts, unpinned
+from agentsec.gateway.dashboard import (
+    DASHBOARD_HEADERS,
+    list_evidence,
+    load_fuzz_summary,
+    read_evidence,
+    render_dashboard,
+)
 from agentsec.gateway.holdback import Holdback
 from agentsec.gateway.metrics import CountingSink, Metrics
 from agentsec.gateway.oidc import OidcVerifier, TokenRejected, fetch_jwks
@@ -803,7 +810,10 @@ class Gateway:
 
     # ------------------------------------------------------------------ admin
     async def admin(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """The admin listener: /healthz, /readyz, /metrics. No auth, so loopback only."""
+        """The admin listener: /healthz, /readyz, /metrics, /dashboard, /evidence/. Loopback only.
+
+        Every route is a GET that changes nothing: there is no write endpoint here by design.
+        """
         if scope["type"] != "http":
             return
         request_id = uuid.uuid4().hex
@@ -814,8 +824,23 @@ class Gateway:
             await self._error(send, e, request_id)
             return
         path, method = scope["path"], scope["method"]
-        if method != "GET" or path not in {"/healthz", "/readyz", "/metrics"}:
+        evidence = path.startswith("/evidence/")
+        if method != "GET" or not (
+            evidence or path in {"/healthz", "/readyz", "/metrics", "/dashboard"}
+        ):
             await self._error(send, HttpError(404, "not found", "not_found"), request_id)
+            return
+        if evidence:
+            found = await self._off_loop(
+                self._control_pool, read_evidence, self.config.admin_evidence_dir, path
+            )
+            if found is None:
+                await self._error(send, HttpError(404, "not found", "not_found"), request_id)
+                return
+            ctype, data = found
+            headers = [(b"content-type", ctype), *DASHBOARD_HEADERS]
+            await send({"type": "http.response.start", "status": 200, "headers": headers})
+            await send({"type": "http.response.body", "body": data})
             return
         if path == "/healthz":
             await self._json(send, 200, {"status": "ok"}, request_id)
@@ -859,6 +884,24 @@ class Gateway:
             # Shown so a group left in monitor mode is not forgotten.
             "monitor_groups": [g.group for g in policies.groups if g.mode == "monitor"],
         }
+        if path == "/dashboard":
+            report = await self._off_loop(
+                self._control_pool, load_fuzz_summary, self.config.admin_fuzz_report
+            )
+            listing = await self._off_loop(
+                self._control_pool, list_evidence, self.config.admin_evidence_dir
+            )
+            snap = self.metrics.snapshot()
+            body = render_dashboard(payload, policies, snap, report, listing).encode()
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"text/html; charset=utf-8"), *DASHBOARD_HEADERS],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
         await self._json(send, 503 if expired or not audit_ok else 200, payload, request_id)
 
     # ------------------------------------------------------------ policy

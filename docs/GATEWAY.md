@@ -12,6 +12,12 @@ export AGENTSEC_DLP_FINGERPRINT_KEY="$(openssl rand -hex 32)"   # the example's 
 agentsec serve --config examples/gateway.yaml --check   # validate, then drop --check to run
 ```
 
+On Windows PowerShell, which has no `openssl`, set the key with:
+
+```powershell
+$bytes = New-Object byte[] 32; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes); $env:AGENTSEC_DLP_FINGERPRINT_KEY = -join ($bytes | ForEach-Object { $_.ToString("x2") })
+```
+
 Put an SSO proxy (for example oauth2-proxy) in front of it that sets `X-Auth-Request-User` and `X-Auth-Request-Groups`, and point clients at it:
 
 ```python

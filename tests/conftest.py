@@ -9,7 +9,8 @@ from agentsec.sandbox import Policy
 
 
 def fake_aws_key() -> str:
-    return "AK" + "IA" + "IOSFODNN7EXAMPLE"
+    # Not AWS's documentation example key: DLP allows that one as a published example.
+    return "AK" + "IA" + "J7Q2X5WZ3HB8LN4K"
 
 
 def fake_github_token() -> str:

@@ -32,6 +32,9 @@ class Upstream:
     model: str  # the model name the upstream expects
     api_key_ref: str | None = None  # "env:NAME" or "file:/path"; never a literal
     outbound_on_secret: str = "off"  # noqa: S105  # off | block | redact: secrets in the request sent here
+    outbound_on_pii: str = (
+        "off"  # off | block | redact: PII in the request sent here; off: group dlp
+    )
 
     def api_key(self) -> str | None:
         """Resolved on every call, so a rotated secret file is picked up without a restart."""
@@ -177,7 +180,7 @@ _SECTIONS: dict[str, set[str]] = {
     },
     "audit": {"file", "log_content", "cef_file"},
     "upstream": {"url", "model", "api_key", "outbound"},
-    "outbound": {"on_secret"},
+    "outbound": {"on_secret", "on_pii"},
     "mcp_upstream": {"url", "auth", "pins"},
     "mcp": {"require_pins"},
     "tokens": {
@@ -608,11 +611,14 @@ def load_config(path: str | Path) -> GatewayConfig:
         ):
             raise ConfigError(f"upstreams.{name}.api_key must be 'env:NAME' or 'file:/path'")
         _require_secure_upstream(f"upstreams.{name}", url)
-        on_secret = _section(u, "outbound").get("on_secret", "off")
-        if on_secret not in ("off", "block", "redact"):
-            raise ConfigError(f"upstreams.{name}.outbound.on_secret must be off, block or redact")
+        outbound = _section(u, "outbound")
+        on_secret, on_pii = outbound.get("on_secret", "off"), outbound.get("on_pii", "off")
+        for key, value in (("on_secret", on_secret), ("on_pii", on_pii)):
+            if value not in ("off", "block", "redact"):
+                raise ConfigError(f"upstreams.{name}.outbound.{key} must be off, block or redact")
         upstreams[str(name)] = Upstream(
             outbound_on_secret=on_secret,
+            outbound_on_pii=on_pii,
             name=str(name),
             url=url.rstrip("/"),
             model=_typed(u.get("model", name), str, f"upstreams.{name}.model"),

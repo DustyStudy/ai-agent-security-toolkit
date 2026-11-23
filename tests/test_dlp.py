@@ -392,14 +392,6 @@ def test_with_a_key_addresses_get_the_same_hmac_as_their_dlp_fingerprint():
     assert other.records[0]["data"]["a"] != logged
 
 
-def test_the_gateway_audit_uses_the_dlp_key_for_addresses(tmp_path, monkeypatch):
-    from tests.test_gateway import gateway
-
-    monkeypatch.setenv("DLP_FP_KEY", KEY)
-    app, _ = gateway(tmp_path, extra="dlp: {fingerprint_key: env:DLP_FP_KEY}\n")
-    assert app._audit.email_key == KEY.encode()
-
-
 def test_dlp_matches_rank_by_action_in_cef():
     assert severity("dlp_match", {"action": "block"}) == 7
     assert severity("dlp_match", {"action": "redact"}) == 5

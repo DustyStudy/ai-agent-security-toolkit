@@ -9,6 +9,7 @@ from typing import Any
 
 from agentsec.middleware.dlp import DEFAULT_DLP, DlpPolicy
 from agentsec.middleware.validators import (
+    DlpValidator,
     OutputGuard,
     OutputValidator,
     ProtectedStringValidator,
@@ -35,6 +36,10 @@ class GroupPolicy:
     holdback_chars: int = 256
     mcp: frozenset[str] | None = frozenset()  # MCP upstreams this group may reach; None: all
     dlp: DlpPolicy = DEFAULT_DLP  # credentials, NHI and PII: answers here, arguments in ToolGuard
+    # MCP tool results: DLP on the tool_results surface, and protected strings.
+    result_guard: OutputGuard = field(
+        default_factory=lambda: OutputGuard([DlpValidator(DEFAULT_DLP, "tool_results")])
+    )
 
 
 def stream_settings(output: dict[str, Any], where: str) -> tuple[str, int]:
@@ -80,8 +85,10 @@ def group_policy(
     # Tool arguments: secrets and protected strings only. PII and links are normal in
     # arguments (an email address for send_email); the policy's argument rules cover those.
     arg_validators: list[OutputValidator] = [SecretLeakValidator()]
+    result_validators: list[OutputValidator] = [DlpValidator(dlp, "tool_results")]
     if protected:
         arg_validators.append(ProtectedStringValidator(protected))
+        result_validators.append(ProtectedStringValidator(protected))
     return GroupPolicy(
         group=group,
         policy=policy,
@@ -97,6 +104,7 @@ def group_policy(
         holdback_chars=holdback_chars,
         mcp=None if mcp is None else frozenset(mcp),
         dlp=dlp,
+        result_guard=OutputGuard(result_validators),
     )
 
 

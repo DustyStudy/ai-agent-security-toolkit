@@ -313,6 +313,13 @@ _HEADS: weakref.WeakValueDictionary[str, _ChainHead] = weakref.WeakValueDictiona
 _HEADS_LOCK = threading.Lock()
 
 
+class _Unset:
+    pass
+
+
+_UNSET = _Unset()  # bind(): keep this logger's email key
+
+
 class AuditLogger:
     """Append-only, hash-chained structured logger.
 
@@ -403,8 +410,14 @@ class AuditLogger:
             head.prev_hash = record["hash"]
             return record
 
-    def bind(self, *, actor: str | None = None, session_id: str | None = None) -> AuditLogger:
-        """A logger with another actor or session that appends to this logger's chain.
+    def bind(
+        self,
+        *,
+        actor: str | None = None,
+        session_id: str | None = None,
+        email_key: bytes | None | _Unset = _UNSET,
+    ) -> AuditLogger:
+        """A logger with another actor, session or email key that appends to this logger's chain.
 
         Cheaper than a new ``AuditLogger`` on the same sink, which re-reads the sink's last
         record: use it for one logger per request or user in a long-running service.
@@ -414,6 +427,8 @@ class AuditLogger:
             bound.actor = actor
         if session_id is not None:
             bound.session_id = session_id
+        if not isinstance(email_key, _Unset):
+            bound.email_key = email_key
         return bound
 
     def checkpoint(self) -> dict[str, Any]:

@@ -18,6 +18,9 @@ from typing import Any
 
 from agentsec.gateway.policyset import PolicySet
 from agentsec.middleware.audit import AuditSink, RetrySink
+from agentsec.middleware.dlp import CATEGORIES, SURFACES
+
+_DLP_ACTIONS = ("monitor", "redact", "block", "allowed")
 
 
 class Metrics:
@@ -25,12 +28,22 @@ class Metrics:
         self._lock = threading.Lock()
         self._events: Counter[str] = Counter()
         self._responses: Counter[int] = Counter()
+        self._dlp: Counter[tuple[str, str, str]] = Counter()
         self._write_failures = 0
         self.delivery: RetrySink | None = None  # the secondary (SIEM) feed, when configured
 
     def event(self, name: str) -> None:
         with self._lock:
             self._events[name] += 1
+
+    def dlp(self, data: Any) -> None:
+        """Count a dlp_match record by category, surface and action (fixed sets: no content)."""
+        if not isinstance(data, dict):
+            return
+        key = (str(data.get("category")), str(data.get("surface")), str(data.get("action")))
+        if key[0] in (*CATEGORIES, "unscanned") and key[1] in SURFACES and key[2] in _DLP_ACTIONS:
+            with self._lock:
+                self._dlp[key] += 1
 
     def response(self, status: int) -> None:
         with self._lock:
@@ -48,12 +61,14 @@ class Metrics:
         """One consistent read of every counter (for /metrics and /dashboard)."""
         with self._lock:
             events, responses = dict(self._events), dict(self._responses)
+            dlp = dict(self._dlp)
             failures = self._write_failures
         backlog = self.delivery.backlog if self.delivery else 0
         age = self.delivery.last_delivery_age if self.delivery and backlog else 0.0
         return {
             "events": events,
             "responses": responses,
+            "dlp": dlp,
             "write_failures": failures,
             "siem_backlog": backlog,
             "siem_age": age,
@@ -75,6 +90,12 @@ class Metrics:
             *(
                 f'agentsec_gateway_responses_total{{status="{k}"}} {v}'
                 for k, v in sorted(responses.items())
+            ),
+            "# HELP agentsec_gateway_dlp_matches_total Sensitive-data findings, by category, surface and action.",
+            "# TYPE agentsec_gateway_dlp_matches_total counter",
+            *(
+                f'agentsec_gateway_dlp_matches_total{{category="{c}",surface="{s}",action="{a}"}} {v}'
+                for (c, s, a), v in sorted(snap["dlp"].items())
             ),
             "# HELP agentsec_gateway_audit_write_failures_total Records the local audit file refused.",
             "# TYPE agentsec_gateway_audit_write_failures_total counter",
@@ -124,6 +145,8 @@ class CountingSink:
             self._metrics.write_failed()
             raise
         self._metrics.event(str(record.get("event")))
+        if record.get("event") == "dlp_match":
+            self._metrics.dlp(record.get("data"))
 
     def __getattr__(self, name: str) -> Any:  # chain_key, last_record, ...
         if name.startswith("_"):  # also stops recursion while copy builds a bare instance

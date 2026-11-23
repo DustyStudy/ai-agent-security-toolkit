@@ -53,7 +53,7 @@ from agentsec.gateway.feeds import FeedSet
 from agentsec.gateway.holdback import Holdback
 from agentsec.gateway.metrics import CountingSink, Metrics
 from agentsec.gateway.oidc import OidcVerifier, TokenRejected, fetch_jwks
-from agentsec.gateway.outbound import attachments, scrub
+from agentsec.gateway.outbound import attachments, screen, upstream_policy
 from agentsec.gateway.policyset import GroupPolicy, PolicySet
 from agentsec.gateway.tokens import (
     TokenError,
@@ -64,6 +64,7 @@ from agentsec.gateway.tokens import (
 from agentsec.integrations.mcp import scan_tool_definitions
 from agentsec.middleware.audit import AuditLogger, AuditSink, FileSink, RetrySink, TeeSink
 from agentsec.middleware.cef import CefSink
+from agentsec.middleware.dlp import MAX_MATCH_RECORDS, DlpMatch
 from agentsec.middleware.injection import InjectionScanner
 from agentsec.middleware.pipeline import AgentMiddleware
 from agentsec.middleware.validators import BlocklistLinkValidator, OutputGuard
@@ -527,17 +528,11 @@ class Gateway:
         self.metrics.delivery = delivery
         sink = CountingSink(sink, self.metrics)  # counts a record only once it was written
         # The chain head is read once here; bind() gives each request a logger on that chain.
-        # shortcut: one log, so one email key: the first group's dlp.fingerprint_key at startup.
-        # Per-group keys and keys changed by a bundle reload need a logger per group.
-        email_key = next(
-            (g.dlp.fingerprint_key for g in config.policies.groups if g.dlp.fingerprint_key), None
-        )
         self._audit = AuditLogger(
             sink,
             actor="gateway",
             log_content=config.log_content,
             keep_fields=AUDIT_KEEP_FIELDS,
-            email_key=email_key,
         )
         self._policies = config.policies
         self._reload_lock = threading.Lock()
@@ -1033,7 +1028,8 @@ class Gateway:
         gp: GroupPolicy, request_id: str, **data: Any,
     ) -> None:  # fmt: skip
         """The record of a request that is not a chat completion, shaped like gateway_request."""
-        self._audit.bind(actor=user, session_id=request_id).log(
+        key = gp.dlp.fingerprint_key
+        self._audit.bind(actor=user, session_id=request_id, email_key=key).log(
             event,
             groups=list(groups),
             policy_group=gp.group,
@@ -1183,7 +1179,9 @@ class Gateway:
         gp: GroupPolicy,
     ) -> tuple[int, dict[str, Any] | Generator[dict[str, Any], None, None], bool]:
         cfg = self.config
-        log = self._audit.bind(actor=user, session_id=request_id)
+        # Email addresses in this request's records: the group's DLP fingerprint key.
+        key = gp.dlp.fingerprint_key
+        log = self._audit.bind(actor=user, session_id=request_id, email_key=key)
         enforce = gp.mode == "enforce"
         req = self._parse(body, gp)
         stream = req.pop("stream")
@@ -1227,7 +1225,7 @@ class Gateway:
             log.log("gateway_input_blocked", reasons=blocked, enforced=enforce)
             if enforce:
                 raise HttpError(400, "request blocked by input policy", "input_blocked")
-        self._screen_outbound(req, upstream, log)
+        self._screen_outbound(req, upstream, log, gp)
 
         if stream and gp.stream_mode == "holdback":
             req["model"], req["stream"] = upstream.model, True
@@ -1627,21 +1625,24 @@ class Gateway:
             m["content"] = _replace_texts(m["content"], out)
         return reasons
 
-    def _screen_outbound(self, req: dict[str, Any], upstream: Upstream, log: AuditLogger) -> None:
-        """Per-upstream policy on secrets in the whole request; independent of monitor/enforce."""
-        mode = upstream.outbound_on_secret
-        if mode == "off":
+    def _screen_outbound(
+        self, req: dict[str, Any], upstream: Upstream, log: AuditLogger, gp: GroupPolicy
+    ) -> None:
+        """DLP on the whole request (the ``upstream`` surface), with the upstream's
+        ``outbound`` overrides. Independent of monitor/enforce: it is a data-handling setting."""
+        policy = upstream_policy(gp.dlp, upstream.outbound_on_secret, upstream.outbound_on_pii)
+        hits: list[DlpMatch] = []
+        clean = screen(req, "request", policy, hits)
+        for m in hits[:MAX_MATCH_RECORDS]:
+            log.log("dlp_match", upstream=upstream.name, **m.audit())
+        acted = [m for m in hits if m.action in ("redact", "block")]
+        # Attachments cannot be scanned, so they are refused whenever anything would be acted on.
+        stuck = attachments(req["messages"]) if policy.strictest("upstream") != "monitor" else []
+        if not acted and not stuck:
             return
-        # Attachments cannot be scanned for secrets, so they are refused whenever the policy is on.
-        found = [(p, "attachment") for p in attachments(req["messages"])]
-        clean = req
-        if not found:
-            clean = scrub(req, "request", found)
-        if not found:
-            return
-        kinds = sorted({k for _, k in found})
-        where = [p for p, _ in found][:20]
-        if mode == "block" or "attachment" in kinds:
+        kinds = sorted({m.kind for m in acted} | ({"attachment"} if stuck else set()))
+        where = ([m.location for m in acted] + stuck)[:20]
+        if stuck or any(m.action == "block" for m in acted):
             log.log(
                 "gateway_outbound_blocked", upstream=upstream.name, kinds=kinds, locations=where
             )

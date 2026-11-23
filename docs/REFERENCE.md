@@ -227,7 +227,14 @@ The library protects an app only if that app's team wires it in. `agentsec serve
 
 ```bash
 pip install "ai-agent-security-toolkit[gateway,mcp]"
+export AGENTSEC_DLP_FINGERPRINT_KEY="$(openssl rand -hex 32)"   # the example's dlp.fingerprint_key
 agentsec serve --config examples/gateway.yaml --check   # validate, then drop --check to run
+```
+
+On Windows PowerShell, which has no `openssl`, set the key with:
+
+```powershell
+$bytes = New-Object byte[] 32; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes); $env:AGENTSEC_DLP_FINGERPRINT_KEY = -join ($bytes | ForEach-Object { $_.ToString("x2") })
 ```
 
 It has two endpoints, and they give different guarantees:

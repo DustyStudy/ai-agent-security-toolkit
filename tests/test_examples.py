@@ -63,7 +63,8 @@ def test_example_policy_is_valid_and_lint_clean():
 
 
 @pytest.mark.parametrize("name", ["gateway.yaml", "gateway.container.yaml"])
-def test_example_gateway_config_is_valid(name):
+def test_example_gateway_config_is_valid(name, monkeypatch):
+    monkeypatch.setenv("AGENTSEC_DLP_FINGERPRINT_KEY", "k" * 64)  # gateway.yaml reads it via env:
     assert main(["serve", "--config", str(ROOT / "examples" / name), "--check"]) == 0
 
 

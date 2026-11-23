@@ -77,6 +77,7 @@ The scanner and output checks are pattern-based and can miss variants. The libra
 
 - [Command and integration reference](docs/REFERENCE.md) for install options, configuration, and examples
 - [Framework crosswalk](docs/threat-model/frameworks.md) for OWASP and MITRE ATLAS mappings
+- [Test evidence](docs/evidence/) with dated test, coverage and live-model results for each release, including screenshots
 - [Changelog](CHANGELOG.md) and [releases](https://github.com/DustyStudy/ai-agent-security-toolkit/releases)
 
 <a name="project-health"></a>
@@ -84,8 +85,6 @@ The scanner and output checks are pattern-based and can miss variants. The libra
 ## Development
 
 See [contributing](CONTRIBUTING.md) for local setup and [project health](docs/REFERENCE.md#project-health) for CI and supply-chain checks. Report vulnerabilities through the [security policy](SECURITY.md).
-
-**Test evidence.** [docs/evidence/](docs/evidence/) holds dated results for each release: the test suite and coverage on the tagged commit, the simulator fuzz matrix, and live-model runs, each as Markdown, a self-contained HTML page and a screenshot. Every CI run publishes the same report on its summary page and as a `test-report-*` artifact.
 
 ## License
 

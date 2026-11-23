@@ -164,7 +164,7 @@ _SECTIONS: dict[str, set[str]] = {
     },
     "output": {"allowed_hosts", "protected", "stream_mode", "holdback_chars"},
     "input": {"block_on_injection", "spotlight_tool_results"},
-    "dlp": {"categories", "allow", "fingerprint_key"},
+    "dlp": {"categories", "detectors", "allow", "fingerprint_key"},
     "limits": {
         "max_body_bytes",
         "max_response_bytes",

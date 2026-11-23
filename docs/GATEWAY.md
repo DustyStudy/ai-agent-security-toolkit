@@ -67,6 +67,20 @@ dlp:
 
 The values above are the defaults. `redact` in `tool_args` means block, because a rewritten argument changes the action. Text over the scan limit is blocked unless every kind on that surface is only monitored. References such as `$API_TOKEN` or `${{ secrets.X }}` are not findings.
 
+**Custom detectors.** Add patterns for your own token formats or IDs under `dlp.detectors`. Each one takes the modes of its category (and can be overridden under `categories.<category>.kinds.<kind>`, or allowlisted, like a built-in kind):
+
+```yaml
+dlp:
+  detectors:
+    - kind: acme_service_token                  # lowercase, not a built-in kind
+      category: nhi                             # credentials, nhi or pii
+      pattern: 'acme_(?:live|test)_[A-Za-z0-9]{32}'
+      examples: ["acme_test_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]   # required; each must match
+      counter_examples: ["acme_live_short"]     # optional; none may match
+```
+
+At load each pattern must compile, be at most 512 characters, not match the empty string, match every example and no counter-example, and finish each of a set of 64 KB adversarial inputs (long runs of the pattern's own characters, with and without a tail that cannot match) in under 50 ms. That last check runs in a separate Python process that is stopped at the first slow input, so a catastrophic pattern such as `(a+)+$` is a config error in well under a second instead of a hung gateway. Matches of custom detectors are also replaced in the audit log's values and keys (`[REDACTED:<kind>]`), but never in the actor, session id or event name. With holdback streaming, `holdback_chars` must be at least 256 when a custom detector is redacted or blocked in answers; a match longer than the window can still be released in part, so keep custom patterns bounded. The allowlist takes `sha256` (not `pattern`) for custom `credentials` and `nhi` kinds, as for built-in ones.
+
 The gateway enforces all four surfaces: `output` (answer text, buffered or holdback), `tool_args` (model path and MCP endpoint), `tool_results` (MCP tool results: redacted, or the result withheld) and `upstream` (the request sent to a model provider, see step 4). Each finding is one `dlp_match` audit record with `kind`, `category`, `surface`, `action` (`monitor`, `redact`, `block` or `allowed`), the position and length, the tool and argument path, `allowed_by` for allowlisted values, and, with `fingerprint_key` set, an HMAC fingerprint that lets you count repeats of one value. The value itself, or any part of it, is never recorded. Email addresses elsewhere in the audit log (tool arguments, answers) are written as `[REDACTED:email]`, or as their fingerprint under the request's group key when one is set; the user (`actor`) stays readable. `/metrics` counts findings as `agentsec_gateway_dlp_matches_total{category,surface,action}`. Published example values (the AWS documentation key, card networks' test numbers, `example.com` addresses) are recorded as `allowed_by: builtin`. With holdback streaming, `holdback_chars` must be at least 256 when email is redacted or blocked in answers.
 
 ## Per-group policy with signed bundles

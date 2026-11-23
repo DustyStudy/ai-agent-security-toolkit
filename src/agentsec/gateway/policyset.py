@@ -78,10 +78,14 @@ def group_policy(
     if (
         stream_mode == "holdback"
         and holdback_chars < 256
-        and dlp.mode("email", "output") != "monitor"
+        and any(dlp.mode(k, "output") != "monitor" for k in ("email", *dlp.custom_categories))
     ):
-        # An address can be 254 characters: a shorter window could release half of one.
-        raise ValueError("holdback_chars must be at least 256 when email is redacted or blocked")
+        # An address can be 254 characters: a shorter window could release half of one. A
+        # custom detector's longest match is unknown, so it gets the same floor.
+        raise ValueError(
+            "holdback_chars must be at least 256 when email or a custom detector is redacted "
+            "or blocked"
+        )
     # Tool arguments: secrets and protected strings only. PII and links are normal in
     # arguments (an email address for send_email); the policy's argument rules cover those.
     arg_validators: list[OutputValidator] = [SecretLeakValidator()]

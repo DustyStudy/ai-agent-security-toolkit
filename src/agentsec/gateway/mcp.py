@@ -386,7 +386,10 @@ class McpGateway:
                 # this request's rules only
                 ToolGuard(
                     caller.gp.policy,
-                    audit=state.audit.bind(email_key=caller.gp.dlp.fingerprint_key),
+                    audit=state.audit.bind(
+                        email_key=caller.gp.dlp.fingerprint_key,
+                        detectors=caller.gp.dlp.detectors,
+                    ),
                     blocklist=self._blocklist(),
                     dlp=caller.gp.dlp,
                 ),
@@ -452,7 +455,9 @@ class McpGateway:
             state.audit.log("gateway_mcp_upstream_error", upstream=upstream, error=_reason(e))
             return self._error("upstream error")
         state.audit.log("gateway_mcp_call", tool=name, allowed=True, token_id=caller.token_id)
-        log = state.audit.bind(email_key=caller.gp.dlp.fingerprint_key)
+        log = state.audit.bind(
+            email_key=caller.gp.dlp.fingerprint_key, detectors=caller.gp.dlp.detectors
+        )
         return self._screen(result, caller.gp, name, log)
 
     def _screen(self, result: Any, gp: GroupPolicy, name: str, log: AuditLogger) -> Any:

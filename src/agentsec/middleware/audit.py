@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Protocol
 
-from agentsec.middleware.redact import _EMAIL, find_sensitive, redact_text
+from agentsec.middleware.redact import _EMAIL, _Rule, find_sensitive, redact_text
 
 _LOG = logging.getLogger("agentsec.audit")
 
@@ -344,6 +344,8 @@ class AuditLogger:
             DLP fingerprint), so repeats correlate. Without a key they become
             ``[REDACTED:email]``: an unkeyed hash of an address is reversed by guessing it.
             The actor, session id and event name are never changed.
+        detectors: DLP custom detectors (``DlpPolicy.detectors``): their matches in logged
+            values and keys become ``[REDACTED:<kind>]``, like the built-in ones.
     """
 
     def __init__(
@@ -359,8 +361,10 @@ class AuditLogger:
         keep_fields: Iterable[str] = (),
         clock: Callable[[], datetime] | None = None,
         email_key: bytes | None = None,
+        detectors: tuple[_Rule, ...] = (),
     ) -> None:
         self.email_key = email_key
+        self.detectors = detectors
         self.sink = sink
         self.session_id = session_id or uuid.uuid4().hex
         self.actor = actor
@@ -399,7 +403,7 @@ class AuditLogger:
                 "actor": self._clean_key(self.actor),
                 "event": self._clean_key(event),
                 "data": {
-                    self._clean_key(k): self._clean_item(k, v, keep=k in self._keep_fields)
+                    self._clean_data_key(k): self._clean_item(k, v, keep=k in self._keep_fields)
                     for k, v in data.items()
                 },
                 "prev_hash": head.prev_hash,
@@ -416,8 +420,10 @@ class AuditLogger:
         actor: str | None = None,
         session_id: str | None = None,
         email_key: bytes | None | _Unset = _UNSET,
+        detectors: tuple[_Rule, ...] | None = None,
     ) -> AuditLogger:
-        """A logger with another actor, session or email key that appends to this logger's chain.
+        """A logger with another actor, session, email key or set of custom detectors that
+        appends to this logger's chain.
 
         Cheaper than a new ``AuditLogger`` on the same sink, which re-reads the sink's last
         record: use it for one logger per request or user in a long-running service.
@@ -429,6 +435,8 @@ class AuditLogger:
             bound.session_id = session_id
         if not isinstance(email_key, _Unset):
             bound.email_key = email_key
+        if detectors is not None:
+            bound.detectors = detectors
         return bound
 
     def checkpoint(self) -> dict[str, Any]:
@@ -446,7 +454,7 @@ class AuditLogger:
             return self._clean_str(value, keep)
         if isinstance(value, dict):
             # Keys are redacted too: an agent can put a secret in a key as easily as a value.
-            return {self._clean_key(k): self._clean_item(k, v, keep) for k, v in value.items()}
+            return {self._clean_data_key(k): self._clean_item(k, v, keep) for k, v in value.items()}
         if (
             self._redact
             and isinstance(value, list | tuple)
@@ -477,6 +485,17 @@ class AuditLogger:
         text = str(key)
         return redact_text(text)[0] if self._redact else text
 
+    def _clean_data_key(self, key: Any) -> str:
+        # Custom detectors apply to data, not to the actor, session id or event name: an
+        # employee-ID pattern must not erase who did what.
+        text = self._clean_key(key)
+        return self._custom(text) if self._redact else text
+
+    def _custom(self, text: str) -> str:
+        for rule in self.detectors:
+            text = rule.pattern.sub(f"[REDACTED:{rule.kind}]", text)
+        return text
+
     def _email(self, m: re.Match[str]) -> str:
         if self.email_key is None:
             return "[REDACTED:email]"
@@ -485,7 +504,7 @@ class AuditLogger:
 
     def _clean_str(self, text: str, keep: bool = False) -> Any:
         if self._redact:
-            text, _ = redact_text(text)
+            text = self._custom(redact_text(text)[0])
             # Only values: the actor (often an address) goes through _clean_key and stays.
             text = _EMAIL.pattern.sub(self._email, text)
         if not self._log_content and not keep and len(text) > self._preview_chars:

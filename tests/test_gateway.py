@@ -543,7 +543,14 @@ def test_tool_call_arguments_cannot_carry_secrets_or_protected_strings(tmp_path)
     status, text = call(app, body=chat(tools=[tool("search")], stream=True))
     assert status == 200 and secret not in text and "CANARY-1234" not in text
     assert '\\"fine\\"' in text
-    assert events(sink).count("gateway_tool_call_output_violation") == 2
+    # The secret is now refused by the tool guard's DLP check (before the argument guard sees
+    # it); the protected string is still caught by the argument guard.
+    assert events(sink).count("gateway_tool_call_output_violation") == 1
+    dlp = [r["data"] for r in sink.records if r["event"] == "dlp_match"]
+    assert [(d["kind"], d["action"], d["location"]) for d in dlp] == [
+        ("aws_access_key_id", "block", "arguments.q")
+    ]
+    assert secret not in json.dumps(sink.records)
 
 
 INLINE_IMAGE = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
@@ -645,3 +652,45 @@ def test_block_reasons_stay_readable_when_content_is_hashed(tmp_path):
     # The prompt itself is still stored only as a hash.
     prompt = next(r for r in sink.records if r["event"] == "prompt")
     assert set(prompt["data"]["text"]) == {"sha256", "length"}
+
+
+# ------------------------------------------------------------------------ dlp
+
+
+def test_the_dlp_section_is_loaded_and_validated(tmp_path, monkeypatch):
+    monkeypatch.setenv("DLP_FP_KEY", "k" * 32)
+    cfg = write_config(
+        tmp_path,
+        """
+        dlp:
+          fingerprint_key: env:DLP_FP_KEY
+          categories:
+            pii: {output: block}
+        """,
+    )
+    dlp = cfg.policies.groups[0].dlp
+    assert dlp.mode("us_ssn", "output") == "block" and dlp.fingerprint_key == b"k" * 32
+    with pytest.raises(ConfigError, match="dlp"):
+        write_config(tmp_path, "dlp: {categories: {pii: {output: off}}}\n")
+    with pytest.raises(ConfigError, match="dlp"):
+        write_config(tmp_path, "dlp: {mode: block}\n")
+
+
+def test_email_redaction_needs_a_holdback_window_that_fits_an_address(tmp_path):
+    output = "output: {stream_mode: holdback, holdback_chars: 64}\n"
+    write_config(tmp_path, output)  # email only monitored: fine
+    with pytest.raises(ConfigError, match="at least 256"):
+        write_config(tmp_path, output + "dlp: {categories: {pii: {output: redact}}}\n")
+
+
+def test_secrets_in_model_path_arguments_are_refused_and_audited_without_value(tmp_path):
+    secret = "AKIA" + "Z" * 16
+    message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [tool_call("search", json.dumps({"q": f"look up {secret}"}))],
+    }
+    app, sink = gateway(tmp_path, FakeUpstream(message))
+    status, body = call(app, body=chat(tools=[tool("search")]))
+    assert status == 200 and secret not in body
+    assert "dlp_match" in events(sink) and secret not in json.dumps(sink.records)

@@ -384,7 +384,12 @@ class McpGateway:
             client = GuardedMCPClient(
                 _Namespaced(raw, name),
                 # this request's rules only
-                ToolGuard(caller.gp.policy, audit=state.audit, blocklist=self._blocklist()),
+                ToolGuard(
+                    caller.gp.policy,
+                    audit=state.audit,
+                    blocklist=self._blocklist(),
+                    dlp=caller.gp.dlp,
+                ),
                 state.session,  # one session across upstreams: what one returns taints the rest
                 pins=first_seen if pins is None else ToolPins(pins),
                 pin_new=pins is None,  # with pins, an unpinned tool is a finding, never trusted

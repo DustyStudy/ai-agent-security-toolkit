@@ -17,6 +17,7 @@ from agentsec.gateway.feeds import EgressSettings, FeedConfig
 from agentsec.gateway.oidc import SUPPORTED_ALGORITHMS, OidcSettings
 from agentsec.gateway.policyset import ANY_GROUP, PolicySet, group_policy, stream_settings
 from agentsec.gateway.tokens import TokenSettings
+from agentsec.middleware.dlp import DlpConfigError, DlpPolicy
 from agentsec.sandbox.policy import Policy, load_yaml_strict
 
 
@@ -126,6 +127,7 @@ _TOP = {
     "mcp",
     "tokens",
     "audit",
+    "dlp",
     "egress",
 }
 _SECTIONS: dict[str, set[str]] = {
@@ -159,6 +161,7 @@ _SECTIONS: dict[str, set[str]] = {
     },
     "output": {"allowed_hosts", "protected", "stream_mode", "holdback_chars"},
     "input": {"block_on_injection", "spotlight_tool_results"},
+    "dlp": {"categories", "allow", "fingerprint_key"},
     "limits": {
         "max_body_bytes",
         "max_response_bytes",
@@ -364,7 +367,8 @@ def _pin_file(path: Path) -> dict[str, str]:
 def _single_policy(
     data: dict[str, Any], base: Path, mcp_pins: dict[str, dict[str, str]] | None = None
 ) -> PolicySet:
-    """One policy for every authenticated user, from ``policy``, ``mode``, ``output``, ``input``."""
+    """One policy for every authenticated user, from ``policy``, ``mode``, ``output``, ``input``
+    and ``dlp``."""
     policy_section = data.get("policy")
     if not isinstance(policy_section, str):
         raise ConfigError("policy must be the path of a tool policy YAML file (or use bundle)")
@@ -378,20 +382,33 @@ def _single_policy(
         stream_mode, holdback_chars = stream_settings(output, "output")
     except ValueError as e:
         raise ConfigError(str(e)) from None
-    entry = group_policy(
-        ANY_GROUP,
-        policy,
-        mode=mode,
-        allowed_hosts=_strs(output.get("allowed_hosts", []), "output.allowed_hosts"),
-        protected=_strs(output.get("protected", []), "output.protected"),
-        block_on_injection=_typed(inp.get("block_on_injection", True), bool, "block_on_injection"),
-        spotlight_tool_results=_typed(
+    try:
+        dlp = DlpPolicy.from_dict(_section(data, "dlp"), resolve_secret=resolve_secret)
+    except DlpConfigError as e:
+        raise ConfigError(str(e)) from None
+    flags = {
+        "block_on_injection": _typed(
+            inp.get("block_on_injection", True), bool, "block_on_injection"
+        ),
+        "spotlight_tool_results": _typed(
             inp.get("spotlight_tool_results", False), bool, "spotlight_tool_results"
         ),
-        stream_mode=stream_mode,
-        holdback_chars=holdback_chars,
-        mcp=None,  # one policy for everyone: every configured MCP upstream, gated by its keys
-    )
+    }
+    try:
+        entry = group_policy(
+            ANY_GROUP,
+            policy,
+            mode=mode,
+            allowed_hosts=_strs(output.get("allowed_hosts", []), "output.allowed_hosts"),
+            protected=_strs(output.get("protected", []), "output.protected"),
+            stream_mode=stream_mode,
+            holdback_chars=holdback_chars,
+            mcp=None,  # one policy for everyone: every configured MCP upstream, gated by its keys
+            dlp=dlp,
+            **flags,
+        )
+    except ValueError as e:  # settings that are fine alone but not together
+        raise ConfigError(str(e)) from None
     # First 128 bits of the file's sha256: under the 64 characters log_content=False hashes.
     return PolicySet(
         revision="sha256:" + hashlib.sha256(raw_policy).hexdigest()[:32],
@@ -606,9 +623,9 @@ def load_config(path: str | Path) -> GatewayConfig:
     limits = _section(data, "limits")
     bundle = None
     if "bundle" in data:
-        if any(k in data for k in ("policy", "mode", "output", "input")):
+        if any(k in data for k in ("policy", "mode", "output", "input", "dlp")):
             # With a bundle every group carries its own; a second source would be ambiguous.
-            raise ConfigError("with bundle, put policy, mode, output and input in the bundle")
+            raise ConfigError("with bundle, put policy, mode, output, input and dlp in the bundle")
         bundle, policies = _bundle(
             _section(data, "bundle"), base, set(upstreams), set(mcp_upstreams)
         )

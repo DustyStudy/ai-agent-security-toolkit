@@ -527,8 +527,17 @@ class Gateway:
         self.metrics.delivery = delivery
         sink = CountingSink(sink, self.metrics)  # counts a record only once it was written
         # The chain head is read once here; bind() gives each request a logger on that chain.
+        # shortcut: one log, so one email key: the first group's dlp.fingerprint_key at startup.
+        # Per-group keys and keys changed by a bundle reload need a logger per group.
+        email_key = next(
+            (g.dlp.fingerprint_key for g in config.policies.groups if g.dlp.fingerprint_key), None
+        )
         self._audit = AuditLogger(
-            sink, actor="gateway", log_content=config.log_content, keep_fields=AUDIT_KEEP_FIELDS
+            sink,
+            actor="gateway",
+            log_content=config.log_content,
+            keep_fields=AUDIT_KEEP_FIELDS,
+            email_key=email_key,
         )
         self._policies = config.policies
         self._reload_lock = threading.Lock()
@@ -1201,7 +1210,7 @@ class Gateway:
                 blocked_message=gp.output_guard.blocked_message,
             )
             gp = dataclasses.replace(gp, output_guard=guard_out)
-        guard = ToolGuard(gp.policy, audit=log, blocklist=blocklist)
+        guard = ToolGuard(gp.policy, audit=log, blocklist=blocklist, dlp=gp.dlp)
         mw = AgentMiddleware(
             guard=guard,
             output_guard=gp.output_guard,

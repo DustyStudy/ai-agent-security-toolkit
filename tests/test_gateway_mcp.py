@@ -234,6 +234,47 @@ def test_arguments_are_checked_against_the_policy(gateway):
     assert run(main()).is_error
 
 
+def test_mcp_arguments_are_checked_for_secrets_before_the_upstream(gateway):
+    """0.12.0 sent MCP tool arguments upstream without any secret check (DLP design gap)."""
+    url, upstreams, sink, _ = gateway
+    secret = "ghp" + "_" + "a1B2" * 9
+
+    async def main():
+        async with client(url) as c:
+            await c.list_tools()
+            return await c.call_tool("mail__send", {"to": f"bob@corp.example {secret}"})
+
+    result = run(main())
+    assert result.is_error and "sensitive data in arguments (github_token)" in text(result)
+    assert upstreams.servers["mail"].sent == []
+    dlp = [r["data"] for r in sink.records if r["event"] == "dlp_match"]
+    assert [(d["kind"], d["action"], d["location"]) for d in dlp] == [
+        ("email", "allowed", "arguments.to"),  # .example: a documentation domain
+        ("github_token", "block", "arguments.to"),
+    ]
+    assert secret not in json.dumps(sink.records)
+
+
+def test_the_dlp_section_reaches_the_mcp_path(tmp_path):
+    extra = """
+    dlp:
+      categories:
+        pii: {tool_args: block}
+    """
+    upstreams = Upstreams(docs=docs_server(), mail=mail_server())
+    app = Gateway(write_config(tmp_path, extra), sink=MemorySink(), mcp_connector=upstreams.connect)
+
+    async def main(url):
+        async with client(url) as c:
+            await c.list_tools()
+            return await c.call_tool("mail__send", {"to": "jane.doe" + "@corp-mail.com"})
+
+    with serving(app) as url:
+        result = run(main(url))
+    assert result.is_error and "email" in text(result)
+    assert upstreams.servers["mail"].sent == []
+
+
 def test_a_tool_must_pass_a_listing_before_it_is_called(gateway):
     url, upstreams, _, _ = gateway
 

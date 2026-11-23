@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import functools
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -32,7 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Protocol
 
-from agentsec.middleware.redact import find_sensitive, redact_text
+from agentsec.middleware.redact import _EMAIL, find_sensitive, redact_text
 
 _LOG = logging.getLogger("agentsec.audit")
 
@@ -50,6 +51,7 @@ TOOL_RESULT = "tool_result"
 APPROVAL = "approval"
 VALIDATION = "validation"
 ERROR = "error"
+DLP_MATCH = "dlp_match"
 
 
 class AuditSink(Protocol):
@@ -330,6 +332,11 @@ class AuditLogger:
             ``reasons`` that an analyst must be able to read. Never list a content field.
         max_field_chars: Truncation limit for any single string field. The full
             content's SHA-256 is always recorded when truncation happens.
+        email_key: With ``redact``, email addresses in logged values become
+            ``[EMAIL:hmac-sha256:<16 hex>]`` under this key (the same value and format as a
+            DLP fingerprint), so repeats correlate. Without a key they become
+            ``[REDACTED:email]``: an unkeyed hash of an address is reversed by guessing it.
+            The actor, session id and event name are never changed.
     """
 
     def __init__(
@@ -344,7 +351,9 @@ class AuditLogger:
         max_field_chars: int = 4000,
         keep_fields: Iterable[str] = (),
         clock: Callable[[], datetime] | None = None,
+        email_key: bytes | None = None,
     ) -> None:
+        self.email_key = email_key
         self.sink = sink
         self.session_id = session_id or uuid.uuid4().hex
         self.actor = actor
@@ -453,9 +462,17 @@ class AuditLogger:
         text = str(key)
         return redact_text(text)[0] if self._redact else text
 
+    def _email(self, m: re.Match[str]) -> str:
+        if self.email_key is None:
+            return "[REDACTED:email]"
+        digest = hmac.new(self.email_key, m[0].encode(), hashlib.sha256).hexdigest()
+        return f"[EMAIL:hmac-sha256:{digest[:16]}]"
+
     def _clean_str(self, text: str, keep: bool = False) -> Any:
         if self._redact:
             text, _ = redact_text(text)
+            # Only values: the actor (often an address) goes through _clean_key and stays.
+            text = _EMAIL.pattern.sub(self._email, text)
         if not self._log_content and not keep and len(text) > self._preview_chars:
             return {"sha256": _sha256(text), "length": len(text)}
         if len(text) > self._max_field_chars:

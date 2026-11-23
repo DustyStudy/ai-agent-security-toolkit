@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from agentsec.middleware.dlp import DEFAULT_DLP, DlpPolicy
 from agentsec.middleware.validators import (
     OutputGuard,
     OutputValidator,
@@ -33,6 +34,7 @@ class GroupPolicy:
     stream_mode: str = "buffer"  # holdback: stream text that is held_chars behind and checked
     holdback_chars: int = 256
     mcp: frozenset[str] | None = frozenset()  # MCP upstreams this group may reach; None: all
+    dlp: DlpPolicy = DEFAULT_DLP  # credentials, NHI and PII: answers here, arguments in ToolGuard
 
 
 def stream_settings(output: dict[str, Any], where: str) -> tuple[str, int]:
@@ -65,8 +67,16 @@ def group_policy(
     stream_mode: str = "buffer",
     holdback_chars: int = 256,
     mcp: Iterable[str] | None = (),
+    dlp: DlpPolicy = DEFAULT_DLP,
 ) -> GroupPolicy:
     protected = tuple(protected)
+    if (
+        stream_mode == "holdback"
+        and holdback_chars < 256
+        and dlp.mode("email", "output") != "monitor"
+    ):
+        # An address can be 254 characters: a shorter window could release half of one.
+        raise ValueError("holdback_chars must be at least 256 when email is redacted or blocked")
     # Tool arguments: secrets and protected strings only. PII and links are normal in
     # arguments (an email address for send_email); the policy's argument rules cover those.
     arg_validators: list[OutputValidator] = [SecretLeakValidator()]
@@ -77,13 +87,16 @@ def group_policy(
         policy=policy,
         mode=mode,
         models=None if models is None else frozenset(models),
-        output_guard=OutputGuard.default(allowed_hosts=tuple(allowed_hosts), protected=protected),
+        output_guard=OutputGuard.default(
+            allowed_hosts=tuple(allowed_hosts), protected=protected, dlp=dlp
+        ),
         argument_guard=OutputGuard(arg_validators),
         block_on_injection=block_on_injection,
         spotlight_tool_results=spotlight_tool_results,
         stream_mode=stream_mode,
         holdback_chars=holdback_chars,
         mcp=None if mcp is None else frozenset(mcp),
+        dlp=dlp,
     )
 
 

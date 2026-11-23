@@ -40,6 +40,35 @@ client.chat.completions.create(model="llama3.1-8b", messages=[{"role": "user", "
 
 `mode: monitor` computes and logs every decision but delivers requests and answers unchanged. Identity, body and rate limits apply in both modes.
 
+## Data-loss prevention
+
+Credentials, non-human identities (cloud and service tokens) and PII are checked under one `dlp` policy: top level in single-policy mode, or per group in a bundle entry. Each category gets a mode per surface: `monitor` (deliver and audit), `redact` (replace the value with `[REDACTED:<kind>]`) or `block` (withhold the answer, or deny the tool call). The design is in [design/DATA_LOSS_PREVENTION.md](design/DATA_LOSS_PREVENTION.md).
+
+```yaml
+dlp:
+  fingerprint_key: env:AGENTSEC_DLP_FINGERPRINT_KEY   # optional, at least 32 bytes
+  categories:
+    credentials: {output: redact, tool_args: block}   # password=, Authorization, cookies, JWTs, private keys
+    nhi: {output: redact, tool_args: block}           # AWS, GitHub, GitLab, Slack, Stripe, OpenAI, ... keys
+    pii:
+      output: redact                                  # SSNs and payment cards
+      tool_args: monitor
+      kinds:
+        email: {output: monitor}                      # addresses are normal in answers and send_email
+  allow:
+    - id: support-mailbox
+      reason: replies go to the shared support address
+      owner: platform-security
+      expires: 2027-02-28                             # required, at most 180 days ahead
+      kinds: [email]
+      tools: [send_email]                             # optional; surfaces: [...] too
+      match: {email_domain: support.example.com}      # or sha256: <hex>, or pattern: (PII only)
+```
+
+The values above are the defaults. In phase 1 the gateway enforces two surfaces: `output` (answer text, buffered or holdback) and `tool_args` (every string and key in a tool call's arguments, on the model path and the MCP endpoint alike). `redact` in `tool_args` means block, because a rewritten argument changes the action. Text over the scan limit is blocked unless every kind on that surface is only monitored. References such as `$API_TOKEN` or `${{ secrets.X }}` are not findings.
+
+Each finding is one `dlp_match` audit record with `kind`, `category`, `surface`, `action` (`monitor`, `redact`, `block` or `allowed`), the position and length, the tool and argument path, `allowed_by` for allowlisted values, and, with `fingerprint_key` set, an HMAC fingerprint that lets you count repeats of one value. The value itself, or any part of it, is never recorded. Email addresses elsewhere in the audit log (tool arguments, answers) are written as `[REDACTED:email]`, or as their fingerprint when the key is set; the user (`actor`) stays readable. Published example values (the AWS documentation key, card networks' test numbers, `example.com` addresses) are recorded as `allowed_by: builtin`. With holdback streaming, `holdback_chars` must be at least 256 when email is redacted or blocked in answers. `tool_results` and `upstream` modes are accepted but not yet enforced; `upstreams.<name>.outbound.on_secret` and the MCP result screen keep their current behaviour.
+
 ## Per-group policy with signed bundles
 
 Instead of one `policy:` file, the gateway can enforce a **bundle**: a directory with a `manifest.yaml`, the ToolGuard policies it references, and a `manifest.sig` written by `agentsec bundle sign`. See [`examples/bundle/`](../examples/bundle/).

@@ -217,8 +217,14 @@ def test_guard_denies_and_audits_without_the_url():
 
 
 def test_guard_without_a_blocklist_is_unchanged():
-    guard = ToolGuard(POLICY, resolver=lambda h: [GOOD_IP])
+    # dlp=None: the token in SECRET_URL is a DLP finding, which is not what this test is about.
+    guard = ToolGuard(POLICY, resolver=lambda h: [GOOD_IP], dlp=None)
     assert guard.evaluate(ToolCall(name="fetch", arguments={"url": SECRET_URL})).allowed
+    assert (
+        not ToolGuard(POLICY, resolver=lambda h: [GOOD_IP])
+        .evaluate(ToolCall(name="fetch", arguments={"url": SECRET_URL}))
+        .allowed
+    )  # with the default DLP policy the token in the query is refused
 
 
 def test_a_blocklist_needing_dns_moves_async_evaluation_off_the_loop():

@@ -50,6 +50,7 @@ TOOL_RESULT = "tool_result"
 APPROVAL = "approval"
 VALIDATION = "validation"
 ERROR = "error"
+DLP_MATCH = "dlp_match"
 
 
 class AuditSink(Protocol):

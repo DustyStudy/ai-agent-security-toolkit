@@ -38,6 +38,48 @@ def _luhn_ok(candidate: str) -> bool:
     return total % 10 == 0
 
 
+# (first digits, valid lengths) per card network. A Luhn-valid run of digits with no network
+# prefix is an order number or a timestamp one time in ten, not a card.
+_CARD_NETWORKS: tuple[tuple[tuple[int, int], tuple[int, ...]], ...] = (
+    ((4, 4), (13, 16, 19)),  # Visa
+    ((51, 55), (16,)),  # Mastercard
+    ((2221, 2720), (16,)),  # Mastercard 2-series
+    ((34, 34), (15,)),  # Amex
+    ((37, 37), (15,)),
+    ((6011, 6011), (16, 17, 18, 19)),  # Discover
+    ((644, 649), (16, 17, 18, 19)),
+    ((65, 65), (16, 17, 18, 19)),
+    ((35, 35), (16, 17, 18, 19)),  # JCB
+    ((30, 30), (14, 15, 16, 17, 18, 19)),  # Diners
+    ((36, 36), (14, 15, 16, 17, 18, 19)),
+    ((38, 39), (14, 15, 16, 17, 18, 19)),
+    ((62, 62), (16, 17, 18, 19)),  # UnionPay
+)
+
+
+def _card_ok(candidate: str) -> bool:
+    """Luhn, a known network prefix and length, and one consistent grouping."""
+    if not _luhn_ok(candidate):
+        return False
+    digits = "".join(c for c in candidate if c.isdigit())
+    seps = set(candidate) - set(digits)
+    if len(seps) > 1:
+        return False
+    if seps:
+        groups = [len(g) for g in candidate.split(seps.pop())]
+        if not (
+            all(n == 4 for n in groups[:-1])
+            and 1 <= groups[-1] <= 4  # 4-4-4-4(-3)
+            or groups in ([4, 6, 5], [4, 6, 4])  # Amex, Diners
+        ):
+            return False
+    for (low, high), lengths in _CARD_NETWORKS:
+        width = len(str(low))
+        if low <= int(digits[:width]) <= high and len(digits) in lengths:
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class _Rule:
     kind: str
@@ -131,6 +173,14 @@ _RULES: tuple[_Rule, ...] = (
         ),
         group=1,
     ),
+    # Azure storage connection strings. Before the assignment rules, which match the same span
+    # as a generic secret_assignment: the named kind wins a tie.
+    _Rule(
+        "azure_storage_key",
+        "secret",
+        re.compile(r"(?i)\bAccountKey\s*=\s*([A-Za-z0-9+/]{86}==)(?![A-Za-z0-9+/=])"),
+        group=1,
+    ),
     # password=..., DB_PASSWORD=..., PWD: ..., "password": "..." (JSON/YAML/env/connection
     # strings). A lookbehind, not \b: "_" before PASSWORD is a word character.
     *_assignment_rules("password_assignment", _PW_KEY),
@@ -196,7 +246,16 @@ _RULES: tuple[_Rule, ...] = (
     ),
     _Rule("gateway_access_token", "secret", re.compile(r"agt_[A-Za-z0-9_-]{43}")),
     _Rule("github_token", "secret", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
-    _Rule("gitlab_token", "secret", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}")),
+    # Personal access, runner, deploy and feed tokens.
+    _Rule("gitlab_token", "secret", re.compile(r"\bgl(?:pat|rt|dt|ft)-[A-Za-z0-9_-]{20,}")),
+    _Rule(
+        "sendgrid_api_key",
+        "secret",
+        re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"),
+    ),
+    _Rule("digitalocean_token", "secret", re.compile(r"\bdo[opr]_v1_[a-f0-9]{64}\b")),
+    _Rule("shopify_token", "secret", re.compile(r"\bshp(?:at|ss|ca|pa)_[a-fA-F0-9]{32}\b")),
+    _Rule("databricks_token", "secret", re.compile(r"\bdapi[a-f0-9]{32}(?:-\d)?\b")),
     _Rule("npm_token", "secret", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b")),
     _Rule("huggingface_token", "secret", re.compile(r"\bhf_[A-Za-z0-9]{30,}\b")),
     _Rule("github_fine_grained_pat", "secret", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}\b")),
@@ -257,19 +316,50 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(
         "us_ssn",
         "pii",
-        re.compile(r"\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b"),
+        # 123-45-6789 or 123 45 6789, with the same separator twice.
+        re.compile(r"\b(?!000|666|9\d\d)\d{3}([- ])(?!00)\d{2}\1(?!0000)\d{4}\b"),
+    ),
+    _Rule(
+        "us_ssn",
+        "pii",
+        # A bare 9-digit run only right after a label: bare 9-digit numbers are everywhere.
+        re.compile(
+            r"(?i)\b(?:ssn|social security(?: number| no\.?)?|tin)\b[^\d\n]{0,20}?"
+            r"(?<!\d)((?!000|666|9\d\d)\d{3}(?!00)\d{2}(?!0000)\d{4})(?!\d)"
+        ),
+        group=1,
     ),
     _Rule(
         "payment_card",
         "pii",
-        re.compile(r"\b(?:\d[ -]?){12,18}\d\b"),
-        check=_luhn_ok,
+        # Lazy: the shortest run that ends at a boundary, so a number written right after a
+        # card ("<card> 2 items") does not make one too-long candidate.
+        # shortcut: a 19-digit card written in groups is read as its first 16 digits; widen
+        # the search if 19-digit cards in 4-4-4-4-3 form show up in practice.
+        re.compile(r"\b(?:\d[ -]?){12,18}?\d\b"),
+        check=_card_ok,
+    ),
+)
+
+# Not in _RULES: the audit log redacts _RULES everywhere, and an email address is often the
+# actor's own name there. DLP asks for it with include_email=True.
+_EMAIL = _Rule(
+    "email",
+    "pii",
+    # One start per run of address characters, bounded parts: linear on "a@a@a@...".
+    re.compile(
+        r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@"
+        r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.){1,8}[A-Za-z]{2,63}(?![A-Za-z0-9-])"
     ),
 )
 
 
 def find_sensitive(
-    text: str, *, include_pii: bool = True, max_scan_chars: int = DEFAULT_MAX_SCAN_CHARS
+    text: str,
+    *,
+    include_pii: bool = True,
+    max_scan_chars: int = DEFAULT_MAX_SCAN_CHARS,
+    include_email: bool = False,
 ) -> list[Finding]:
     """Return non-overlapping findings, ordered by position.
 
@@ -278,13 +368,19 @@ def find_sensitive(
     """
     scanned = text if len(text) <= max_scan_chars else text[:max_scan_chars]
     found: list[Finding] = []
-    for rule in _RULES:
+    rules = (*_RULES, _EMAIL) if include_email and include_pii else _RULES
+    for rule in rules:
         if rule.category == "pii" and not include_pii:
             continue
-        for m in rule.pattern.finditer(scanned):
+        pos = 0
+        while (m := rule.pattern.search(scanned, pos)) is not None:
             if rule.check and not rule.check(m.group(rule.group)):
+                # Retry from the next start, not past the rejected span: "ref 12 <card>" would
+                # otherwise hide the card inside a longer candidate that fails the check.
+                pos = m.start() + 1
                 continue
             found.append(Finding(rule.kind, m.start(rule.group), m.end(rule.group), rule.category))
+            pos = max(m.end(), m.start() + 1)
     found.sort(key=lambda f: (f.start, -(f.end - f.start)))
     merged: list[Finding] = []
     for f in found:

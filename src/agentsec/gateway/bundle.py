@@ -25,6 +25,7 @@ from typing import Any
 import yaml
 
 from agentsec.gateway.policyset import ANY_GROUP, PolicySet, group_policy, stream_settings
+from agentsec.middleware.dlp import DlpPolicy
 from agentsec.sandbox.policy import Policy, PolicyError, load_yaml_strict
 
 MANIFEST = "manifest.yaml"
@@ -32,7 +33,7 @@ SIGNATURE = "manifest.sig"
 FORMAT = "agentsec-bundle-v1"
 MAX_FILE_BYTES = 1024 * 1024
 
-_ENTRY_KEYS = {"group", "tools", "mode", "models", "output", "input", "mcp"}
+_ENTRY_KEYS = {"group", "tools", "mode", "models", "output", "input", "mcp", "dlp"}
 _OUTPUT_KEYS = {"allowed_hosts", "protected", "stream_mode", "holdback_chars"}
 _MANIFEST_KEYS = {"revision", "created", "expires", "group_policies", "mcp_pins"}
 
@@ -306,8 +307,10 @@ def load_bundle(
         }
         if not all(isinstance(v, bool) for v in flags.values()):
             raise BundleError(f"{where}.input values must be booleans")
-        groups.append(
-            group_policy(
+        try:
+            # fingerprint_key is an env:/file: reference: the bundle is signed, not secret.
+            dlp = DlpPolicy.from_dict(e.get("dlp"))
+            entry = group_policy(
                 group,
                 parsed[tools],
                 mode=mode,
@@ -319,9 +322,12 @@ def load_bundle(
                 stream_mode=stream_mode,
                 holdback_chars=holdback_chars,
                 mcp=mcp,
+                dlp=dlp,
                 **flags,
             )
-        )
+        except ValueError as err:  # DlpConfigError, or settings that conflict
+            raise BundleError(f"{where}: {err}") from None
+        groups.append(entry)
     pins_raw = manifest.get("mcp_pins") or {}
     if not isinstance(pins_raw, dict):
         raise BundleError("mcp_pins must map MCP upstream names to pin files")

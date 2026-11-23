@@ -1163,7 +1163,7 @@ class Gateway:
             token_id=_TOKEN_ID.get(),
         )
         upstream = cfg.upstreams[req["model"]]
-        guard = ToolGuard(gp.policy, audit=log)
+        guard = ToolGuard(gp.policy, audit=log, dlp=gp.dlp)
         mw = AgentMiddleware(
             guard=guard,
             output_guard=gp.output_guard,

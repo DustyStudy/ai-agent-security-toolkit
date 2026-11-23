@@ -97,6 +97,9 @@ class AgentMiddleware:
         # result.text, never the original: what a validator blocked or redacted (a protected
         # string, say, which the audit log's own secret masking does not know) stays out.
         self._log(ev.MODEL_OUTPUT, text=result.text, delivered=result.allowed)
+        for v in result.violations:
+            if v.detail is not None and v.detail.get("surface") is not None:
+                self._log(ev.DLP_MATCH, **v.detail)
         if result.violations:
             self._log(
                 ev.VALIDATION,

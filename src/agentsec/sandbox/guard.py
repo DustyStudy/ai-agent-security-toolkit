@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from agentsec.middleware.dlp import DEFAULT_DLP, DlpMatch, DlpPolicy
 from agentsec.sandbox.policy import Policy, ToolRule, dns_check_enabled
 from agentsec.sandbox.validators import Resolver, check_arg, path_within_roots
 from agentsec.types import ToolCall
@@ -34,6 +35,9 @@ class Decision:
     verdict: Verdict
     tool: str
     reasons: tuple[str, ...] = ()
+    # Sensitive data found in the arguments, described without its value. Audited once, when
+    # the call is evaluated, so later decisions (approval, limits) do not carry it.
+    dlp_matches: tuple[DlpMatch, ...] = field(default=(), compare=False)
 
     @property
     def allowed(self) -> bool:
@@ -95,8 +99,12 @@ class ToolGuard:
         approver: Approver | None = None,
         audit: AuditLogger | None = None,
         resolver: Resolver | None = None,
+        dlp: DlpPolicy | None = DEFAULT_DLP,
     ) -> None:
+        """``dlp`` checks every string in a call's arguments for credentials, non-human
+        identities and PII (see :mod:`agentsec.middleware.dlp`); ``None`` turns that off."""
         self.policy = policy
+        self.dlp = dlp
         self.approver = approver
         self.audit = audit
         self._resolver = resolver
@@ -128,6 +136,15 @@ class ToolGuard:
         if not isinstance(args, dict):
             return Decision(Verdict.DENY, call.name, ("arguments must be an object",))
 
+        found = self.dlp.scan_args(args, call.name) if self.dlp is not None else None
+        dlp = found.matches if found is not None else ()
+
+        def decide(verdict: Verdict, why: tuple[str, ...] = ()) -> Decision:
+            return Decision(verdict, call.name, why, dlp)
+
+        if found is not None and found.blocked:
+            kinds = sorted({m.kind for m in found.matches if m.action == "block"})
+            reasons.append(f"sensitive data in arguments ({', '.join(kinds)})")
         for arg_name in args:
             if arg_name not in rule.args and not rule.allow_extra_args:
                 reasons.append(f"unexpected argument {arg_name!r}")
@@ -145,7 +162,7 @@ class ToolGuard:
         if cap is not None and session.total_calls >= cap:
             reasons.append(f"session total limit of {cap} tool calls reached")
         if reasons:
-            return Decision(Verdict.DENY, call.name, tuple(reasons))
+            return decide(Verdict.DENY, tuple(reasons))
 
         needs_approval: list[str] = []
         if rule.require_approval:
@@ -153,11 +170,11 @@ class ToolGuard:
         why = self._taint_reason(rule, session)
         if why is not None:
             if self.policy.taint.action == "deny":
-                return Decision(Verdict.DENY, call.name, (why,))
+                return decide(Verdict.DENY, (why,))
             needs_approval.append(why)
         if needs_approval:
-            return Decision(Verdict.APPROVE, call.name, tuple(needs_approval))
-        return Decision(Verdict.ALLOW, call.name)
+            return decide(Verdict.APPROVE, tuple(needs_approval))
+        return decide(Verdict.ALLOW)
 
     def _taint_reason(self, rule: ToolRule, session: Session) -> str | None:
         if self.policy.taint.enabled and session.tainted and rule.side_effects:
@@ -240,13 +257,20 @@ class ToolGuard:
 
     def _begin(self, call: ToolCall, session: Session) -> Decision:
         self._audit("tool_request", session, tool=call.name, arguments=call.arguments)
-        return self.evaluate(call, session)
+        return self._audit_dlp(self.evaluate(call, session), session)
 
     async def _abegin(self, call: ToolCall, session: Session) -> Decision:
         self._audit("tool_request", session, tool=call.name, arguments=call.arguments)
         if self._blocking_eval:
-            return await asyncio.to_thread(self.evaluate, call, session)
-        return self.evaluate(call, session)
+            decision = await asyncio.to_thread(self.evaluate, call, session)
+        else:
+            decision = self.evaluate(call, session)
+        return self._audit_dlp(decision, session)
+
+    def _audit_dlp(self, decision: Decision, session: Session) -> Decision:
+        for match in decision.dlp_matches:
+            self._audit("dlp_match", session, **match.audit())
+        return decision
 
     def _resolve_approval(
         self, call: ToolCall, session: Session, decision: Decision, approved: bool | None

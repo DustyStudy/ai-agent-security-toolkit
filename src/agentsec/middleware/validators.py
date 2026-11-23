@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 import jsonschema
 
+from agentsec.middleware.dlp import DEFAULT_DLP, DlpPolicy
 from agentsec.middleware.redact import redact_text
 
 
@@ -32,6 +33,8 @@ class Violation:
     validator: str
     message: str
     action: Action
+    # Structured, value-free description (DLP matches: kind, offset, fingerprint, ...).
+    detail: dict[str, Any] | None = field(default=None, compare=False)
 
 
 class OutputValidator(Protocol):
@@ -99,6 +102,43 @@ class PIIValidator:
             cursor = f.end
         out.append(text[cursor:])
         return "".join(out)
+
+
+_DLP_ACTIONS = {
+    "monitor": Action.WARN,
+    "allowed": Action.WARN,
+    "redact": Action.REDACT,
+    "block": Action.BLOCK,
+}
+
+
+class DlpValidator:
+    """Credentials, non-human identities and PII under a :class:`DlpPolicy` (one pass).
+
+    Violations keep the names of the validators this replaces (``secret_leak`` and ``pii``)
+    and carry the match, without its value, in ``detail``.
+    """
+
+    name = "dlp"
+
+    def __init__(self, policy: DlpPolicy = DEFAULT_DLP, surface: str = "output") -> None:
+        self.policy = policy
+        self.surface = surface
+
+    def check(self, text: str) -> list[Violation]:
+        result = self.policy.scan(text, self.surface)
+        return [
+            Violation(
+                "pii" if m.category == "pii" else "secret_leak",
+                f"{m.kind} detected in {self.surface}",
+                _DLP_ACTIONS[m.action],
+                m.audit(),
+            )
+            for m in result.matches
+        ]
+
+    def sanitize(self, text: str) -> str:
+        return self.policy.scan(text, self.surface).text
 
 
 class ProtectedStringValidator:
@@ -528,12 +568,15 @@ class OutputGuard:
 
     @classmethod
     def default(
-        cls, *, allowed_hosts: Sequence[str] = (), protected: Sequence[str] = ()
+        cls,
+        *,
+        allowed_hosts: Sequence[str] = (),
+        protected: Sequence[str] = (),
+        dlp: DlpPolicy = DEFAULT_DLP,
     ) -> OutputGuard:
-        """Reasonable baseline: secrets, PII, exfil links, dangerous markup."""
+        """Reasonable baseline: secrets and PII (under ``dlp``), exfil links, dangerous markup."""
         validators: list[OutputValidator] = [
-            SecretLeakValidator(),
-            PIIValidator(),
+            DlpValidator(dlp),
             ExfilLinkValidator(allowed_hosts),
             DangerousContentValidator(),
         ]

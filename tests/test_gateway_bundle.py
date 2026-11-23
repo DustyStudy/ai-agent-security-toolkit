@@ -446,3 +446,25 @@ def test_a_tampered_pin_file_fails_the_signature(tmp_path):
 def test_mcp_bundle_settings_are_validated(tmp_path, kw, upstreams, error):
     with pytest.raises(BundleError, match=error):
         load_mcp(mcp_bundle(tmp_path / "b", **kw), mcp_upstreams=upstreams)
+
+
+def bundle_with_group(root, entry):
+    make_bundle(root)
+    with (root / "manifest.yaml").open("a") as f:  # group_policies is the last key
+        f.write(entry)
+    sign_bundle(root, pem(KEY))
+    return root
+
+
+def test_each_bundle_group_carries_its_own_dlp_policy(tmp_path):
+    entry = (
+        "  - group: support\n"
+        "    tools: policies/eng.yaml\n"
+        "    dlp: {categories: {pii: {tool_args: block}}}\n"
+    )
+    policies = load(bundle_with_group(tmp_path / "b", entry))
+    assert policies.resolve(["support"]).dlp.mode("email", "tool_args") == "block"
+    assert policies.resolve(["eng"]).dlp.mode("email", "tool_args") == "monitor"
+    bad = "  - group: x\n    tools: policies/eng.yaml\n    dlp: {categories: {secrets: {}}}\n"
+    with pytest.raises(BundleError, match="secrets|category"):
+        load(bundle_with_group(tmp_path / "c", bad))

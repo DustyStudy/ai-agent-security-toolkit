@@ -79,6 +79,7 @@ _EVENTS: dict[str, str] = {
     "error": "Agent error",
     "mcp_tool_finding": "MCP tool definition finding",
     "mcp_tool_blocked": "MCP tool call blocked",
+    "dlp_match": "Sensitive data detected",
 }
 
 
@@ -92,6 +93,8 @@ def severity(event: str, data: dict[str, Any]) -> int:
         return 8 if data.get("kind") in ("injection", "changed") else 6
     if event == "mcp_tool_blocked":
         return 6
+    if event == "dlp_match":
+        return {"block": 7, "redact": 5}.get(str(data.get("action")), 3)
     if event in ("validation", "error"):
         return 5
     if data.get("blocked") is True:

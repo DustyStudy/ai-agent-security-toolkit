@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import dataclasses
 import hashlib
 import http.client
 import ipaddress
@@ -48,6 +49,7 @@ from agentsec.gateway.dashboard import (
     read_evidence,
     render_dashboard,
 )
+from agentsec.gateway.feeds import FeedSet
 from agentsec.gateway.holdback import Holdback
 from agentsec.gateway.metrics import CountingSink, Metrics
 from agentsec.gateway.oidc import OidcVerifier, TokenRejected, fetch_jwks
@@ -64,7 +66,9 @@ from agentsec.middleware.audit import AuditLogger, AuditSink, FileSink, RetrySin
 from agentsec.middleware.cef import CefSink
 from agentsec.middleware.injection import InjectionScanner
 from agentsec.middleware.pipeline import AgentMiddleware
+from agentsec.middleware.validators import BlocklistLinkValidator, OutputGuard
 from agentsec.sandbox.adapters import parse_openai_tool_call
+from agentsec.sandbox.blocklist import Blocklist
 from agentsec.sandbox.guard import Session, ToolGuard
 from agentsec.sandbox.policy import Policy
 
@@ -558,6 +562,12 @@ class Gateway:
         self._hosts = frozenset(config.allowed_hosts) or loopback_hosts(config.host)
         # The admin listener is for scrapers and probes on this host: no Origin is ever allowed.
         self._admin_hosts = loopback_hosts(config.admin_host)
+        # Verified and parsed at startup: a missing, unsigned or invalid feed refuses to start.
+        self._feeds = (
+            None
+            if config.egress is None
+            else FeedSet(config.egress, wall_clock=wall_clock, clock=clock)
+        )
         self._mcp = None
         if config.mcp_upstreams:
             try:
@@ -568,7 +578,9 @@ class Gateway:
                     '[gateway,mcp]"'
                 ) from e
             extra = {} if mcp_connector is None else {"connector": mcp_connector}
-            self._mcp = McpGateway(config, self._audit, self._scanner, clock=clock, **extra)
+            self._mcp = McpGateway(
+                config, self._audit, self._scanner, clock=clock, blocklist=self._blocklist, **extra
+            )
         self._audit.log(
             "gateway_start",
             policy_rev=config.policies.revision,
@@ -580,6 +592,16 @@ class Gateway:
             # No reviewed pins: these upstreams' tools are trusted as first listed.
             unpinned_mcp_upstreams=unpinned(config.policies, config.mcp_upstreams),
         )
+        for event, data in self._feeds.loaded_events() if self._feeds else ():
+            self._audit.log(event, **data)
+
+    def _blocklist(self) -> Blocklist | None:
+        return None if self._feeds is None else self._feeds.current
+
+    def _refresh_feeds(self) -> None:
+        if self._feeds is not None:
+            for event, data in self._feeds.refresh():
+                self._audit.log(event, **data)
 
     # ------------------------------------------------------------------ ASGI
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -854,7 +876,8 @@ class Gateway:
         await self._off_loop(self._control_pool, self.metrics.flush)
         policies = self._policies
         if path == "/metrics":
-            body = self.metrics.render(policies).encode()
+            ages = {} if self._feeds is None else self._feeds.ages()
+            body = self.metrics.render(policies, ages).encode()
             await send(
                 {
                     "type": "http.response.start",
@@ -884,6 +907,9 @@ class Gateway:
             # Shown so a group left in monitor mode is not forgotten.
             "monitor_groups": [g.group for g in policies.groups if g.mode == "monitor"],
         }
+        if self._feeds is not None:
+            # Still ready: a stale deny list keeps blocking what it listed (on_stale decides).
+            payload["blocklist_stale"] = self._feeds.stale()
         if path == "/dashboard":
             report = await self._off_loop(
                 self._control_pool, load_fuzz_summary, self.config.admin_fuzz_report
@@ -892,7 +918,8 @@ class Gateway:
                 self._control_pool, list_evidence, self.config.admin_evidence_dir
             )
             snap = self.metrics.snapshot()
-            body = render_dashboard(payload, policies, snap, report, listing).encode()
+            feeds = None if self._feeds is None else self._feeds.status()
+            body = render_dashboard(payload, policies, snap, report, listing, feeds).encode()
             await send(
                 {
                     "type": "http.response.start",
@@ -933,6 +960,7 @@ class Gateway:
         return h.hexdigest()
 
     def _maybe_reload(self) -> None:
+        self._refresh_feeds()  # on its own interval; reads files, so also off the event loop
         bundle = self.config.bundle
         if bundle is None or bundle.reload_interval_s == 0:
             return
@@ -1163,7 +1191,17 @@ class Gateway:
             token_id=_TOKEN_ID.get(),
         )
         upstream = cfg.upstreams[req["model"]]
-        guard = ToolGuard(gp.policy, audit=log)
+        blocklist = self._blocklist()  # one read: this request keeps the list it started with
+        if blocklist is not None and cfg.egress is not None and cfg.egress.check_model_links:
+            links = BlocklistLinkValidator(
+                blocklist, lambda fields: log.log("egress_blocked", **fields)
+            )
+            guard_out = OutputGuard(
+                [*gp.output_guard.validators, links],
+                blocked_message=gp.output_guard.blocked_message,
+            )
+            gp = dataclasses.replace(gp, output_guard=guard_out)
+        guard = ToolGuard(gp.policy, audit=log, blocklist=blocklist)
         mw = AgentMiddleware(
             guard=guard,
             output_guard=gp.output_guard,

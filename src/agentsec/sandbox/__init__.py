@@ -6,6 +6,7 @@ from agentsec.sandbox.adapters import (
     run_anthropic_tool_uses,
     run_openai_tool_calls,
 )
+from agentsec.sandbox.blocklist import Blocklist
 from agentsec.sandbox.guard import Decision, Session, ToolDenied, ToolGuard, Verdict
 from agentsec.sandbox.policy import ArgRule, Policy, PolicyError, TaintPolicy, ToolRule
 from agentsec.sandbox.subprocess_runner import (
@@ -17,6 +18,7 @@ from agentsec.sandbox.subprocess_runner import (
 
 __all__ = [
     "ArgRule",
+    "Blocklist",
     "CommandDenied",
     "Decision",
     "ExecRule",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import functools
+import hashlib
 import inspect
 import threading
 import uuid
@@ -21,6 +22,7 @@ from agentsec.types import ToolCall
 
 if TYPE_CHECKING:
     from agentsec.middleware.audit import AuditLogger
+    from agentsec.sandbox.blocklist import Blocklist
 
 
 class Verdict(StrEnum):
@@ -34,6 +36,8 @@ class Decision:
     verdict: Verdict
     tool: str
     reasons: tuple[str, ...] = ()
+    # Blocklist matches behind a deny, as audit fields (never the URL itself).
+    egress: tuple[dict[str, Any], ...] = field(default=(), compare=False, hash=False, repr=False)
 
     @property
     def allowed(self) -> bool:
@@ -95,20 +99,33 @@ class ToolGuard:
         approver: Approver | None = None,
         audit: AuditLogger | None = None,
         resolver: Resolver | None = None,
+        blocklist: Blocklist | None = None,
     ) -> None:
         self.policy = policy
         self.approver = approver
         self.audit = audit
         self._resolver = resolver
+        # Public so a long-lived guard can be handed a refreshed list (an immutable swap).
+        self.blocklist = blocklist
+        self._has_url_args = any(
+            arg.type == "url" for rule in policy.tools.values() for arg in rule.args.values()
+        )
         # A DNS-resolving URL rule (or a custom resolver) does blocking I/O inside evaluate(),
         # so the async API runs evaluation in a worker thread instead of on the event loop.
-        self._blocking_eval = resolver is not None or any(
+        self._blocking_eval_policy = resolver is not None or any(
             arg.type == "url" and dns_check_enabled(arg)
             for rule in policy.tools.values()
             for arg in rule.args.values()
         )
         self._lock = _COMMIT_LOCK
         self.default_session = Session()
+
+    @property
+    def _blocking_eval(self) -> bool:
+        bl = self.blocklist
+        return self._blocking_eval_policy or (
+            bl is not None and bl.needs_dns and self._has_url_args
+        )
 
     # ------------------------------------------------------------- evaluation
     def evaluate(self, call: ToolCall, session: Session | None = None) -> Decision:
@@ -131,13 +148,25 @@ class ToolGuard:
         for arg_name in args:
             if arg_name not in rule.args and not rule.allow_extra_args:
                 reasons.append(f"unexpected argument {arg_name!r}")
+        egress: list[dict[str, Any]] = []
+        blocklist = self.blocklist  # one read: a refresh mid-call must not mix two lists
         for arg_name, arg_rule in rule.args.items():
             if arg_name not in args:
                 if arg_rule.required:
                     reasons.append(f"missing required argument {arg_name!r}")
                 continue
-            for err in check_arg(args[arg_name], arg_rule, resolver=self._resolver):
+            hits: list[dict[str, Any]] = []
+            for err in check_arg(
+                args[arg_name], arg_rule, resolver=self._resolver, blocklist=blocklist, hits=hits
+            ):
                 reasons.append(f"argument {arg_name!r}: {err}")
+            url = args[arg_name]
+            for hit in hits:
+                digest = hashlib.sha256(url.encode("utf-8", "surrogatepass")).hexdigest()
+                egress.append(
+                    {"source": "tool_call", "tool": call.name, "argument": arg_name,
+                     "url_sha256": digest, **hit}
+                )  # fmt: skip
 
         if rule.max_calls is not None and session.calls[call.name] >= rule.max_calls:
             reasons.append(f"per-session limit of {rule.max_calls} calls reached")
@@ -145,7 +174,7 @@ class ToolGuard:
         if cap is not None and session.total_calls >= cap:
             reasons.append(f"session total limit of {cap} tool calls reached")
         if reasons:
-            return Decision(Verdict.DENY, call.name, tuple(reasons))
+            return Decision(Verdict.DENY, call.name, tuple(reasons), egress=tuple(egress))
 
         needs_approval: list[str] = []
         if rule.require_approval:
@@ -238,12 +267,29 @@ class ToolGuard:
         reason = f"approver failed ({type(exc).__name__}); refused"
         return Decision(Verdict.DENY, call.name, (*decision.reasons, reason))
 
+    def logged_arguments(self, call: ToolCall) -> Any:
+        """Arguments as audited: URL arguments become ``sha256:<hex>``, whatever log_content says.
+
+        Query strings carry tokens and personal data, and short strings are kept verbatim even
+        with log_content off, so a URL argument is never written to the audit trail.
+        """
+        rule = self.policy.tools.get(call.name) if isinstance(call.name, str) else None
+        args = call.arguments
+        if rule is None or not isinstance(args, dict):
+            return args
+        return {
+            k: "sha256:" + hashlib.sha256(v.encode("utf-8", "surrogatepass")).hexdigest()
+            if isinstance(v, str) and k in rule.args and rule.args[k].type == "url"
+            else v
+            for k, v in args.items()
+        }
+
     def _begin(self, call: ToolCall, session: Session) -> Decision:
-        self._audit("tool_request", session, tool=call.name, arguments=call.arguments)
+        self._audit("tool_request", session, tool=call.name, arguments=self.logged_arguments(call))
         return self.evaluate(call, session)
 
     async def _abegin(self, call: ToolCall, session: Session) -> Decision:
-        self._audit("tool_request", session, tool=call.name, arguments=call.arguments)
+        self._audit("tool_request", session, tool=call.name, arguments=self.logged_arguments(call))
         if self._blocking_eval:
             return await asyncio.to_thread(self.evaluate, call, session)
         return self.evaluate(call, session)
@@ -285,6 +331,8 @@ class ToolGuard:
                     # cancelled: it may already have fetched attacker-controlled content.
                     if rule.returns_untrusted:
                         session.mark_untrusted(call.name)
+        for record in decision.egress:
+            self._audit("egress_blocked", session, **record)
         self._audit(
             "tool_decision",
             session,

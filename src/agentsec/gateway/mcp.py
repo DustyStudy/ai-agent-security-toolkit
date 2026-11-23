@@ -386,7 +386,7 @@ class McpGateway:
                 # this request's rules only
                 ToolGuard(
                     caller.gp.policy,
-                    audit=state.audit,
+                    audit=state.audit.bind(email_key=caller.gp.dlp.fingerprint_key),
                     blocklist=self._blocklist(),
                     dlp=caller.gp.dlp,
                 ),
@@ -452,7 +452,8 @@ class McpGateway:
             state.audit.log("gateway_mcp_upstream_error", upstream=upstream, error=_reason(e))
             return self._error("upstream error")
         state.audit.log("gateway_mcp_call", tool=name, allowed=True, token_id=caller.token_id)
-        return self._screen(result, caller.gp, name, state.audit)
+        log = state.audit.bind(email_key=caller.gp.dlp.fingerprint_key)
+        return self._screen(result, caller.gp, name, log)
 
     def _screen(self, result: Any, gp: GroupPolicy, name: str, log: AuditLogger) -> Any:
         """What the client gets for an upstream result: scanned, redacted, or withheld.
@@ -462,9 +463,10 @@ class McpGateway:
         marks text as data, and ``mode: monitor`` records what enforce would have done.
         """
         enforce = gp.mode == "enforce"
-        # Secrets and protected strings only, as for tool arguments: PII, links and markup are
-        # what a search or a file read normally returns.
-        guard = gp.argument_guard
+        # DLP on the tool_results surface (by default secrets redacted, PII only recorded: PII,
+        # links and markup are what a search or a file read normally returns) and protected
+        # strings.
+        guard = gp.result_guard
         try:
             text, as_json, binary = _scannable(result)
             scan = self._scanner.scan(text)
@@ -474,17 +476,19 @@ class McpGateway:
                 why.append("result too large to scan")
             else:
                 found = guard.process(text + "\n" + as_json).violations
+                self._log_dlp(found, len(text), name, log, enforce)
             if scan.flagged and gp.block_on_injection:
                 why.append(f"injection signals: {', '.join(scan.signals)}")
             if any(v.action == Action.BLOCK for v in found):
                 why.append("output policy")
             out = result
             if not (why and enforce):
-                redact = enforce and bool(found)
+                redact = enforce and any(v.action == Action.REDACT for v in found)
                 out = self._rewritten(result, guard if redact else None, gp.spotlight_tool_results)
                 clean, clean_json, _ = _scannable(out)
                 # A secret where nothing is rewritten (a key, a URI, _meta) is still there.
-                if redact and guard.process(clean + "\n" + clean_json).violations:
+                left = guard.process(clean + "\n" + clean_json).violations if redact else []
+                if any(v.action != Action.WARN for v in left):
                     why.append("could not be fully redacted")
         except Exception as e:  # noqa: BLE001 - fail closed, in monitor mode too: nothing was checked
             log.log("gateway_mcp_result", tool=name, withheld=True, error=_reason(e), enforced=True)
@@ -503,6 +507,24 @@ class McpGateway:
         if why and enforce:
             return self._error(f"tool result withheld by policy: {'; '.join(why)}")
         return out
+
+    @staticmethod
+    def _log_dlp(
+        found: list[Violation], text_len: int, tool: str, log: AuditLogger, enforce: bool
+    ) -> None:
+        """One dlp_match per finding. The scan covers the result's strings and then the same
+        result as JSON; a JSON-only finding (an assignment across a key) is kept, a repeat of
+        one already seen in the strings is not."""
+        seen: set[str] = set()
+        for v in found:
+            d = v.detail
+            if d is None or d.get("surface") is None:
+                continue
+            in_text = int(d.get("offset", 0)) < text_len
+            if not in_text and d.get("kind") in seen:
+                continue
+            seen.add(str(d.get("kind")))
+            log.log("dlp_match", **{**d, "tool": tool, "enforced": enforce})
 
     def _rewritten(self, result: Any, guard: OutputGuard | None, mark: bool) -> Any:
         """A copy with secrets redacted (when ``guard`` is given) and text blocks spotlighted."""

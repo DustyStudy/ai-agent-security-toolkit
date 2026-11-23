@@ -1,10 +1,11 @@
-"""Outbound screening: secrets in the request the gateway is about to send to a model upstream."""
+"""Outbound screening: sensitive data in the request the gateway is about to send upstream."""
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
-from agentsec.middleware import redact_text
+from agentsec.middleware.dlp import CATEGORY_OF, DlpMatch, DlpPolicy
 
 MODES = ("off", "block", "redact")
 
@@ -20,18 +21,36 @@ def attachments(messages: list[dict[str, Any]]) -> list[str]:
     ]
 
 
-def scrub(value: Any, path: str, hits: list[tuple[str, str]]) -> Any:
-    """Copy of ``value`` with secrets in every string replaced; ``hits`` gets (path, kind).
+def upstream_policy(dlp: DlpPolicy, cred_mode: str, pii_mode: str) -> DlpPolicy:
+    """``dlp`` with an upstream's ``outbound.on_secret`` / ``on_pii`` overriding the
+    ``upstream`` surface ("off" keeps the group's own modes)."""
+    if cred_mode == "off" and pii_mode == "off":
+        return dlp
+    modes = {k: dict(v) for k, v in dlp.modes.items()}
+    kinds = {k: dict(v) for k, v in dlp.kind_modes.items()}
+    if cred_mode != "off":
+        modes["credentials"]["upstream"] = modes["nhi"]["upstream"] = cred_mode
+    if pii_mode != "off":
+        modes["pii"]["upstream"] = pii_mode
+        for kind, override in kinds.items():
+            if CATEGORY_OF.get(kind) == "pii":
+                override.pop("upstream", None)
+    return dataclasses.replace(dlp, modes=modes, kind_modes=kinds)
+
+
+def screen(value: Any, path: str, policy: DlpPolicy, hits: list[DlpMatch]) -> Any:
+    """Copy of ``value`` with every string scanned on the ``upstream`` surface and redacted
+    where its mode says so; ``hits`` gets each match with its request path, never the value.
 
     Walks the whole request: all roles, history, tool_calls arguments, tool results, tool
-    definitions. Only PII-free secret rules apply; the secret itself is never recorded.
+    definitions.
     """
     if isinstance(value, str):
-        text, found = redact_text(value, include_pii=False)
-        hits += [(path, f.kind) for f in found]
-        return text
+        result = policy.scan(value, "upstream")
+        hits += [dataclasses.replace(m, location=path) for m in result.matches]
+        return result.text
     if isinstance(value, list):
-        return [scrub(v, f"{path}[{i}]", hits) for i, v in enumerate(value)]
+        return [screen(v, f"{path}[{i}]", policy, hits) for i, v in enumerate(value)]
     if isinstance(value, dict):
-        return {k: scrub(v, f"{path}.{k}", hits) for k, v in value.items()}
+        return {k: screen(v, f"{path}.{k}", policy, hits) for k, v in value.items()}
     return value

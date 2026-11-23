@@ -170,18 +170,20 @@ class AllowEntry:
     surfaces: frozenset[str] = frozenset(SURFACES)
     tools: frozenset[str] | None = None
     email_domain: str | None = None
-    sha256: str | None = None
+    hmac_sha256: str | None = None  # under the policy's fingerprint_key
     pattern: re.Pattern[str] | None = None
 
-    def matches(self, value: str, kind: str, surface: str, tool: str | None, today: date) -> bool:
+    def matches(
+        self, value: str, kind: str, surface: str, tool: str | None, today: date, key: bytes
+    ) -> bool:
         if today > self.expires or kind not in self.kinds or surface not in self.surfaces:
             return False
         if self.tools is not None and tool not in self.tools:
             return False
         if self.email_domain is not None:
             return value.rpartition("@")[2].lower() == self.email_domain
-        if self.sha256 is not None:
-            return hmac.compare_digest(hashlib.sha256(value.encode()).hexdigest(), self.sha256)
+        if self.hmac_sha256 is not None:
+            return hmac.compare_digest(allow_digest(key, value), self.hmac_sha256)
         return self.pattern is not None and self.pattern.fullmatch(value) is not None
 
 
@@ -264,9 +266,9 @@ class DlpPolicy:
         if ref is not None:
             if not isinstance(ref, str):
                 raise DlpConfigError("dlp.fingerprint_key must be 'env:NAME' or 'file:/path'")
-            key = (resolve_secret or _resolve)(ref).encode()
-            if len(key) < 32:
-                raise DlpConfigError("dlp.fingerprint_key must be at least 32 bytes")
+            key = resolve_key(ref, resolve_secret)
+        if key is None and any(e.hmac_sha256 for e in allow):
+            raise DlpConfigError("dlp.allow: match.hmac_sha256 needs dlp.fingerprint_key")
         return cls(modes, kind_modes, allow, key, clock, detectors, custom)
 
     # ------------------------------------------------------------------ checks
@@ -341,7 +343,7 @@ class DlpPolicy:
         if _builtin(value, kind):
             return "builtin"
         for entry in self.allow:
-            if entry.matches(value, kind, surface, tool, today):
+            if entry.matches(value, kind, surface, tool, today, self.fingerprint_key or b""):
                 return entry.id
         return None
 
@@ -438,7 +440,9 @@ def _allow_entry(entry: Any, i: int, today: date, category_of: dict[str, str]) -
     tools = None if entry.get("tools") is None else _names(entry["tools"], f"{where}.tools")
     match = entry.get("match")
     if not isinstance(match, dict) or len(match) != 1:
-        raise DlpConfigError(f"{where}.match takes exactly one of email_domain, sha256, pattern")
+        raise DlpConfigError(
+            f"{where}.match takes exactly one of email_domain, hmac_sha256, pattern"
+        )
     ((how, value),) = match.items()
     if not isinstance(value, str) or not value:
         raise DlpConfigError(f"{where}.match.{how} must be a non-empty string")
@@ -448,19 +452,27 @@ def _allow_entry(entry: Any, i: int, today: date, category_of: dict[str, str]) -
             raise DlpConfigError(f"{where}: email_domain only applies to kinds [email]")
         fields["email_domain"] = value.lower().rstrip(".")
     elif how == "sha256":
+        # A plain hash of a password, SSN or card number is reversed by trying every value.
+        raise DlpConfigError(
+            f"{where}.match.sha256 is not accepted: use hmac_sha256 from "
+            "'agentsec dlp hash --key <fingerprint_key>'"
+        )
+    elif how == "hmac_sha256":
         if not re.fullmatch(r"[0-9a-f]{64}", value):
-            raise DlpConfigError(f"{where}.match.sha256 must be 64 lowercase hex characters")
-        fields["sha256"] = value
+            raise DlpConfigError(f"{where}.match.hmac_sha256 must be 64 lowercase hex characters")
+        fields["hmac_sha256"] = value
     elif how == "pattern":
         # A pattern broad enough to be useful for a credential is an off switch.
         if any(category_of[k] != "pii" for k in kinds):
-            raise DlpConfigError(f"{where}: pattern is for pii kinds only; use sha256")
+            raise DlpConfigError(f"{where}: pattern is for pii kinds only; use hmac_sha256")
         try:
             fields["pattern"] = re.compile(value)
         except re.error as e:
             raise DlpConfigError(f"{where}.match.pattern: {e}") from None
     else:
-        raise DlpConfigError(f"{where}.match takes exactly one of email_domain, sha256, pattern")
+        raise DlpConfigError(
+            f"{where}.match takes exactly one of email_domain, hmac_sha256, pattern"
+        )
     return AllowEntry(
         id=_text(entry, "id", where),
         reason=_text(entry, "reason", where),
@@ -471,6 +483,19 @@ def _allow_entry(entry: Any, i: int, today: date, category_of: dict[str, str]) -
         tools=tools,
         **fields,
     )
+
+
+def allow_digest(key: bytes, value: str) -> str:
+    """What ``match.hmac_sha256`` holds: the full HMAC-SHA256 of the exact matched span."""
+    return hmac.new(key, value.encode(), hashlib.sha256).hexdigest()
+
+
+def resolve_key(ref: str, resolve_secret: Callable[[str], str] | None = None) -> bytes:
+    """``fingerprint_key``: an ``env:NAME`` or ``file:/path`` reference, at least 32 bytes."""
+    key = (resolve_secret or _resolve)(ref).encode()
+    if len(key) < 32:
+        raise DlpConfigError("dlp.fingerprint_key must be at least 32 bytes")
+    return key
 
 
 def _builtin(value: str, kind: str) -> bool:

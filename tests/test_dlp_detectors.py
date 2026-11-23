@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 
@@ -10,7 +9,7 @@ import pytest
 
 from agentsec.gateway.policyset import group_policy
 from agentsec.middleware.audit import AuditLogger, MemorySink
-from agentsec.middleware.dlp import DlpConfigError, DlpPolicy
+from agentsec.middleware.dlp import DlpConfigError, DlpPolicy, allow_digest
 from agentsec.sandbox.policy import Policy
 from tests.test_dlp_phase2 import app_with, chat_with, dlp_records
 from tests.test_gateway import call
@@ -66,17 +65,22 @@ def test_a_pii_custom_detector_and_per_kind_overrides():
     assert p.scan("staff E654321", "tool_args").action == "monitor"
 
 
-def test_allowlisting_a_custom_kind_needs_sha256_for_credentials():
+def test_allowlisting_a_custom_kind_needs_a_keyed_hash_for_credentials():
     entry = {
         "id": "fixture", "reason": "test fixture", "owner": "sec", "expires": "2026-12-31",
         "kinds": ["acme_service_token"],
-        "match": {"sha256": hashlib.sha256(TOKEN.encode()).hexdigest()},
+        "match": {"hmac_sha256": allow_digest(b"k" * 32, TOKEN)},
     }  # fmt: skip
-    p = policy(allow=[entry])
+    p = DlpPolicy.from_dict(
+        {"detectors": [detector()], "allow": [entry], "fingerprint_key": "env:K"},
+        resolve_secret=lambda ref: "k" * 32,
+    )
     (m,) = p.scan(f"k {TOKEN}", "output").matches
     assert (m.action, m.allowed_by) == ("allowed", "fixture")
     with pytest.raises(DlpConfigError, match="pii kinds only"):
-        policy(allow=[entry | {"match": {"pattern": "acme_.*"}}])
+        DlpPolicy.from_dict(
+            {"detectors": [detector()], "allow": [entry | {"match": {"pattern": "acme_.*"}}]}
+        )
 
 
 @pytest.mark.parametrize(

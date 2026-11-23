@@ -149,11 +149,11 @@ dlp:
       tools: [send_email]             # optional, tool_args/tool_results only
       match:                          # exactly one of:
         email_domain: support.example.com
-        # sha256: "<hex of the exact matched value>"   for a specific token or number
+        # hmac_sha256: "<hex>"   keyed hash of the exact matched value, for a specific token or number
         # pattern: '...'                                pii kinds only, full match
 ```
 
-- **No plaintext secrets in config.** A specific credential or NHI value can only be allowlisted by `sha256` of the matched span (`agentsec dlp hash` reads it from stdin and prints the hash). `pattern` is refused for `credentials` and `nhi`, because a pattern broad enough to be useful there is an off switch.
+- **No plaintext secrets in config.** A specific credential or NHI value can only be allowlisted by `hmac_sha256` of the matched span under `fingerprint_key` (`agentsec dlp hash --key <ref>` reads it from stdin and prints the digest). An unkeyed `sha256` was the first design and is refused: like the fingerprint, a plain hash of a password, SSN or card number is reversed by brute force. `pattern` is refused for `credentials` and `nhi`, because a pattern broad enough to be useful there is an off switch.
 - **Expiry is enforced.** An expired entry stops matching and the gateway audits `dlp_allow_expired` once per reload; `agentsec policy check` warns 14 days ahead. The limit keeps forgotten exceptions from becoming permanent holes.
 - **Every allowlisted hit is audited** as a `dlp_match` with `action: allowed` and `allowed_by: <id>`. The allowlist suppresses the action, never the record.
 - **Changes are reviewable.** The allowlist lives in the signed policy bundle, so every change has a revision and a signature, and `policy_rev` on each request ties a decision to the allowlist that made it.
@@ -210,7 +210,7 @@ All hermetic. Every secret-looking test value is built at test time (concatenati
 - **Mode matrix**: for each surface × category × mode × group mode (`enforce`/`monitor`), assert what the client, the tool or the upstream receives and what the audit says. Includes strictest-wins with mixed findings, `redact` under `tool_args` behaving as block, and per-kind overrides.
 - **Fail closed**: redaction that leaves a finding is blocked; over-limit strings and units under each mode; a detector that raises.
 - **Paths**: the same secret in a tool argument is denied on the gateway model path, the gateway MCP path (no upstream call is made) and through `ToolGuard` directly; holdback streaming with a card number and an email split across chunks.
-- **Allowlist**: scope by kind, surface and tool; `sha256` and `email_domain` and `pattern` matching; `pattern` refused for credentials/NHI; expired entries stop matching and are audited; built-in examples audited as allowed; an allowlisted value next to a real one still catches the real one.
+- **Allowlist**: scope by kind, surface and tool; `hmac_sha256` and `email_domain` and `pattern` matching; `pattern` refused for credentials/NHI; expired entries stop matching and are audited; built-in examples audited as allowed; an allowlisted value next to a real one still catches the real one.
 - **No value in audit**: run every test above with a file sink, then search the raw log bytes for each sensitive value, its first and last four characters, and its base64 and hex forms. Any hit fails.
 - **Fingerprint**: stable for one key, different across keys, absent without a key, and the key itself never logged.
 - **Backward compatibility**: the existing `tests/test_redact_and_validators.py`, `tests/test_audit*.py` and gateway suites pass unchanged with no `dlp` section, except the tests that assert the two closed gaps, which are updated deliberately.

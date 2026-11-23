@@ -77,6 +77,7 @@ class GatewayConfig:
     admin_port: int | None = None  # set: /metrics and /readyz on admin_host:admin_port
     admin_host: str = "127.0.0.1"
     admin_fuzz_report: str | None = None  # an `agentsec fuzz --json` file shown on /dashboard
+    admin_evidence_dir: str | None = None  # docs/evidence-style folder linked from /dashboard
     bundle: BundleSettings | None = None  # set: policies come from a signed bundle
     log_content: bool = False
     cef_file: str | None = None
@@ -133,7 +134,7 @@ _SECTIONS: dict[str, set[str]] = {
         "allowed_hosts",
         "allowed_origins",
     },
-    "admin": {"host", "port", "fuzz_report"},
+    "admin": {"host", "port", "fuzz_report", "evidence_dir"},
     "tls": {"cert_file", "key_file"},
     "identity": {
         "mode",
@@ -466,6 +467,7 @@ def load_config(path: str | Path) -> GatewayConfig:
     admin_host = _typed(admin.get("host", "127.0.0.1"), str, "admin.host")
     admin_port = None if not admin else _typed(admin.get("port"), int, "admin.port")
     fuzz_report = admin.get("fuzz_report")
+    evidence_dir = admin.get("evidence_dir")
     try:
         # An IP literal, not "localhost": a resolver could map that name to another interface.
         admin_loopback = ipaddress.ip_address(admin_host).is_loopback
@@ -587,6 +589,9 @@ def load_config(path: str | Path) -> GatewayConfig:
         admin_fuzz_report=None
         if fuzz_report is None
         else str(base / _typed(fuzz_report, str, "admin.fuzz_report")),
+        admin_evidence_dir=None
+        if evidence_dir is None
+        else str(base / _typed(evidence_dir, str, "admin.evidence_dir")),
         log_content=_typed(audit.get("log_content", False), bool, "audit.log_content"),
         cef_file=None if cef_file is None else str(base / _typed(cef_file, str, "cef_file")),
         max_body_bytes=_positive(limits, "max_body_bytes", 1024 * 1024),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -25,13 +26,13 @@ def admin(app, path="/dashboard", method="GET", headers=()):
         sent.append(message)
 
     asyncio.run(app.admin(scope, receive, send))
-    body = b"".join(m.get("body", b"") for m in sent[1:]).decode()
+    body = b"".join(m.get("body", b"") for m in sent[1:]).decode(errors="replace")
     return sent[0]["status"], dict(sent[0]["headers"]), body
 
 
 def report(tmp_path, **over):
     data = {
-        "generated_at": "2026-11-22T00:00:00+00:00", "seed": 1, "total": 10, "successes": 1,
+        "generated_at": datetime.now(UTC).isoformat(), "seed": 1, "total": 10, "successes": 1,
         "blocked": 9, "errors": 0, "asr": 0.1,
         "by_category": {"exfiltration": {"cases": 10, "successes": 1, "asr": 0.1}},
         "results": [{"payload": f"leak {CANARY}", "response": f"here is {CANARY}"}],
@@ -129,3 +130,73 @@ def test_a_bad_or_missing_report_does_not_break_the_page(tmp_path, content):
     status, _, html = admin(app)
     assert status == 200
     assert "report unreadable" in html or "not a fuzz report" in html
+
+
+@pytest.mark.parametrize(
+    ("generated_at", "stale"),
+    [
+        (lambda: datetime.now(UTC).isoformat(), False),
+        (lambda: (datetime.now(UTC) - timedelta(days=2)).isoformat(), True),
+        (lambda: "not a time", True),
+    ],
+)
+def test_an_old_fuzz_report_is_flagged_stale(tmp_path, generated_at, stale):
+    app, _ = gateway(tmp_path, extra=report(tmp_path, generated_at=generated_at()))
+    assert ('class="pill bad">stale<' in admin(app)[2]) is stale
+
+
+def evidence(tmp_path):
+    rel = tmp_path / "evidence" / "v0.12.0"
+    rel.mkdir(parents=True)
+    (rel / "tests.html").write_text("<html><body>tests PASS</body></html>")
+    (rel / "tests.png").write_bytes(b"\x89PNG fake")
+    (rel / "tests.md").write_text("markdown")  # not served: the HTML page is the view
+    (tmp_path / "secret.html").write_text(CANARY)
+    (rel / "link.html").symlink_to(tmp_path / "secret.html")
+    return "admin: {port: 9090, evidence_dir: evidence}\n"
+
+
+def test_dashboard_links_evidence_reports_and_serves_them_locked_down(tmp_path):
+    app, _ = gateway(tmp_path, extra=evidence(tmp_path))
+    html = admin(app)[2]
+    assert 'href="/evidence/v0.12.0/tests.html"' in html
+    assert 'href="/evidence/v0.12.0/tests.png"' in html
+    assert "tests.md" not in html and "link.html" not in html
+    status, headers, body = admin(app, "/evidence/v0.12.0/tests.html")
+    assert (status, body) == (200, "<html><body>tests PASS</body></html>")
+    assert headers[b"content-type"] == b"text/html; charset=utf-8"
+    assert b"default-src 'none'" in headers[b"content-security-policy"]
+    assert admin(app, "/evidence/v0.12.0/tests.png")[1][b"content-type"] == b"image/png"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/evidence/v0.12.0/link.html",  # symlink out of the folder
+        "/evidence/v0.12.0/tests.md",
+        "/evidence/../secret.html",
+        "/evidence/v0.12.0/../../secret.html",
+        "/evidence/v0.12.0/..",
+        "/evidence/..",
+        "/evidence/v0.12.0",
+        "/evidence/v0.12.0/",
+        "/evidence/v0.12.0/missing.html",
+        "/evidence/v0.12.0/sub/tests.html",
+        "/evidence/.v/tests.html",
+        "/evidence//etc/passwd",
+        "/evidence/v0.12.0/tests.html/",
+    ],
+)
+def test_evidence_serves_nothing_outside_its_allowlist(tmp_path, path):
+    app, _ = gateway(tmp_path, extra=evidence(tmp_path))
+    status, _, body = admin(app, path)
+    assert status == 404
+    assert CANARY not in body
+
+
+def test_evidence_is_get_only_and_off_without_config(tmp_path):
+    app, _ = gateway(tmp_path, extra=evidence(tmp_path))
+    assert admin(app, "/evidence/v0.12.0/tests.html", method="POST")[0] == 404
+    app, _ = gateway(tmp_path)
+    assert admin(app, "/evidence/v0.12.0/tests.html")[0] == 404
+    assert "admin.evidence_dir" in admin(app)[2]

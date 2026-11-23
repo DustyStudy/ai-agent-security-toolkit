@@ -1,7 +1,8 @@
 """A read-only HTML status page for the admin listener (``GET /dashboard``).
 
 It shows what /readyz and /metrics already expose, the policy group names and modes, and the
-summary of one fuzz report. Rendered on the server with no JavaScript: the page reloads
+summary of one fuzz report (flagged stale after a day), and links to the evidence pages in
+``admin.evidence_dir``. Rendered on the server with no JavaScript: the page reloads
 itself every few seconds, and a strict CSP forbids scripts, frames, forms and every fetch.
 
 The fuzz report is read through an allowlist of summary fields. Its per-case ``results`` (the
@@ -13,6 +14,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
+from datetime import UTC, datetime, timedelta
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -23,6 +26,10 @@ _LOG = logging.getLogger("agentsec.gateway")
 
 REFRESH_S = 5
 MAX_REPORT_BYTES = 50 * 1024 * 1024  # a fuzz report this size is not one we wrote
+STALE_AFTER = timedelta(days=1)
+# Evidence files served from admin.evidence_dir: <release>/<file>, one level, plain names only.
+EVIDENCE_TYPES = {".html": b"text/html; charset=utf-8", ".png": b"image/png"}
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 DASHBOARD_HEADERS = [
     (b"cache-control", b"no-store"),
@@ -55,6 +62,7 @@ def load_fuzz_summary(path: str | None) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return {"error": "not a fuzz report"}
     summary: dict[str, Any] = {k: data.get(k) for k in _SUMMARY_FIELDS}
+    summary["stale"] = _stale(data.get("generated_at"))
     cats = data.get("by_category")
     summary["by_category"] = {
         str(name): {k: row.get(k) for k in ("cases", "successes", "asr")}
@@ -64,11 +72,68 @@ def load_fuzz_summary(path: str | None) -> dict[str, Any] | None:
     return summary
 
 
+def _stale(generated_at: Any) -> bool:
+    """Older than STALE_AFTER, or a time that cannot be read (so it cannot vouch for itself)."""
+    try:
+        when = datetime.fromisoformat(str(generated_at))
+    except ValueError:
+        return True
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return datetime.now(UTC) - when > STALE_AFTER
+
+
+def list_evidence(root: str | None) -> list[tuple[str, list[str]]] | None:
+    """Release folders under ``root`` (newest name first) and the files /evidence can serve."""
+    if root is None:
+        return None
+    try:
+        releases = [d for d in Path(root).iterdir() if d.is_dir() and _NAME.fullmatch(d.name)]
+        return [
+            (d.name, sorted(f.name for f in d.iterdir() if _servable(Path(root), d.name, f.name)))
+            for d in sorted(releases, key=lambda d: d.name, reverse=True)
+        ]
+    except OSError as e:
+        _LOG.warning("dashboard: cannot list evidence: %s", type(e).__name__)
+        return []
+
+
+def read_evidence(root: str | None, path: str) -> tuple[bytes, bytes] | None:
+    """(content type, body) for ``/evidence/<release>/<file>``, or None for anything else."""
+    parts = path.removeprefix("/evidence/").split("/")
+    if root is None or len(parts) != 2 or not _servable(Path(root), *parts):
+        return None
+    try:
+        return EVIDENCE_TYPES[Path(parts[1]).suffix], (
+            Path(root) / parts[0] / parts[1]
+        ).read_bytes()
+    except OSError:
+        return None
+
+
+def _servable(root: Path, release: str, name: str) -> bool:
+    if not (_NAME.fullmatch(release) and _NAME.fullmatch(name)) or ".." in release + name:
+        return False
+    if Path(name).suffix not in EVIDENCE_TYPES:
+        return False
+    try:
+        f = (root / release / name).resolve(strict=True)
+        # resolve() follows symlinks: a link out of the evidence folder is refused.
+        return (
+            f.is_relative_to(root.resolve(strict=True))
+            and f.is_file()
+            and f.stat().st_size <= MAX_REPORT_BYTES
+        )
+    except OSError:
+        return False
+
+
 def render_dashboard(
     ready: dict[str, Any],
     policies: PolicySet,
     snap: dict[str, Any],
     report: dict[str, Any] | None,
+    evidence: list[tuple[str, list[str]]] | None = None,
 ) -> str:
     status = str(ready["status"])
     events: dict[str, int] = snap["events"]
@@ -103,6 +168,7 @@ expires {_e(expires)}.</p>
 <section><h2>Audit events</h2>{_table(("Event", "Count"), sorted(events.items()))}</section>
 <section><h2>Responses</h2>{_table(("Status", "Count"), sorted(responses.items()))}</section>
 <section><h2>Containment (fuzz report)</h2>{_report(report)}</section>
+<section><h2>Evidence reports</h2>{_evidence(evidence)}</section>
 </main></body></html>
 """
 
@@ -115,7 +181,13 @@ def _report(report: dict[str, Any] | None) -> str:
         )
     if "error" in report:
         return f'<p class="bad-text">{_e(report["error"])}</p>'
-    head = _table(
+    stale = (
+        f'<p><span class="pill bad">stale</span> Generated more than {STALE_AFTER.days} day ago '
+        "(or at an unreadable time). Re-run <code>agentsec fuzz --json</code>.</p>"
+        if report["stale"]
+        else ""
+    )
+    head = stale + _table(
         ("Generated", "Cases", "Blocked", "Bypasses", "Errors", "Attack success rate"),
         [(report["generated_at"], report["total"], report["blocked"], report["successes"],
           report["errors"], _pct(report["asr"]))],
@@ -124,6 +196,24 @@ def _report(report: dict[str, Any] | None) -> str:
         (n, r["cases"], r["successes"], _pct(r["asr"])) for n, r in report["by_category"].items()
     ]
     return head + _table(("Category", "Cases", "Bypasses", "Attack success rate"), rows)
+
+
+def _evidence(evidence: list[tuple[str, list[str]]] | None) -> str:
+    if evidence is None:
+        return (
+            '<p class="muted">None configured. Set <code>admin.evidence_dir</code> to a folder '
+            "such as <code>docs/evidence</code>.</p>"
+        )
+    rows = [
+        "<tr><td>" + _e(rel) + "</td><td>"
+        + " · ".join(f'<a href="/evidence/{_e(rel)}/{_e(f)}">{_e(f)}</a>' for f in files)
+        + "</td></tr>"
+        for rel, files in evidence
+        if files
+    ]  # fmt: skip
+    if not rows:
+        return '<p class="muted">None yet.</p>'
+    return f"<table><tr><th>Release</th><th>Reports</th></tr>{''.join(rows)}</table>"
 
 
 def _table(head: tuple[str, ...], rows: Any) -> str:
@@ -158,5 +248,5 @@ h2{font-size:15px;margin:24px 0 8px}.muted{color:var(--muted)}.bad-text{color:va
 .k{color:var(--muted);font-size:12px}.v{font-size:24px;font-weight:600}
 table{width:100%;border-collapse:collapse;background:var(--card);margin-bottom:8px}
 th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line)}
-code{font-size:12px;word-break:break-all}
+code{font-size:12px;word-break:break-all}a{color:inherit}
 """

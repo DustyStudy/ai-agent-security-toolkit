@@ -174,7 +174,7 @@ The deny already appears in the tool-call audit record through the decision's re
 | `resolved` | `["203.0.113.7"]` | addresses the gateway saw, for comparison with firewall logs |
 | `enforced` | `true` | false in monitor mode |
 
-Lifecycle events: `gateway_blocklist_loaded` (name, entries, sha256, mtime), `gateway_blocklist_reload_failed` (name, error), `gateway_blocklist_stale` (name, age_s). CEF mapping follows the existing `severity()` table: `egress_blocked` high, stale and reload failure medium.
+Lifecycle events: `gateway_blocklist_loaded` (name, entries, sha256, issued_at), `gateway_blocklist_reload_failed` (name, error), `gateway_blocklist_stale` (name, age_s). CEF mapping follows the existing `severity()` table: `egress_blocked` high, stale and reload failure medium.
 
 Metrics: `agentsec_egress_blocked_total{list}` and `agentsec_blocklist_age_seconds{list}`; the dashboard shows each list's age and entry count.
 

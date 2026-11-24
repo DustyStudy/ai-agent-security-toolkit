@@ -299,6 +299,12 @@ Limits:
   - `Origin`: a request that carries one is refused unless it is listed in `listen.allowed_origins` (exact origins such as `https://chat.corp.example`, no wildcards, default empty). Clients that are not browsers send no `Origin` and are unaffected. A browser app that calls the gateway, same-origin or not, must be listed. The admin listener refuses every `Origin`.
   - `Host`: its name must be one of `listen.allowed_hosts` (names such as `gateway.corp.example`, without a port, no wildcards). The port in `Host` is not compared: the name is what a rebinding page cannot fake, and a forwarded port differs from the configured one. Unset with a loopback `listen.host`, the list is `localhost`, `127.0.0.1`, `[::1]` and `listen.host`. A non-loopback listener requires an explicit list containing the name your proxy forwards. The admin listener always requires a loopback name. A request with no `Host` header at all (HTTP/1.0, which no browser sends) is served.
   - `GET /healthz` on the main listener is exempt from both checks, because a container probe sends the pod address as `Host`. It returns a constant.
+- **IP allowlist.** `listen.allowed_clients` (CIDR networks, IPv4 or IPv6, default empty, meaning any address) limits the main listener to those peers. A peer outside the list gets a 403 `client_not_allowed` before authentication, recorded as a `gateway_rejected` audit event. `GET /healthz` is exempt, as above. An IPv4 peer on a dual-stack socket (`::ffff:10.0.0.7`) matches its IPv4 network. The check uses the TCP peer, never `X-Forwarded-For`, so behind an auth proxy the peer is the proxy. The loader therefore refuses a list that leaves out a `trusted_proxies` network, and it refuses `/0` and networks with host bits set. To limit end users behind a proxy, allowlist them at the proxy or load balancer.
+
+  ```yaml
+  listen:
+    allowed_clients: [10.20.0.0/16, 2001:db8:20::/48]
+  ```
 - **Upstream TLS.** Configure an HTTPS endpoint with a trusted certificate for every remote model and MCP service. Loopback endpoints also accept HTTP for local services.
 - **TLS.** A non-loopback `listen.host` needs `listen.tls`, or `tls_terminated_by_proxy: true` when the auth proxy terminates TLS on the same host or a trusted network.
 - **One process.** Rate limits and the audit chain are per process. Run one replica per audit file.

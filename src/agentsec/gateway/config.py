@@ -79,6 +79,8 @@ class GatewayConfig:
     # loopback, otherwise the configuration must supply explicit names.
     allowed_hosts: tuple[str, ...] = ()
     allowed_origins: tuple[str, ...] = ()  # an Origin header outside this list is refused
+    # Peer addresses the main listener serves. Empty: any address (identity still applies).
+    allowed_clients: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = ()
     admin_port: int | None = None  # set: /metrics and /readyz on admin_host:admin_port
     admin_host: str = "127.0.0.1"
     admin_fuzz_report: str | None = None  # an `agentsec fuzz --json` file shown on /dashboard
@@ -158,6 +160,7 @@ _SECTIONS: dict[str, set[str]] = {
         "tls_terminated_by_proxy",
         "allowed_hosts",
         "allowed_origins",
+        "allowed_clients",
     },
     "admin": {"host", "port", "fuzz_report", "evidence_dir"},
     "tls": {"cert_file", "key_file"},
@@ -602,6 +605,16 @@ def load_config(path: str | Path) -> GatewayConfig:
         # Whatever the hosts: 0.0.0.0 and 127.0.0.1 on one port overlap.
         raise ConfigError("admin.port must differ from listen.port")
 
+    try:
+        allowed_clients = tuple(
+            ipaddress.ip_network(c, strict=True)
+            for c in _strs(listen.get("allowed_clients", []), "listen.allowed_clients")
+        )
+    except ValueError as e:
+        raise ConfigError(f"listen.allowed_clients: {e}") from e
+    if any(c.prefixlen == 0 for c in allowed_clients):
+        raise ConfigError("listen.allowed_clients must not allow every address (/0); omit it")
+
     identity = _section(data, "identity")
     identity_mode = identity.get("mode", "trusted_header")
     proxies_raw = _strs(identity.get("trusted_proxies", []), "identity.trusted_proxies")
@@ -626,6 +639,12 @@ def load_config(path: str | Path) -> GatewayConfig:
     if any(p.prefixlen == 0 for p in proxies):
         # Every peer could then name any user in a header.
         raise ConfigError("identity.trusted_proxies must not trust every address (/0)")
+    if allowed_clients and any(
+        not any(p.version == c.version and p.subnet_of(c) for c in allowed_clients)  # type: ignore[arg-type]
+        for p in proxies
+    ):
+        # Every request would be refused: the auth proxy is the peer the listener sees.
+        raise ConfigError("listen.allowed_clients must include every identity.trusted_proxies net")
     for p in proxies:
         floor = 16 if p.version == 4 else 48
         if p.prefixlen < floor:
@@ -710,6 +729,7 @@ def load_config(path: str | Path) -> GatewayConfig:
         tls_key_file=None if key is None else str(base / key),
         tls_terminated_by_proxy=behind_proxy,
         allowed_hosts=allowed_hosts,
+        allowed_clients=allowed_clients,
         allowed_origins=allowed_origins,
         admin_host=admin_host,
         admin_port=admin_port,

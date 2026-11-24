@@ -600,6 +600,20 @@ class _AuditBudget:
             bucket[2] = 0
 
 
+def _client_allowed(
+    scope: Scope, nets: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
+) -> bool:
+    """The TCP peer is inside ``nets``. A missing or unparsable peer (a Unix socket) is not."""
+    client = scope.get("client")
+    try:
+        peer = ipaddress.ip_address(client[0]) if client else None
+    except ValueError:
+        return False
+    if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped:
+        peer = peer.ipv4_mapped  # a dual-stack socket reports IPv4 peers as ::ffff:a.b.c.d
+    return peer is not None and any(peer in net for net in nets)
+
+
 def _peer(scope: Scope) -> str | None:
     client = scope.get("client")
     return str(client[0]) if client else None
@@ -809,6 +823,10 @@ class Gateway:
                 await self._json(send, 200, {"status": "ok"}, request_id)
                 return  # exempt: a container probe sends the pod address as Host
             _check_origin_host(scope, self._origins, self._hosts)
+            if self.config.allowed_clients and not _client_allowed(
+                scope, self.config.allowed_clients
+            ):
+                raise HttpError(403, "client address not allowed", "client_not_allowed")
             user, groups, token_id = await self._identify(scope, request_id)
             _TOKEN_ID.set(token_id)  # recorded on this request's audit records
             # A reload reads and verifies files: off the event loop.

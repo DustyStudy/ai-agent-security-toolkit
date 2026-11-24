@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import dataclasses
+import functools
 import hashlib
 import http.client
 import ipaddress
@@ -31,7 +32,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from agentsec.gateway.accounts import account_refusal
 from agentsec.gateway.bundle import (
@@ -59,7 +60,7 @@ from agentsec.gateway.dashboard import (
 from agentsec.gateway.feeds import FeedSet
 from agentsec.gateway.holdback import Holdback
 from agentsec.gateway.metrics import CountingSink, Metrics
-from agentsec.gateway.oidc import OidcVerifier, TokenRejected, fetch_jwks
+from agentsec.gateway.oidc import MfaRequired, OidcVerifier, TokenRejected, fetch_jwks
 from agentsec.gateway.outbound import attachments, screen, upstream_policy
 from agentsec.gateway.policyset import GroupPolicy, PolicySet
 from agentsec.gateway.tokens import (
@@ -715,6 +716,7 @@ class Gateway:
         self._last_reject: str | None = None
         self._scanner = InjectionScanner()
         self._oidc = None if config.oidc is None else OidcVerifier(config.oidc, fetch=jwks_fetch)
+        self._require_mfa = config.oidc is not None and config.oidc.require_mfa
         self._auth_slots = asyncio.Semaphore(MAX_CONCURRENT_AUTH)
         self._limiter = _Limiter(config.requests_per_min, config.concurrent_requests, clock)
         self._budget = (
@@ -933,7 +935,9 @@ class Gateway:
             try:
                 info, token = await self._off_loop(
                     self._control_pool,
-                    tokens.issue, user, groups, name, ttl_s, settings.max_per_user,
+                    # With require_mfa on, this SSO sign-in has passed the MFA check.
+                    functools.partial(tokens.issue, mfa=self._require_mfa),
+                    user, groups, name, ttl_s, settings.max_per_user,
                 )  # fmt: skip
             except TokenError as e:
                 # Disabled after this request was identified: not the per-user limit.
@@ -995,7 +999,16 @@ class Gateway:
             # The store's reasons are a fixed set; the only variable part is its own token id.
             self._log_auth_failed(request_id, str(e), peer)
             raise HttpError(401, "unauthenticated", "unauthenticated", audited=True) from None
+        if self._require_mfa and not info.mfa:
+            # Minted before require_mfa was on, or from a sign-in that was not checked for it.
+            self._mfa_refused(info.user, request_id, f"token {info.id} was issued without MFA")
         return info.user, info.groups, info.id
+
+    def _mfa_refused(self, user: str, request_id: str, reason: str) -> NoReturn:
+        self._audit.bind(actor=user).log(
+            "gateway_mfa_required", request_id=request_id, reason=reason
+        )
+        raise HttpError(403, "multi-factor sign-in required", "mfa_required", audited=True)
 
     async def _serve_mcp(
         self,
@@ -1355,6 +1368,8 @@ class Gateway:
             if scheme.lower() != "bearer" or not token.strip():
                 raise TokenRejected("no single bearer token")
             return verifier.verify(token.strip())
+        except MfaRequired as e:
+            self._mfa_refused(e.user, request_id, str(e))
         except TokenRejected:
             # A fixed reason: the verifier's message can quote the token's own header (alg).
             self._log_auth_failed(request_id, "bearer token rejected", _peer(scope))

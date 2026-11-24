@@ -185,6 +185,9 @@ _SECTIONS: dict[str, set[str]] = {
         "groups_claim",
         "jwks_cache_s",
         "leeway_s",
+        "require_mfa",
+        "mfa_amr",
+        "mfa_acr",
     },
     "output": {"allowed_hosts", "protected", "stream_mode", "holdback_chars"},
     "input": {"block_on_injection", "spotlight_tool_results"},
@@ -306,6 +309,11 @@ def _oidc(section: dict[str, Any]) -> OidcSettings:
     leeway = _typed(section.get("leeway_s", 60.0), float, "identity.oidc.leeway_s")
     if not 0 <= leeway <= 300:
         raise ConfigError("identity.oidc.leeway_s must be between 0 and 300 seconds")
+    require_mfa = _typed(section.get("require_mfa", False), bool, "identity.oidc.require_mfa")
+    mfa_amr = _strs(section.get("mfa_amr", ["mfa"]), "identity.oidc.mfa_amr")
+    mfa_acr = _strs(section.get("mfa_acr", []), "identity.oidc.mfa_acr")
+    if require_mfa and not any(v.strip() for v in mfa_amr + mfa_acr):
+        raise ConfigError("identity.oidc.require_mfa needs at least one mfa_amr or mfa_acr value")
     return OidcSettings(
         issuer=issuer,
         audience=audience,
@@ -317,6 +325,9 @@ def _oidc(section: dict[str, Any]) -> OidcSettings:
         ),
         jwks_cache_s=_positive(section, "jwks_cache_s", 600.0, float),
         leeway_s=float(leeway),
+        require_mfa=require_mfa,
+        mfa_amr=mfa_amr,
+        mfa_acr=mfa_acr,
     )
 
 

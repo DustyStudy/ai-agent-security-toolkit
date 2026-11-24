@@ -31,6 +31,14 @@ class TokenRejected(Exception):
     """The reason is for the audit log only; the client always gets a plain 401."""
 
 
+class MfaRequired(TokenRejected):
+    """A valid token whose sign-in did not use multi-factor authentication (a 403, not 401)."""
+
+    def __init__(self, user: str, reason: str) -> None:
+        super().__init__(reason)
+        self.user = user
+
+
 @dataclass(frozen=True)
 class OidcSettings:
     issuer: str
@@ -41,6 +49,9 @@ class OidcSettings:
     groups_claim: str = "groups"
     jwks_cache_s: float = 600.0
     leeway_s: float = 60.0
+    require_mfa: bool = False  # set: the sign-in must show MFA in `amr` or `acr`
+    mfa_amr: tuple[str, ...] = ("mfa",)  # RFC 8176 values, any one is enough
+    mfa_acr: tuple[str, ...] = ()  # acr values that mean MFA at your IdP
 
 
 def fetch_jwks(url: str, timeout: float = 5.0) -> dict[str, Any]:
@@ -185,4 +196,14 @@ class OidcVerifier:
         raw_groups = claims.get(s.groups_claim, [])
         if not isinstance(raw_groups, list) or not all(isinstance(g, str) for g in raw_groups):
             raise TokenRejected(f"claim {s.groups_claim!r} must be a list of strings")
+        if s.require_mfa and not _signed_in_with_mfa(claims, s):
+            raise MfaRequired(user, "sign-in did not use multi-factor authentication")
         return user, tuple(g for g in raw_groups if g)
+
+
+def _signed_in_with_mfa(claims: dict[str, Any], s: OidcSettings) -> bool:
+    amr, acr = claims.get("amr"), claims.get("acr")
+    # A malformed claim counts as no MFA: fail closed.
+    if isinstance(amr, list) and any(isinstance(m, str) and m in s.mfa_amr for m in amr):
+        return True
+    return isinstance(acr, str) and acr in s.mfa_acr

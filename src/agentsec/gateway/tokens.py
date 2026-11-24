@@ -71,6 +71,7 @@ class TokenInfo:
     expires: float
     revoked: float | None
     last_used: float | None
+    mfa: bool = False  # issued after a sign-in that used multi-factor authentication
 
     def public(self) -> dict[str, Any]:
         """What a listing shows: never the hash."""
@@ -113,12 +114,29 @@ class TokenStore:
                 os.close(fd)
             self._db = sqlite3.connect(str(path), check_same_thread=False, timeout=5.0)
         self._db.executescript(_SCHEMA)
+        columns = {r[1] for r in self._db.execute("PRAGMA table_info(tokens)")}
+        if "mfa" not in columns:
+            # Stores from before MFA tracking: their tokens count as issued without MFA.
+            try:
+                with self._db:
+                    self._db.execute("ALTER TABLE tokens ADD COLUMN mfa INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                # Another process sharing the file added it first.
+                if "mfa" not in {r[1] for r in self._db.execute("PRAGMA table_info(tokens)")}:
+                    raise
         self._lock = threading.Lock()
         self._clock = clock
 
     # ---------------------------------------------------------------- issue/revoke
     def issue(
-        self, user: str, groups: tuple[str, ...], name: str, ttl_s: float, max_per_user: int
+        self,
+        user: str,
+        groups: tuple[str, ...],
+        name: str,
+        ttl_s: float,
+        max_per_user: int,
+        *,
+        mfa: bool = False,
     ) -> tuple[TokenInfo, str]:
         """A new token for ``user``; the plain token is returned once and never stored."""
         now = self._clock()
@@ -134,6 +152,7 @@ class TokenStore:
             expires=now + ttl_s,
             revoked=None,
             last_used=None,
+            mfa=mfa,
         )
         with self._lock:
             # One write-locked transaction for count and insert: the lock above covers one
@@ -155,10 +174,10 @@ class TokenStore:
                 if live >= max_per_user:
                     raise TokenError(f"at most {max_per_user} live tokens per user; revoke one")
                 self._db.execute(
-                    "INSERT INTO tokens (id, user, groups, hash, name, created, expires) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO tokens (id, user, groups, hash, name, created, expires, mfa) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (info.id, user, json.dumps(list(groups)), _hash(token), name, now,
-                     info.expires),
+                     info.expires, int(mfa)),
                 )  # fmt: skip
             except BaseException:
                 self._db.execute("ROLLBACK")
@@ -266,7 +285,7 @@ class TokenStore:
 
 
 def _info(row: tuple[Any, ...]) -> TokenInfo:
-    token_id, user, groups, _hash_, name, created, expires, revoked, last_used = row
+    token_id, user, groups, _hash_, name, created, expires, revoked, last_used, mfa = row
     return TokenInfo(
         id=token_id,
         user=user,
@@ -276,4 +295,5 @@ def _info(row: tuple[Any, ...]) -> TokenInfo:
         expires=expires,
         revoked=revoked,
         last_used=last_used,
+        mfa=bool(mfa),
     )

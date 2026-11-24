@@ -110,6 +110,8 @@ class GatewayConfig:
     tokens: TokenSettings | None = None  # set: users may mint access tokens (POST /tokens)
     egress: EgressSettings | None = None  # set: URL arguments are checked against signed feeds
     policy_hook: PolicyHookSettings | None = None  # set: an external service vets each tool call
+    scim_token_ref: str | None = None  # set: /scim/v2 takes provisioning from the IdP
+    scim_require_provisioned: bool = False  # set: only users the IdP provisioned get in
 
 
 @dataclass(frozen=True)
@@ -169,6 +171,7 @@ _TOP = {
     "dlp",
     "egress",
     "policy_hook",
+    "scim",
 }
 _SECTIONS: dict[str, set[str]] = {
     "listen": {
@@ -257,6 +260,7 @@ _SECTIONS: dict[str, set[str]] = {
     },
     "blocklist": {"name", "kind", "file", "max_age_h"},
     "policy_hook": {"url", "timeout_s", "auth"},
+    "scim": {"token", "require_provisioned"},
 }
 
 
@@ -831,6 +835,16 @@ def load_config(path: str | Path) -> GatewayConfig:
     audit_file = _typed(audit.get("file"), str, "audit.file")
     cef_file = audit.get("cef_file")
 
+    tokens = _tokens(data, base)
+    scim = _section(data, "scim")
+    scim_ref = None
+    if "scim" in data:
+        scim_ref = _typed(scim.get("token"), str, "scim.token")
+        if not scim_ref.startswith(("env:", "file:")):
+            raise ConfigError("scim.token must be a reference: 'env:NAME' or 'file:/path'")
+        if tokens is None:
+            # The directory and the disabled list live in the token store.
+            raise ConfigError("scim needs a tokens section")
     return GatewayConfig(
         policies=policies,
         bundle=bundle,
@@ -885,7 +899,11 @@ def load_config(path: str | Path) -> GatewayConfig:
         mcp_upstreams=mcp_upstreams,
         mcp_session_idle_s=_positive(limits, "mcp_session_idle_s", 3600.0, float),
         mcp_require_pins=require_pins,
-        tokens=_tokens(data, base),
+        tokens=tokens,
         egress=_egress(data, base),
         policy_hook=_policy_hook(data),
+        scim_token_ref=scim_ref,
+        scim_require_provisioned=_typed(
+            scim.get("require_provisioned", False), bool, "scim.require_provisioned"
+        ),
     )

@@ -24,9 +24,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  ci:
+    # The full CI suite on the tagged commit before anything is pushed.
+    uses: ./.github/workflows/ci.yml
+
   image:
+    needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Same protected environment as the PyPI upload, so the push to ghcr.io waits for the
+    # maintainer's approval too. Named `pypi` because the PyPI trusted publisher points at it.
+    environment:
+      name: pypi
+      url: https://github.com/${{ github.repository }}/pkgs/container/${{ github.event.repository.name }}
     permissions:
       contents: read
       packages: write # push to ghcr.io

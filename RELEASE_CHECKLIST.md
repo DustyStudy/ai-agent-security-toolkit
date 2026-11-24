@@ -47,6 +47,23 @@ Newest first. Say what ran, where, and whether it used mocks.
 - **2026-11-22, `b5b0b33` (integrated), local Linux, Python 3.13.18, Docker 29.10.0.** R2, R5-R7, R9-R14, R18 rerun from a clean worktree and a non-editable wheel install. Mocks: built-in simulators (R7), a local stub upstream (R10, R11), stub servers and a mocked Anthropic SDK in tests (R12). No live provider was called.
 - **2026-11-22, `80a1cba`, local Linux, Python 3.13.18 (Docker 29.10.0 for R9).** R1, R3, R5-R10, R14-R16 as above. Mocks: R7 uses the built-in simulators; R10 and R11 use a local stub upstream; no live provider was called.
 
+## How a release is published
+
+Pushing a `vX.Y.Z` tag on a commit of `main` starts two workflows. Both first rerun the full CI suite
+(`ci.yml` as a reusable workflow) on the tagged commit, and refuse a tag that is not on `main` or does
+not match `pyproject.toml`.
+
+- `release.yml`: build, SBOM, provenance attestation, GitHub Release, then PyPI through trusted
+  publishing (OIDC; no PyPI token is stored anywhere).
+- `image.yml`: build, smoke test, Trivy scan, push to ghcr.io with the workflow's own `GITHUB_TOKEN`,
+  provenance attestation by image digest, verify. The base image is pinned by digest in `Dockerfile`.
+
+The PyPI upload and the ghcr.io push run in the protected `pypi` environment (the one the PyPI trusted
+publisher points at), so each waits for the maintainer's approval in the Actions run: two approvals
+per release, one per workflow. Its protection rules (Settings, Environments, `pypi`) must keep the
+maintainer as required reviewer, with prevent self-review off for a sole maintainer, and should limit
+deployments to `v*.*.*` tags.
+
 ## Backlog (not release blockers)
 
 - Gateway: no per-user token or spend budget over time; only `max_tokens_cap` per request. (Upstream hostname resolution now counts toward the call deadline, and an upstream 429 reaches clients as 429 with a clamped `Retry-After`, per Dusty's decision on 2026-11-24.)

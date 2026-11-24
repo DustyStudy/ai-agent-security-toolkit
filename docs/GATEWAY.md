@@ -177,7 +177,7 @@ tokens:
 In the IdP, set the SCIM base URL to `https://<gateway>/scim/v2` and the authentication to "Bearer token" with that secret. Map the IdP's user to `userName` so it is the same name the gateway sees at sign-in (the OIDC `user_claim`, the SAML NameID or attribute, or the proxy's user header).
 
 - Supported: `Users` with `POST`, `GET` (by id, or a list with the filter `userName eq "..."`, `startIndex` and `count`), `PUT`, `PATCH` (`add`, `replace` and `remove` on `active`, `userName`, `displayName`, `externalId`, `emails` and `name`, with or without `path`, including Entra ID's `"False"` strings) and `DELETE`, plus `ServiceProviderConfig`. `Groups` and bulk operations are not supported (groups still come from the sign-in), and other filters are refused.
-- Deactivating a user (`active: false`) or deleting them revokes their access tokens, refuses their OIDC tokens issued until then, ends their MCP sessions and disables them, audited as `gateway_user_deprovisioned` with what was ended. They get 403 `user_deprovisioned` (or `user_disabled` after a delete) in any letter case of their name, on every sign-in path including access tokens. Renaming a user disables the old name.
+- Deactivating a user (`active: false`) or deleting them revokes their access tokens, refuses their OIDC tokens issued until then, ends their MCP sessions and disables them, audited as `gateway_user_deprovisioned` with what was ended. Their revoked access tokens and earlier OIDC tokens get 401. Any new sign-in gets 403 `user_deprovisioned` (or `user_disabled` after a delete) in any letter case of their name, on every sign-in path. Renaming a user disables the old name.
 - Reactivating re-enables sign-in (`gateway_user_provisioned`). Revoked access tokens stay revoked; the user mints new ones.
 - With `require_provisioned: true`, a user who is not in the directory gets 403 `user_not_provisioned`. Turn it on after the IdP's first full sync.
 - A request without the right bearer token gets 401 and is audited as `gateway_auth_failed`. `listen.allowed_clients` applies to these requests too, so you can limit them to your IdP's published address ranges.
@@ -309,7 +309,7 @@ Each answer is audited as `policy_hook` with `allowed` and, on failure, only the
 
 ## SIEM export
 
-`audit.siem` sends every audit record, as it is written, to one or more collectors. It speaks plain standards, so any SIEM or log pipeline works: RFC 5424 syslog (octet-counted framing over TCP and TLS) or one HTTP `POST` per record.
+`audit.siem` sends every audit record, as it is written, to one or more collectors. For Grafana Loki, which needs its own push format, ship `audit.jsonl` with Alloy instead: see [`examples/loki`](../examples/loki/README.md). It speaks plain standards, so any SIEM or log pipeline works: RFC 5424 syslog (octet-counted framing over TCP and TLS) or one HTTP `POST` per record.
 
 ```yaml
 audit:

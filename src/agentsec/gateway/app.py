@@ -1674,7 +1674,8 @@ class Gateway:
             self._mfa_refused(e.user, request_id, str(e))
         except TokenRejected:
             # A fixed reason: the verifier's message can quote the token's own header (alg).
-            self._log_auth_failed(request_id, "bearer token rejected", _peer(scope))
+            reason = "bearer token rejected" if auth else "no bearer token"
+            self._log_auth_failed(request_id, reason, _peer(scope))
             raise HttpError(401, "unauthenticated", "unauthenticated", audited=True) from None
 
     def _from_trusted_header(self, scope: Scope) -> tuple[str, tuple[str, ...]]:

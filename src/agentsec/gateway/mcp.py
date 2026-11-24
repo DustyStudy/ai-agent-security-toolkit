@@ -225,6 +225,7 @@ class McpGateway:
         connector: Connector = connect_upstream,
         clock: Callable[[], float] = time.monotonic,
         blocklist: Callable[[], Blocklist | None] = lambda: None,
+        hook_args: Callable[[str], dict[str, Any]] = lambda user: {},
     ) -> None:
         require_sdk()
         from mcp import types
@@ -238,6 +239,7 @@ class McpGateway:
         self._connector = connector
         self._clock = clock
         self._blocklist = blocklist  # the gateway's current feeds, read on every call
+        self._hook_args = hook_args  # ToolGuard arguments for the external policy service
         self._states: dict[str, _State] = {}
         self._first_seen: dict[str, ToolPins] = {}  # per upstream without reviewed pins
         # MCP session id -> (the user who opened it, last seen). Kept until the SDK would have
@@ -408,6 +410,7 @@ class McpGateway:
                     ),
                     blocklist=self._blocklist(),
                     dlp=caller.gp.dlp,
+                    **self._hook_args(caller.user),
                 ),
                 state.session,  # one session across upstreams: what one returns taints the rest
                 pins=first_seen if pins is None else ToolPins(pins),

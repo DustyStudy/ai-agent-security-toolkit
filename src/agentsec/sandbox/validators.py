@@ -7,10 +7,11 @@ import math
 import os
 import re
 import socket
+import stat
 import unicodedata
 from collections.abc import Callable, Sequence
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from agentsec.sandbox.policy import ArgRule, dns_check_enabled
@@ -68,6 +69,84 @@ def path_within_roots(value: str, roots: Sequence[str]) -> tuple[bool, str]:
         if common == os.path.normcase(real_root):
             return True, resolved
     return False, resolved
+
+
+_MODE_FLAGS = {"r": os.O_RDONLY, "w": os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+               "a": os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+               "x": os.O_WRONLY | os.O_CREAT | os.O_EXCL}  # fmt: skip
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+
+def open_within_roots(path: str, roots: Sequence[str], mode: str = "r", **kwargs: Any) -> IO[Any]:
+    """``open(path, mode)`` for a tool, with no window to swap in a symlink.
+
+    The guard's check and the tool's ``open()`` are two lookups, so a directory on the path
+    could be replaced with a symlink in between. Here, on POSIX, the file is reached from the
+    root's descriptor one component at a time with ``O_NOFOLLOW`` (``openat``), so any symlink
+    put on the path fails the open instead of being followed. Elsewhere the opened file must be
+    the same file (device and inode) that the checked path names. Only regular files open.
+    Raises :class:`PermissionError` outside the roots and :class:`OSError` on a symlink.
+
+    Not covered: a hard link inside a root to a file outside it (the same file either way), and,
+    in the fallback only, an empty file that ``"w"``/``"a"``/``"x"`` may create outside a root
+    before the swap is detected (nothing is written to it).
+    """
+    ok, resolved = path_within_roots(path, roots)
+    if not ok:
+        raise PermissionError(f"path escapes allowed roots: {path!r}")
+    base = mode.replace("b", "").replace("t", "")
+    if base.rstrip("+") not in _MODE_FLAGS or base.count("+") > 1:
+        raise ValueError(f"unsupported mode {mode!r}")
+    flags = _MODE_FLAGS[base.rstrip("+")]
+    if "+" in base:
+        flags = (flags & ~os.O_WRONLY) | os.O_RDWR
+    flags |= _NOFOLLOW | _NONBLOCK | getattr(os, "O_BINARY", 0)  # no hang on a FIFO
+    if _NOFOLLOW and os.open in os.supports_dir_fd:
+        fd = _open_nofollow(resolved, roots, flags)
+    else:
+        # Truncate only once the file is known to be the checked one.
+        fd = os.open(resolved, flags & ~getattr(os, "O_TRUNC", 0), 0o666)
+        try:
+            # Now symlink-free and naming the opened file: then what was opened is in the root.
+            if os.path.realpath(resolved) != resolved or not os.path.samestat(
+                os.fstat(fd), os.stat(resolved)
+            ):
+                raise OSError(f"{path!r} changed while it was opened")
+            if flags & getattr(os, "O_TRUNC", 0):
+                os.ftruncate(fd, 0)
+        except BaseException:
+            os.close(fd)
+            raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path!r} is not a regular file")
+        if _NONBLOCK:
+            os.set_blocking(fd, True)
+    except BaseException:
+        os.close(fd)
+        raise
+    return os.fdopen(fd, mode, **kwargs)
+
+
+def _open_nofollow(resolved: str, roots: Sequence[str], flags: int) -> int:
+    for root in roots:
+        real_root = os.path.realpath(root)
+        if os.path.commonpath([resolved, real_root]) == real_root:
+            break
+    parts = [p for p in os.path.relpath(resolved, real_root).split(os.sep) if p != "."]
+    if not parts or ".." in parts:
+        raise PermissionError(f"not a file under a root: {resolved!r}")
+    fd = os.open(real_root, os.O_RDONLY | _DIRECTORY)
+    try:
+        for part in parts[:-1]:
+            nxt = os.open(part, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        return os.open(parts[-1], flags, 0o666, dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 # --------------------------------------------------------------------------- urls

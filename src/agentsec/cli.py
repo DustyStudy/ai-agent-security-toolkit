@@ -164,7 +164,16 @@ def cmd_audit(args: argparse.Namespace) -> int:
     try:
         if args.action == "summary":
             return _audit_summary(args)
-        result = verify_file(args.file)
+        checkpoint = None
+        if args.checkpoint:
+            try:
+                checkpoint = json.loads(Path(args.checkpoint).read_text(encoding="utf-8"))
+            except ValueError:
+                checkpoint = None
+            if not isinstance(checkpoint, dict):
+                print("error: --checkpoint must be a JSON object file", file=sys.stderr)
+                return 2
+        result = verify_file(args.file, checkpoint=checkpoint)
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -801,6 +810,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-empty",
         action="store_true",
         help="exit 0 for a log with zero records (default: exit 2, as a truncated log has none)",
+    )
+    av.add_argument(
+        "--checkpoint",
+        help="JSON file from AuditLogger.checkpoint(), kept off the agent host; the log must "
+        "still hold that record unchanged (detects tail truncation and a rebuilt log)",
     )
     asum = a_sub.add_parser(
         "summary",

@@ -35,6 +35,7 @@ dependencies = [
 anthropic = ["anthropic>=0.40"]
 mcp = ["mcp>=2"]
 gateway = ["uvicorn>=0.30", "pyjwt[crypto]>=2.8"]
+saml = ["signxml>=4.0"]
 langchain = ["langchain-core>=0.3"]
 dev = [
     "pytest>=8.0",

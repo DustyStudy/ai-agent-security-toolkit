@@ -161,6 +161,40 @@ mcp: {require_pins: true}   # refuse to start while an upstream (jira, here) has
 - **Identity.** The same modes as the model endpoint (auth-proxy headers or an OIDC bearer token). IDE tools that only accept a fixed header use an access token (below).
 - Only tools are proxied: no resources, prompts or sampling, and no server-initiated streams (`GET /mcp` is 405). `mode: monitor` does not apply to calls: they are always enforced, because the gateway would be the one running a call the policy refuses.
 
+## SAML sign-in
+
+For an IdP that speaks SAML 2.0 rather than OIDC (ADFS, older Okta or Ping apps, Shibboleth), the gateway can sign users in with SAML and give them an [access token](#access-tokens-for-ides-and-scripts) for their IDE or scripts. It needs the `saml` extra (`pip install 'ai-agent-security-toolkit[saml]'`, included in the container image) and a `tokens` section.
+
+```yaml
+saml:
+  idp_entity_id: https://idp.corp.example/saml       # the IdP's Issuer
+  idp_sso_url: https://idp.corp.example/sso          # its HTTP-Redirect SSO endpoint
+  idp_cert: idp-signing.pem                          # its signing certificate (PEM)
+  sp_entity_id: https://gw.corp.example/saml/metadata  # the gateway's entity ID at the IdP
+  acs_url: https://gw.corp.example/saml/acs          # must end in /saml/acs
+  user_attribute: email        # optional; default is the NameID
+  groups_attribute: groups     # optional; values become the user's groups
+  require_mfa: true            # optional
+  mfa_contexts: [http://schemas.microsoft.com/claims/multipleauthn]
+  token_ttl_days: 1            # optional; default tokens.default_ttl_days
+tokens:
+  store: tokens.db
+```
+
+At the IdP, register an SP with that entity ID and ACS URL (HTTP-POST binding), and have it sign the assertion or the response with SHA-256 or stronger. A user opens `https://<gateway>/saml/login`, signs in, and lands on a page that shows a new access token once.
+
+What the gateway checks, refusing the sign-in (401, `gateway_auth_failed` with the reason) on any failure:
+
+- The signature verifies with the configured certificate only, whatever the message's own KeyInfo says. RSA and ECDSA with SHA-256, 384 or 512; SHA-1 is refused. Every value is read from the signed element, and the response must hold exactly one assertion, which defeats signature-wrapping attacks.
+- The XML parser loads no DTDs, entities or remote resources (XXE), and the answer is capped at 256 KB. Encrypted assertions are not supported and are refused.
+- Status is Success. Issuer, Audience, Recipient and Destination match the config. The time window holds, with `leeway_s` (default 60 seconds) for clock skew.
+- `InResponseTo` names a sign-in this gateway started in the last five minutes, for this browser: `/saml/login` sets a `Secure; HttpOnly` cookie and the answer must match it, so an attacker cannot log a victim in with the attacker's account or replay someone else's answer. Each assertion is accepted once.
+- The browser POST may come from the IdP's origin (or `null`) on `/saml/acs` only.
+
+Then the usual rules run as for any sign-in: disabled users, `allowed_groups`, `allowed_domains` and `block_personal_domains`. With `require_mfa`, the assertion's `AuthnContextClassRef` must be one of `mfa_contexts`, otherwise 403 `mfa_required` and `gateway_mfa_required`. The issued token is audited as `gateway_token_issued` with `via: saml`.
+
+Limits: SP-initiated sign-in only (no IdP-initiated), no single logout, no signed AuthnRequests, no metadata endpoint, and the pending sign-ins and replay cache are in memory per gateway process, so run one process or pin a browser to one replica.
+
 ## Access tokens for IDEs and scripts
 
 IDE MCP configs (Claude Code, Cursor, Continue) mostly take a URL and one fixed header, not an SSO login. With a `tokens` section, a signed-in user can mint an access token and put it in that header:

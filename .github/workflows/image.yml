@@ -24,9 +24,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  ci:
+    # The full CI suite on the tagged commit before anything is pushed.
+    uses: ./.github/workflows/ci.yml
+
   image:
+    needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Protected environment: the push to ghcr.io waits for the maintainer's approval.
+    environment:
+      name: release
+      url: https://github.com/${{ github.repository }}/pkgs/container/${{ github.event.repository.name }}
     permissions:
       contents: read
       packages: write # push to ghcr.io

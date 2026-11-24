@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # release.yml and image.yml rerun the whole suite on the tagged commit before publishing.
+  workflow_call:
 
 # Cancel superseded runs on the same branch/PR instead of letting them pile up.
 concurrency:

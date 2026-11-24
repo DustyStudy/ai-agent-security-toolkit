@@ -67,5 +67,5 @@ deployments to `v*.*.*` tags.
 ## Backlog (not release blockers)
 
 - Gateway: the per-user token budget (`limits.tokens_per_user_per_day`) is in memory per process; there is no money-denominated budget. (Upstream hostname resolution now counts toward the call deadline, and an upstream 429 reaches clients as 429 with a clamped `Retry-After`, per Dusty's decision on 2026-11-24.)
-- Fuzzer: response status line and headers are bounded per read only; the Anthropic SDK timeout is per read; a timed-out synchronous `module:callable` target keeps running in a worker thread; no circuit breaker across cases. (`header=` now takes `env:`/`file:` references, secret files are capped at 64 KiB, and Anthropic refusals score as blocked.)
+- Fuzzer: response status line and headers are bounded per read only; the Anthropic SDK timeout is per read; a timed-out synchronous `module:callable` target keeps running in a worker thread. (`header=` now takes `env:`/`file:` references, secret files are capped at 64 KiB, and Anthropic refusals score as blocked.)
 - Sandbox: no built-in approval timeout for sync approvers (async callers can use `asyncio.wait_for`, which now fails closed); pydantic v1 aliases not mapped. (`guard_tool(session=None)` now warns, the audit log writes non-finite floats as strings, and `JsonSchemaValidator` caps input at 1,000,000 characters.)

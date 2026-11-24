@@ -86,6 +86,9 @@ class FuzzConfig:
     forbidden_tools: Sequence[str] = DEFAULT_FORBIDDEN_TOOLS
     attacker_domain: str = "attacker.example"
     corpus: Sequence[Payload] = CORPUS
+    # Circuit breaker: after this many errors in a row the rest are recorded as not run.
+    # A target that is down then costs N cases, not the whole matrix. None or 0: off.
+    max_consecutive_errors: int | None = 10
 
 
 @dataclass
@@ -222,6 +225,7 @@ def run(target: Target, config: FuzzConfig | None = None) -> FuzzReport:
     config = config or FuzzConfig()
     results: list[CaseResult] = []
     stopped: str | None = None
+    in_a_row = 0
     for case in build_cases(config):
         started = time.perf_counter()
         error: str | None = None
@@ -260,6 +264,12 @@ def run(target: Target, config: FuzzConfig | None = None) -> FuzzReport:
                 latency_ms=round((time.perf_counter() - started) * 1000, 2),
             )
         )
+        in_a_row = in_a_row + 1 if error else 0
+        limit = config.max_consecutive_errors
+        if limit and in_a_row >= limit and not stopped:
+            stopped = _bounded(
+                f"the run stopped after {in_a_row} errors in a row, the last {error}"
+            )
     return FuzzReport.from_results(results, config)
 
 

@@ -87,6 +87,8 @@ class GatewayConfig:
     admin_host: str = "127.0.0.1"
     admin_fuzz_report: str | None = None  # an `agentsec fuzz --json` file shown on /dashboard
     admin_evidence_dir: str | None = None  # docs/evidence-style folder linked from /dashboard
+    # env:/file: reference to the bearer secret for POST /sessions/revoke on the admin listener
+    admin_revoke_token_ref: str | None = None
     bundle: BundleSettings | None = None  # set: policies come from a signed bundle
     log_content: bool = False
     cef_file: str | None = None
@@ -164,7 +166,7 @@ _SECTIONS: dict[str, set[str]] = {
         "allowed_origins",
         "allowed_clients",
     },
-    "admin": {"host", "port", "fuzz_report", "evidence_dir"},
+    "admin": {"host", "port", "fuzz_report", "evidence_dir", "revoke_token"},
     "tls": {"cert_file", "key_file"},
     "identity": {
         "mode",
@@ -608,6 +610,11 @@ def load_config(path: str | Path) -> GatewayConfig:
     admin_port = None if not admin else _typed(admin.get("port"), int, "admin.port")
     fuzz_report = admin.get("fuzz_report")
     evidence_dir = admin.get("evidence_dir")
+    revoke_ref = admin.get("revoke_token")
+    if revoke_ref is not None and not (
+        isinstance(revoke_ref, str) and revoke_ref.startswith(("env:", "file:"))
+    ):
+        raise ConfigError("admin.revoke_token must be a reference: 'env:NAME' or 'file:/path'")
     try:
         # An IP literal, not "localhost": a resolver could map that name to another interface.
         admin_loopback = ipaddress.ip_address(admin_host).is_loopback
@@ -616,6 +623,8 @@ def load_config(path: str | Path) -> GatewayConfig:
     if admin and not admin_loopback:
         # The admin listener has no authentication: reachable from this host only.
         raise ConfigError("admin.host must be a loopback IP address such as 127.0.0.1")
+    if revoke_ref is not None and admin_port is None:
+        raise ConfigError("admin.revoke_token needs admin.port: the endpoint is on that listener")
     if admin_port is not None and admin_port == port:
         # Whatever the hosts: 0.0.0.0 and 127.0.0.1 on one port overlap.
         raise ConfigError("admin.port must differ from listen.port")
@@ -752,6 +761,7 @@ def load_config(path: str | Path) -> GatewayConfig:
         allowed_origins=allowed_origins,
         admin_host=admin_host,
         admin_port=admin_port,
+        admin_revoke_token_ref=revoke_ref,
         admin_fuzz_report=None
         if fuzz_report is None
         else str(base / _typed(fuzz_report, str, "admin.fuzz_report")),

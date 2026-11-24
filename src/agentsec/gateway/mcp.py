@@ -246,6 +246,7 @@ class McpGateway:
         # expired the session too, so an id never becomes usable by someone else while alive.
         self._owners: dict[str, tuple[str, float]] = {}
         self._inflight: dict[str, int] = {}  # session id -> requests being served
+        self._ended: dict[str, float] = {}  # session id -> when an admin revoked it
         server = Server(
             "agentsec-gateway",
             on_list_tools=self._list_tools,
@@ -268,6 +269,9 @@ class McpGateway:
         await self._ensure_running()
         self._sweep()
         session_id = _header(scope, b"mcp-session-id")
+        if session_id is not None and session_id in self._ended:
+            await _plain(send, 404, b"Session not found")  # the client must sign in again
+            return
         if session_id is not None:
             owner = self._owners.get(session_id)
             if owner is not None and owner[0] != caller.user:
@@ -305,6 +309,14 @@ class McpGateway:
                 if session_id in self._owners:
                     self._owners[session_id] = (caller.user, self._clock())
 
+    def end_sessions(self, user: str) -> int:
+        """Refuse every MCP session ``user`` holds from now on. Returns how many."""
+        now = self._clock()
+        ended = [sid for sid, (owner, _) in self._owners.items() if owner == user]
+        for sid in ended:
+            self._ended[sid] = now
+        return len(ended)
+
     async def _ensure_running(self) -> None:
         if self._running is not None:
             await asyncio.shield(self._running)
@@ -340,6 +352,10 @@ class McpGateway:
             # The SDK does not expire a session while it serves a request; neither do we.
             if now - seen > idle + 60 and sid not in self._inflight:
                 del self._owners[sid]
+        for sid, when in list(self._ended.items()):
+            # By then the SDK has expired the session itself.
+            if now - when > idle + 60:
+                del self._ended[sid]
 
     # ------------------------------------------------------------------ handlers
     def _caller(self, ctx: Any) -> tuple[Caller, _State, Rev]:

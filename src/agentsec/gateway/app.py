@@ -195,15 +195,44 @@ def _watch(sock: socket.socket | None) -> None:
         deadline.watch(sock)
 
 
+# Name lookups run here so a call can stop waiting at its deadline: getaddrinfo cannot be
+# interrupted, and the system resolver's own timeout can be far longer than the call's.
+_RESOLVER = ThreadPoolExecutor(max_workers=8, thread_name_prefix="agentsec-dns")
+
+
+def _connect_within_deadline(
+    address: tuple[str, int], timeout: Any = None, source_address: Any = None, **kw: Any
+) -> socket.socket:
+    host, port = address
+    deadline = getattr(_DEADLINE, "current", None)
+    if deadline is None:
+        return socket.create_connection(address, timeout, source_address, **kw)
+    lookup = _RESOLVER.submit(socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM)
+    try:
+        infos = lookup.result(timeout=max(deadline.at - time.monotonic(), 0.0))
+    except TimeoutError:
+        lookup.cancel()
+        raise TimeoutError("upstream name resolution timed out") from None
+    error: OSError = OSError("name resolved to no address")
+    for *_, sockaddr in infos:
+        try:  # a numeric address: create_connection does no lookup of its own
+            return socket.create_connection((str(sockaddr[0]), port), timeout, source_address, **kw)
+        except OSError as e:
+            error = e
+    raise error
+
+
 class _WatchedHTTPConnection(http.client.HTTPConnection):
     def connect(self) -> None:
+        self._create_connection = _connect_within_deadline
         super().connect()
         _watch(self.sock)
 
 
 class _WatchedHTTPSConnection(http.client.HTTPSConnection):
     def connect(self) -> None:
-        super().connect()  # self.sock is the TLS socket from here on
+        self._create_connection = _connect_within_deadline
+        super().connect()  # self.sock is the TLS socket from here on; SNI uses self.host
         _watch(self.sock)
 
 

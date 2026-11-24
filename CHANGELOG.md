@@ -26,6 +26,7 @@ Version 0.13.0 (`pyproject.toml` and `agentsec.__version__`); date this section 
 - LangChain `guard_tool` without a `session` warns that the tool shares the guard's `default_session`, as `ToolGuard.wrap` already does.
 
 ### Changed
+- Gateway: looking up a model upstream's hostname counts toward `limits.upstream_timeout_s`. A resolver that does not answer used to hold the call for as long as the system resolver waited.
 - Fuzzer: an Anthropic reply with `stop_reason: "refusal"` scores as blocked instead of as an answer.
 - `env:`/`file:` secret references (fuzzer `token=`, gateway `api_key`/`auth`, `bundle sign --key`, `egress sign-feed --key`) refuse a file over 64 KiB.
 - The audit log writes NaN and infinite floats as the strings `"nan"`, `"inf"`, `"-inf"`, so every record is standard JSON.

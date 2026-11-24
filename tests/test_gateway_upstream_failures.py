@@ -507,3 +507,27 @@ def test_max_tokens_is_capped_on_streamed_requests(tmp_path):
     assert status == 200
     assert stream.requests[0]["max_tokens"] == 50
     assert "max_completion_tokens" not in stream.requests[0]
+
+
+def test_a_hung_name_lookup_ends_at_the_call_deadline(monkeypatch):
+    real = socket.getaddrinfo
+    release = threading.Event()
+
+    def hung(host, *args, **kwargs):
+        if host == "hung.invalid":
+            release.wait(10)  # a resolver that is not answering
+        return real(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", hung)
+    up = Upstream("local", "http://hung.invalid:9/v1", "m")
+    try:
+        for call_it in (
+            lambda: http_transport(up, b"{}", 0.5, 1000),
+            lambda: list(http_stream_transport(up, b"{}", 0.5, 1000)),
+        ):
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                call_it()
+            assert time.monotonic() - started < 2
+    finally:
+        release.set()

@@ -749,6 +749,15 @@ class Gateway:
         self._tokens = (
             None if config.tokens is None else TokenStore(config.tokens.store, clock=wall_clock)
         )
+        self._scim = None
+        self._scim_secret: bytes | None = None
+        if config.scim_token_ref is not None and config.tokens is not None:
+            from agentsec.gateway.scim import ScimDirectory
+
+            self._scim_secret = resolve_secret(config.scim_token_ref).encode()
+            if len(self._scim_secret) < 32:
+                raise ConfigError("scim.token must be at least 32 characters")
+            self._scim = ScimDirectory(config.scim_store, clock=wall_clock)
         self._revoke_secret = None
         if config.admin_revoke_token_ref is not None:
             self._revoke_secret = resolve_secret(config.admin_revoke_token_ref).encode()
@@ -859,6 +868,9 @@ class Gateway:
                 scope, self.config.allowed_clients
             ):
                 raise HttpError(403, "client address not allowed", "client_not_allowed")
+            if self._scim is not None and (path == "/scim/v2" or path.startswith("/scim/v2/")):
+                await self._serve_scim(scope, receive, send, request_id)
+                return
             if self._saml is not None and path in ("/saml/login", "/saml/acs"):
                 await self._serve_saml(scope, receive, send, request_id, peer)
                 return
@@ -933,6 +945,107 @@ class Gateway:
             await self._sse(send, payload, request_id)
         else:
             await self._json(send, status, payload, request_id)
+
+    # ------------------------------------------------------------------ SCIM
+    async def _serve_scim(
+        self, scope: Scope, receive: Receive, send: Send, request_id: str
+    ) -> None:
+        """/scim/v2/Users and /scim/v2/ServiceProviderConfig for the IdP's provisioning."""
+        from agentsec.gateway.scim import SERVICE_PROVIDER_CONFIG, ScimError
+
+        scim = self._scim
+        assert scim is not None  # noqa: S101 - the route checks it
+        if not self._scim_authorized(scope):
+            self._log_auth_failed(request_id, "scim: bad bearer token", _peer(scope))
+            await self._scim_json(send, 401, ScimError(401, "unauthenticated").body(), request_id)
+            return
+        path, method = scope["path"].rstrip("/"), scope["method"]
+        base = "/scim/v2"
+        query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+        log = self._audit.bind(actor="scim", session_id=request_id)
+        try:
+            if path == f"{base}/ServiceProviderConfig" and method == "GET":
+                status, payload = 200, SERVICE_PROVIDER_CONFIG
+            elif path == f"{base}/Users" and method == "GET":
+                status, payload = 200, await self._off_loop(
+                    self._control_pool, scim.search, (query.get("filter") or [None])[0],
+                    _int(query, "startIndex", 1), _int(query, "count", 100), base,
+                )  # fmt: skip
+            elif path == f"{base}/Users" and method == "POST":
+                doc, name, active = await self._off_loop(
+                    self._control_pool, scim.create, await self._scim_body(receive), base
+                )
+                await self._scim_effect(log, "created", name, active)
+                status, payload = 201, doc
+            elif path.startswith(f"{base}/Users/") and path.count("/") == 4:
+                rid = path.rsplit("/", 1)[1]
+                if method == "GET":
+                    status, payload = (
+                        200,
+                        await self._off_loop(self._control_pool, scim.get, rid, base),
+                    )
+                elif method in ("PUT", "PATCH"):
+                    change = scim.replace if method == "PUT" else scim.patch
+                    doc, name, active, before = await self._off_loop(
+                        self._control_pool, change, rid, await self._scim_body(receive), base
+                    )
+                    if before.casefold() != name.casefold():
+                        # Renamed: the old sign-in name is no longer this person.
+                        await self._scim_effect(log, "renamed", before, False)
+                    await self._scim_effect(log, "updated", name, active)
+                    status, payload = 200, doc
+                elif method == "DELETE":
+                    name = await self._off_loop(self._control_pool, scim.delete, rid)
+                    await self._scim_effect(log, "deleted", name, False)
+                    await self._scim_json(send, 204, None, request_id)
+                    return
+                else:
+                    raise ScimError(405, "method not allowed")
+            else:
+                raise ScimError(404, "not found (only Users are provisioned)")
+        except ScimError as e:
+            await self._scim_json(send, e.status, e.body(), request_id)
+            return
+        await self._scim_json(send, status, payload, request_id)
+
+    def _scim_authorized(self, scope: Scope) -> bool:
+        assert self._scim_secret is not None  # noqa: S101 - set with the directory
+        auth = [v for k, v in scope.get("headers", []) if k.lower() == b"authorization"]
+        given = auth[0][7:] if len(auth) == 1 and auth[0][:7].lower() == b"bearer " else b""
+        return hmac.compare_digest(given, self._scim_secret)
+
+    async def _scim_body(self, receive: Receive) -> Any:
+        from agentsec.gateway.scim import ScimError
+
+        try:
+            raw = await asyncio.wait_for(self._read_body(receive), self.config.body_timeout_s)
+        except TimeoutError:
+            raise ScimError(408, "request body timed out") from None
+        except HttpError as e:
+            raise ScimError(e.status, e.message) from None
+        try:
+            return json.loads(raw)
+        except ValueError:
+            raise ScimError(400, "body is not valid JSON", "invalidSyntax") from None
+
+    async def _scim_effect(self, log: Any, change: str, user: str, active: bool) -> None:
+        """Apply a provisioning change: deactivation ends sessions now, activation re-enables."""
+        if active:
+            if self._tokens is not None:
+                await self._off_loop(self._control_pool, self._tokens.enable_user, user)
+            log.log("gateway_user_provisioned", user=user, change=change)
+        else:
+            ended = await self._end_user(user, disable=True)
+            log.log("gateway_user_deprovisioned", change=change, **ended)
+
+    @staticmethod
+    async def _scim_json(send: Send, status: int, payload: Any, request_id: str) -> None:
+        body = b"" if payload is None else json.dumps(payload).encode()
+        headers = [(b"x-request-id", request_id.encode()), (b"cache-control", b"no-store")]
+        if payload is not None:
+            headers.append((b"content-type", b"application/scim+json"))
+        await send({"type": "http.response.start", "status": status, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
 
     # ------------------------------------------------------------------ SAML
     async def _serve_saml(
@@ -1381,11 +1494,18 @@ class Gateway:
             raise HttpError(400, "user must be a non-empty string", "bad_request")
         if not isinstance(disable, bool) or set(body) - {"user", "disable"}:
             raise HttpError(400, "only user and disable (a boolean) are accepted", "bad_request")
+        answer = await self._end_user(user, disable)
+        self._audit.log("gateway_sessions_revoked", request_id=request_id, **answer)
+        return answer
+
+    async def _end_user(self, user: str, disable: bool) -> dict[str, Any]:
+        """Revoke a user's access tokens, refuse their OIDC tokens issued until now and end
+        their MCP sessions; ``disable`` also refuses them until re-enabled."""
         revoked, disabled = 0, False
         if self._tokens is not None:
-            tokens = self._tokens
+            store = self._tokens
             revoked = await self._off_loop(
-                self._control_pool, tokens.disable_user if disable else tokens.revoke_user, user
+                self._control_pool, store.disable_user if disable else store.revoke_user, user
             )
             disabled = disable
         if self._oidc is not None:
@@ -1400,7 +1520,6 @@ class Gateway:
         }
         if disable and self._tokens is None:
             answer["note"] = "disable needs a tokens section (the disabled list lives there)"
-        self._audit.log("gateway_sessions_revoked", request_id=request_id, **answer)
         return answer
 
     def policy_hook_args(self, user: str) -> dict[str, Any]:
@@ -1509,10 +1628,18 @@ class Gateway:
     ) -> None:
         """The rules every sign-in passes, whatever proved the identity. Raises HttpError."""
         e = None
+        if self._scim is not None:
+            # Any case of the name: SCIM user names are case-insensitive. Access tokens too.
+            state = await self._off_loop(self._control_pool, self._scim.status, user)
+            if state is False:
+                e = HttpError(403, "user deprovisioned", "user_deprovisioned", audited=True)
+            elif state is None and self.config.scim_require_provisioned:
+                e = HttpError(403, "user not provisioned", "user_not_provisioned", audited=True)
         # The disabled list lives in the token store: without a `tokens` section there is none,
         # and a disabled user's SSO identity is accepted. An access token was checked by verify().
         if (
-            self._tokens is not None
+            e is None
+            and self._tokens is not None
             and token_id is None
             and await self._off_loop(self._control_pool, self._tokens.is_user_disabled, user)
         ):
@@ -2300,6 +2427,17 @@ def _check_origin_host(scope: Scope, origins: frozenset[str], hosts: frozenset[s
     name = _HOST.fullmatch(host[0].decode("latin-1").lower())
     if len(host) > 1 or name is None or name.group(1) not in hosts:
         raise HttpError(403, "host not allowed", "host_not_allowed")
+
+
+def _int(query: dict[str, list[str]], key: str, default: int) -> int:
+    from agentsec.gateway.scim import ScimError
+
+    values = query.get(key)
+    if not values:
+        return default
+    if len(values) != 1 or not values[0].isdigit() or len(values[0]) > 9:
+        raise ScimError(400, f"{key} must be a non-negative integer", "invalidValue")
+    return int(values[0])
 
 
 _SAML_COOKIE = "agentsec_saml"

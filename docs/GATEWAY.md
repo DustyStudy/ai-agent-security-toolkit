@@ -161,6 +161,27 @@ mcp: {require_pins: true}   # refuse to start while an upstream (jira, here) has
 - **Identity.** The same modes as the model endpoint (auth-proxy headers or an OIDC bearer token). IDE tools that only accept a fixed header use an access token (below).
 - Only tools are proxied: no resources, prompts or sampling, and no server-initiated streams (`GET /mcp` is 405). `mode: monitor` does not apply to calls: they are always enforced, because the gateway would be the one running a call the policy refuses.
 
+## SCIM user provisioning
+
+The gateway accepts SCIM 2.0 provisioning (RFC 7643 and 7644) from Entra ID, Okta, OneLogin and other IdPs at `https://<gateway>/scim/v2`, so leaving the company or being removed from the app ends gateway access without anyone running a command.
+
+```yaml
+scim:
+  token: env:SCIM_TOKEN        # the bearer token you paste into the IdP, at least 32 characters
+  require_provisioned: true    # optional: only users the IdP provisioned may sign in
+  store: scim.db               # optional; the provisioned-user directory (SQLite)
+tokens:
+  store: tokens.db             # required: deprovisioning disables users here
+```
+
+In the IdP, set the SCIM base URL to `https://<gateway>/scim/v2` and the authentication to "Bearer token" with that secret. Map the IdP's user to `userName` so it is the same name the gateway sees at sign-in (the OIDC `user_claim`, the SAML NameID or attribute, or the proxy's user header).
+
+- Supported: `Users` with `POST`, `GET` (by id, or a list with the filter `userName eq "..."`, `startIndex` and `count`), `PUT`, `PATCH` (`add`, `replace` and `remove` on `active`, `userName`, `displayName`, `externalId`, `emails` and `name`, with or without `path`, including Entra ID's `"False"` strings) and `DELETE`, plus `ServiceProviderConfig`. `Groups` and bulk operations are not supported (groups still come from the sign-in), and other filters are refused.
+- Deactivating a user (`active: false`) or deleting them revokes their access tokens, refuses their OIDC tokens issued until then, ends their MCP sessions and disables them, audited as `gateway_user_deprovisioned` with what was ended. They get 403 `user_deprovisioned` (or `user_disabled` after a delete) in any letter case of their name, on every sign-in path including access tokens. Renaming a user disables the old name.
+- Reactivating re-enables sign-in (`gateway_user_provisioned`). Revoked access tokens stay revoked; the user mints new ones.
+- With `require_provisioned: true`, a user who is not in the directory gets 403 `user_not_provisioned`. Turn it on after the IdP's first full sync.
+- A request without the right bearer token gets 401 and is audited as `gateway_auth_failed`. `listen.allowed_clients` applies to these requests too, so you can limit them to your IdP's published address ranges.
+
 ## SAML sign-in
 
 For an IdP that speaks SAML 2.0 rather than OIDC (ADFS, older Okta or Ping apps, Shibboleth), the gateway can sign users in with SAML and give them an [access token](#access-tokens-for-ides-and-scripts) for their IDE or scripts. It needs the `saml` extra (`pip install 'ai-agent-security-toolkit[saml]'`, included in the container image) and a `tokens` section.

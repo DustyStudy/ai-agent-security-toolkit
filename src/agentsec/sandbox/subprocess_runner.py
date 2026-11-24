@@ -115,6 +115,34 @@ def _runnable(path: str) -> str | None:
     return None
 
 
+def _no_network_prefix() -> list[str] | None:
+    """argv prefix that runs a command in a new, empty network namespace, or None.
+
+    Linux only, through util-linux ``unshare`` and an unprivileged user namespace. Inside, the
+    only interface is a loopback that is down, so the command cannot open a connection or send
+    a DNS query (the channel DNS-tunnelling exfiltration uses). Probed once with ``true``.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    unshare = _find_executable("unshare")
+    probe = _find_executable("true")
+    if unshare is None or probe is None:
+        return None
+    unshare = os.path.realpath(unshare)
+    for mapping in ("--map-current-user", "--map-root-user"):
+        prefix = [unshare, "--net", mapping, "--"]
+        try:
+            ok = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                [*prefix, probe], env={}, stdin=subprocess.DEVNULL, capture_output=True,
+                timeout=5, check=False,
+            ).returncode == 0  # fmt: skip
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        if ok:
+            return prefix
+    return None
+
+
 def _find_executable(name: str) -> str | None:
     """PATH lookup that never consults the current directory.
 
@@ -240,13 +268,31 @@ class SafeCommandRunner:
         max_output_bytes: int = 64_000,
         env: Mapping[str, str] | None = None,
         inherit_env: Sequence[str] = (),
+        network: str = "inherit",
     ) -> None:
         """``env`` is the child's whole environment (empty by default). ``inherit_env`` names
         variables to copy from this process, e.g. ``("PATH", "SystemRoot")`` for tools such as
         git on Windows that fail without them. Names are explicit: nothing is inherited by
-        default, so secrets in this process's environment never reach the command."""
+        default, so secrets in this process's environment never reach the command.
+
+        ``network="none"`` runs every command with no network at all, DNS included (Linux,
+        unprivileged user namespaces). Where that cannot be set up, the constructor raises
+        rather than run commands with the network on. ``"inherit"`` (the default) leaves the
+        host's network, so put egress rules on the host (docs/SANDBOX.md)."""
         if not cwd_roots:
             raise ValueError("cwd_roots must not be empty")
+        if network not in ("inherit", "none"):
+            raise ValueError("network must be 'inherit' or 'none'")
+        self._prefix: list[str] = []
+        if network == "none":
+            prefix = _no_network_prefix()
+            if prefix is None:
+                raise ValueError(
+                    "network='none' needs Linux with util-linux unshare and unprivileged user "
+                    "namespaces; isolate the runner's host or container instead (docs/SANDBOX.md)"
+                )
+            self._prefix = prefix
+        self.network = network
         self._resolved: dict[str, tuple[str, ExecRule]] = {}
         for alias, rule in rules.items():
             path = _find_executable(rule.executable)
@@ -406,7 +452,7 @@ class SafeCommandRunner:
             raise CommandDenied("working directory escapes allowed roots")
 
         argv = [exe, *args]
-        out, err, code, timed_out, overflow = self._run_bounded(argv, workdir)
+        out, err, code, timed_out, overflow = self._run_bounded([*self._prefix, *argv], workdir)
 
         limit = self.max_output_bytes
         truncated = overflow or len(out) > limit or len(err) > limit

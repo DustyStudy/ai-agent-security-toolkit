@@ -28,7 +28,7 @@ import time
 import uuid
 import weakref
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -577,10 +577,25 @@ class VerifyResult:
     reason: str = ""
 
 
-def verify_records(records: Iterable[dict[str, Any]]) -> VerifyResult:
+def verify_records(
+    records: Iterable[dict[str, Any]], checkpoint: Mapping[str, Any] | None = None
+) -> VerifyResult:
+    """Verify the chain. With ``checkpoint`` (from :meth:`AuditLogger.checkpoint`, kept off the
+    host), the record at its ``seq`` must carry its ``hash``: a truncated or rebuilt log fails."""
     prev = GENESIS_HASH
     expected_seq: int | None = None
     checked = 0
+    want_seq = want_hash = None
+    if checkpoint is not None:
+        want_seq, want_hash = checkpoint.get("seq"), checkpoint.get("hash")
+        if (
+            not isinstance(want_seq, int)
+            or isinstance(want_seq, bool)
+            or not isinstance(want_hash, str)
+        ):
+            return VerifyResult(False, 0, None, "checkpoint needs an integer seq and a hash")
+        if want_seq < 0:  # taken before the first record: nothing to anchor
+            want_seq = None
     for rec in records:
         if not isinstance(rec, dict):
             return VerifyResult(False, checked, None, "record is not a JSON object")
@@ -593,9 +608,17 @@ def verify_records(records: Iterable[dict[str, Any]]) -> VerifyResult:
         body = {k: v for k, v in rec.items() if k != "hash"}
         if compute_hash(body) != claimed:
             return VerifyResult(False, checked, seq, "record contents do not match hash")
+        if want_seq is not None and seq == want_seq:
+            if not hmac.compare_digest(str(claimed), want_hash or ""):
+                return VerifyResult(False, checked, seq, "record does not match the checkpoint")
+            want_seq = None
         prev = str(claimed)
         expected_seq = (seq + 1) if isinstance(seq, int) else None
         checked += 1
+    if want_seq is not None:
+        return VerifyResult(
+            False, checked, None, f"log ends before checkpoint seq {want_seq} (truncated)"
+        )
     return VerifyResult(True, checked)
 
 
@@ -619,15 +642,18 @@ def read_records(path: str | Path, bad: list[str]) -> Iterator[Any]:
 
 
 def verify_file(
-    path: str | Path, records: Callable[[Iterator[Any]], Iterator[Any]] | None = None
+    path: str | Path,
+    records: Callable[[Iterator[Any]], Iterator[Any]] | None = None,
+    checkpoint: Mapping[str, Any] | None = None,
 ) -> VerifyResult:
     """Verify a JSONL audit file. Malformed lines are reported as tampering.
 
     ``records`` wraps the record stream, so a caller can read the records in the same pass.
+    ``checkpoint``: see :func:`verify_records`.
     """
     bad: list[str] = []
     stream = read_records(path, bad)
-    result = verify_records(records(stream) if records else stream)
+    result = verify_records(records(stream) if records else stream, checkpoint)
     if result.ok and bad:
         return VerifyResult(False, result.records_checked, None, bad[0])
     return result

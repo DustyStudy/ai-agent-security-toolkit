@@ -14,6 +14,7 @@ import dataclasses
 import functools
 import hashlib
 import hmac
+import html
 import http.client
 import ipaddress
 import json
@@ -34,7 +35,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from agentsec.gateway.accounts import account_refusal
 from agentsec.gateway.bundle import (
@@ -770,6 +771,15 @@ class Gateway:
             else {}
         )
         self._origins = frozenset(config.allowed_origins)
+        self._saml = None
+        self._saml_origins: frozenset[str] = frozenset()
+        if config.saml is not None:
+            from agentsec.gateway.saml import SamlServiceProvider
+
+            self._saml = SamlServiceProvider(config.saml, clock=wall_clock)
+            sso = urlsplit(config.saml.idp_sso_url)
+            # "null": browsers send it after a cross-site redirect chain; the answer is signed.
+            self._saml_origins = frozenset({f"{sso.scheme}://{sso.netloc}".lower(), "null"})
         # None: a non-loopback bind with no listen.allowed_hosts; the Host header is not checked.
         self._hosts = frozenset(config.allowed_hosts) or loopback_hosts(config.host)
         # The admin listener is for scrapers and probes on this host: no Origin is ever allowed.
@@ -849,13 +859,20 @@ class Gateway:
             if path == "/healthz" and method == "GET":
                 await self._json(send, 200, {"status": "ok"}, request_id)
                 return  # exempt: a container probe sends the pod address as Host
-            _check_origin_host(scope, self._origins, self._hosts)
+            # The IdP's page posts the sign-in answer here: its origin may, for this path only.
+            acs = self._saml is not None and path == "/saml/acs"
+            _check_origin_host(
+                scope, self._origins | self._saml_origins if acs else self._origins, self._hosts
+            )
             if self.config.allowed_clients and not _client_allowed(
                 scope, self.config.allowed_clients
             ):
                 raise HttpError(403, "client address not allowed", "client_not_allowed")
             if self._scim is not None and (path == "/scim/v2" or path.startswith("/scim/v2/")):
                 await self._serve_scim(scope, receive, send, request_id)
+                return
+            if self._saml is not None and path in ("/saml/login", "/saml/acs"):
+                await self._serve_saml(scope, receive, send, request_id, peer)
                 return
             user, groups, token_id = await self._identify(scope, request_id)
             _TOKEN_ID.set(token_id)  # recorded on this request's audit records
@@ -1029,6 +1046,80 @@ class Gateway:
             headers.append((b"content-type", b"application/scim+json"))
         await send({"type": "http.response.start", "status": status, "headers": headers})
         await send({"type": "http.response.body", "body": body})
+
+    # ------------------------------------------------------------------ SAML
+    async def _serve_saml(
+        self, scope: Scope, receive: Receive, send: Send, request_id: str, peer: str | None
+    ) -> None:
+        """GET /saml/login starts a sign-in; POST /saml/acs ends it with a new access token."""
+        from agentsec.gateway.saml import SamlMfaRequired, SamlRejected
+
+        saml, tokens, settings = self._saml, self._tokens, self.config.tokens
+        assert saml is not None and tokens is not None and settings is not None  # noqa: S101
+        path, method = scope["path"], scope["method"]
+        if path == "/saml/login":
+            if method != "GET":
+                raise HttpError(405, "method not allowed", "method_not_allowed")
+            try:
+                url, rid = saml.login_redirect()
+            except SamlRejected:
+                raise HttpError(503, "busy", "busy") from None
+            cookie = (
+                f"{_SAML_COOKIE}={rid}; Path=/saml; Max-Age=300; Secure; HttpOnly; SameSite=None"
+            )
+            await send({"type": "http.response.start", "status": 302, "headers": [
+                (b"location", url.encode()), (b"set-cookie", cookie.encode()),
+                (b"x-request-id", request_id.encode()), *DASHBOARD_HEADERS,
+            ]})  # fmt: skip
+            await send({"type": "http.response.body", "body": b""})
+            return
+        if method != "POST":
+            raise HttpError(405, "method not allowed", "method_not_allowed")
+        try:
+            body = await asyncio.wait_for(self._read_body(receive), self.config.body_timeout_s)
+        except TimeoutError:
+            raise HttpError(408, "request body timed out", "body_timeout") from None
+        try:
+            form = parse_qs(body.decode("ascii"), strict_parsing=True, max_num_fields=4)
+        except (UnicodeDecodeError, ValueError):
+            raise HttpError(400, "expected a form post", "bad_request") from None
+        answer = form.get("SAMLResponse", [])
+        if len(answer) != 1:
+            raise HttpError(400, "expected one SAMLResponse", "bad_request")
+        try:
+            who = await self._off_loop(
+                self._control_pool, saml.consume, answer[0], _cookie(scope, _SAML_COOKIE)
+            )
+        except SamlMfaRequired as e:
+            self._mfa_refused(e.user, request_id, str(e))
+        except SamlRejected as e:
+            self._log_auth_failed(request_id, f"saml: {e}", peer)
+            raise HttpError(401, "unauthenticated", "unauthenticated", audited=True) from None
+        user, groups = who["user"], who["groups"]
+        await self._admit(user, groups, None, request_id, peer)
+        ttl_s = self.config.saml.token_ttl_s if self.config.saml else None
+        try:
+            info, token = await self._off_loop(
+                self._control_pool,
+                functools.partial(tokens.issue, mfa=who["mfa"]),
+                user, groups, "saml sign-in", ttl_s or settings.default_ttl_s, settings.max_per_user,
+            )  # fmt: skip
+        except TokenError as e:
+            raise HttpError(409, str(e), "too_many_tokens") from None
+        self._audit.bind(actor=user, session_id=request_id).log(
+            "gateway_token_issued", token_id=info.id, name=info.name, expires=info.expires,
+            via="saml", mfa=who["mfa"],
+        )  # fmt: skip
+        page = _SAML_PAGE.format(token=html.escape(token), expires=html.escape(
+            datetime.fromtimestamp(info.expires, UTC).strftime("%Y-%m-%d %H:%M UTC")
+        ))  # fmt: skip
+        clear = f"{_SAML_COOKIE}=; Path=/saml; Max-Age=0; Secure; HttpOnly; SameSite=None"
+        await send({"type": "http.response.start", "status": 200, "headers": [
+            (b"content-type", b"text/html; charset=utf-8"), (b"set-cookie", clear.encode()),
+            (b"referrer-policy", b"no-referrer"), (b"x-request-id", request_id.encode()),
+            *DASHBOARD_HEADERS,
+        ]})  # fmt: skip
+        await send({"type": "http.response.body", "body": page.encode()})
 
     # ------------------------------------------------------------------ tokens
 
@@ -1524,6 +1615,18 @@ class Gateway:
                 user, groups = await self._off_loop(
                     self._control_pool, self._from_token, self._oidc, scope, request_id
                 )
+        await self._admit(user, groups, token_id, request_id, peer)
+        return user, groups, token_id
+
+    async def _admit(
+        self,
+        user: str,
+        groups: tuple[str, ...],
+        token_id: str | None,
+        request_id: str,
+        peer: str | None,
+    ) -> None:
+        """The rules every sign-in passes, whatever proved the identity. Raises HttpError."""
         e = None
         if self._scim is not None:
             # Any case of the name: SCIM user names are case-insensitive. Access tokens too.
@@ -1557,7 +1660,6 @@ class Gateway:
             # Audited here, where the user is known: the caller only sees the error.
             self._log_rejection(e, request_id, user, peer)
             raise e
-        return user, groups, token_id
 
     def _from_token(
         self, verifier: OidcVerifier, scope: Scope, request_id: str
@@ -2336,6 +2438,31 @@ def _int(query: dict[str, list[str]], key: str, default: int) -> int:
     if len(values) != 1 or not values[0].isdigit() or len(values[0]) > 9:
         raise ScimError(400, f"{key} must be a non-negative integer", "invalidValue")
     return int(values[0])
+
+
+_SAML_COOKIE = "agentsec_saml"
+_SAML_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Gateway access token</title>
+<style>body{{font:16px system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem}}
+code{{display:block;padding:1rem;background:#eee;color:#000;word-break:break-all}}</style></head>
+<body><h1>Your gateway access token</h1>
+<p>Copy it into your IDE or script now. It is shown only once and expires {expires}.</p>
+<code>{token}</code>
+<p>Use it as <code>Authorization: Bearer &lt;token&gt;</code>. Revoke it with
+<code>DELETE /tokens/&lt;id&gt;</code> or ask an administrator.</p></body></html>
+"""
+
+
+def _cookie(scope: Scope, name: str) -> str | None:
+    """The value of one cookie, or None when it is absent or sent more than once."""
+    values = []
+    for key, raw in scope.get("headers", []):
+        if key.lower() == b"cookie":
+            for part in raw.decode("latin-1").split(";"):
+                k, _, v = part.strip().partition("=")
+                if k == name:
+                    values.append(v)
+    return values[0] if len(values) == 1 else None
 
 
 def _bearer(scope: Scope) -> str | None:

@@ -8,6 +8,7 @@ Version 0.13.0 (`pyproject.toml` and `agentsec.__version__`); date this section 
 
 ### Added
 - `agentsec bundle verify` works on a machine that cannot read a group's `dlp.fingerprint_key` (an unset variable, or a key file that is missing or readable only by the gateway's user): it verifies the signature, hashes and contents as before and prints a note naming the key reference. A malformed reference, or a key that is present but under 32 bytes, still fails, and the gateway itself still refuses a bundle whose key it cannot read.
+- `examples/gateway.yaml` has the `egress` section, commented out until signed feeds exist, and docs/GATEWAY.md shows how to make the separate feed signing key. A test uncomments it, signs two feeds with a throwaway key and checks that the config loads, and that an unsigned feed refuses it.
 - Docs and `examples/gateway.yaml` recommend `outbound.on_secret: block` on every upstream run by a third party.
 - `examples/gateway.yaml` has a `dlp` section (credentials and non-human identities redacted in answers and blocked in tool arguments, PII redacted in answers and monitored in tool arguments, email monitored) with `fingerprint_key: env:AGENTSEC_DLP_FINGERPRINT_KEY`, so `--check` on the example needs that variable set.
 - DLP allowlist expiry: the gateway audits `dlp_allow_expired` and `dlp_allow_expiring` (within 14 days) per group at start and on each bundle load, and `agentsec bundle verify` warns about both.

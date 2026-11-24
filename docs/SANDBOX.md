@@ -152,6 +152,27 @@ What was run: each command once against the real tool on Windows 11 (build 26300
 
 The child gets an empty environment unless you pass `env`. Tools that need a few host variables (git on Windows needs `PATH` and `SystemRoot`) can name them: `SafeCommandRunner(..., inherit_env=["PATH", "SystemRoot"])`. Nothing is inherited by default, so secrets in the agent's environment never reach the command.
 
+### Network
+
+By default a command has the host's network. A command the agent can steer can then send data out, and DNS counts: a lookup of `<data>.attacker.example` delivers the data to whoever runs that domain's name server, even when every TCP port is blocked. Data has left agent sandboxes this way when DNS was left open (CSA research notes, 2026-03-20 and 2026-09-30).
+
+`SafeCommandRunner(..., network="none")` runs every command in a new, empty network namespace. The only interface is a loopback that is down, so the command can open no connection and send no DNS query. It needs Linux, util-linux `unshare` and unprivileged user namespaces. Where those are missing (macOS, Windows, or a kernel or AppArmor policy that blocks user namespaces) the constructor raises `ValueError` instead of running commands with the network on. Commands that need the network, such as `locked_install_rules`, need a second runner with `network="inherit"`.
+
+```python
+runner = SafeCommandRunner(rules, cwd_roots=["/srv/repo"], network="none")
+```
+
+Without `network="none"`, deny egress on the host or container that runs the agent. Block DNS as well as TCP:
+
+| Where it runs | Rule |
+|---|---|
+| Docker | `docker run --network none`, or a user-defined network with `internal: true` |
+| Kubernetes | A `NetworkPolicy` with `policyTypes: [Egress]` and no egress rules, or one that allows only the proxy. Port 53 to kube-dns is not allowed unless listed. |
+| Linux host (nftables) | Drop output from the agent's user: `nft add rule inet filter output meta skuid agent drop`, then allow only the proxy's address |
+| Any | Send HTTP through an allowlisting proxy, and run a resolver that answers only allowlisted names (or none) |
+
+Test the rules from inside the sandbox: `getent hosts example.com` and `curl -m 5 https://example.com` should both fail.
+
 ## Path arguments
 
 A `path` argument is resolved (symlinks and `..` included) and must sit under one of its `roots`. `execute`, `aexecute` and everything built on them pass the tool that resolved path, re-checked just before the call, not the raw string. A symlink retargeted after authorization therefore cannot redirect the tool.

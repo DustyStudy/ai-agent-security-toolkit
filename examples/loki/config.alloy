@@ -1,27 +1,28 @@
 // Ships the gateway's audit.jsonl to Loki. The file is mounted read-only and never changed.
 local.file_match "audit" {
-  path_targets = [{"__path__" = "/var/log/agentsec/audit.jsonl", "job" = "agentsec-audit"}]
+	path_targets = [{"__path__" = "/var/log/agentsec/audit.jsonl", "job" = "agentsec-audit"}]
 }
 
 loki.source.file "audit" {
-  targets    = local.file_match.audit.targets
-  forward_to = [loki.process.audit.receiver]
+	targets    = local.file_match.audit.targets
+	forward_to = [loki.process.audit.receiver]
 }
 
 // Use each record's own "ts" as the log time, so queries line up with the audit chain.
 loki.process "audit" {
-  stage.json {
-    expressions = {ts = "ts"}
-  }
-  stage.timestamp {
-    source = "ts"
-    format = "RFC3339"
-  }
-  forward_to = [loki.write.local.receiver]
+	stage.json {
+		expressions = {ts = "ts"}
+	}
+
+	stage.timestamp {
+		source = "ts"
+		format = "RFC3339"
+	}
+	forward_to = [loki.write.local.receiver]
 }
 
 loki.write "local" {
-  endpoint {
-    url = "http://loki:3100/loki/api/v1/push"
-  }
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
 }

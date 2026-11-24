@@ -69,6 +69,8 @@ class GatewayConfig:
     user_header: str = "x-auth-request-user"
     groups_header: str = "x-auth-request-groups"
     allowed_groups: tuple[str, ...] = ()  # empty: any authenticated user
+    allowed_domains: tuple[str, ...] = ()  # set: the user must be an address in one of these
+    block_personal_domains: bool = False  # set: gmail.com, outlook.com etc. are refused
     oidc: OidcSettings | None = None  # set: identity comes from bearer tokens, not headers
     host: str = "127.0.0.1"
     port: int = 8443
@@ -158,6 +160,8 @@ _SECTIONS: dict[str, set[str]] = {
         "groups_header",
         "trusted_proxies",
         "allowed_groups",
+        "allowed_domains",
+        "block_personal_domains",
         "oidc",
     },
     "oidc": {
@@ -365,6 +369,17 @@ def _tokens(data: dict[str, Any], base: Path) -> TokenSettings | None:
         max_per_user=_positive(section, "max_per_user", 20),
         offboarding_deadline_s=_positive(section, "offboarding_deadline_s", 3600.0, float),
     )
+
+
+def _domains(identity: dict[str, Any]) -> tuple[str, ...]:
+    out = []
+    for d in _strs(identity.get("allowed_domains", []), "identity.allowed_domains"):
+        d = d.lower()
+        bare = d[2:] if d.startswith("*.") else d
+        if not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", bare):
+            raise ConfigError(f"identity.allowed_domains: {d!r} is not a domain (or *.domain)")
+        out.append(d)
+    return tuple(out)
 
 
 def _pin_file(path: Path) -> dict[str, str]:
@@ -671,6 +686,10 @@ def load_config(path: str | Path) -> GatewayConfig:
             identity.get("groups_header", "X-Auth-Request-Groups"), str, "groups_header"
         ).lower(),
         allowed_groups=_strs(identity.get("allowed_groups", []), "identity.allowed_groups"),
+        allowed_domains=_domains(identity),
+        block_personal_domains=_typed(
+            identity.get("block_personal_domains", False), bool, "identity.block_personal_domains"
+        ),
         oidc=oidc,
         host=host,
         port=port,

@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from agentsec.gateway.accounts import account_refusal
 from agentsec.gateway.bundle import (
     MANIFEST,
     MAX_FILE_BYTES,
@@ -1279,6 +1280,15 @@ class Gateway:
         allowed = self.config.allowed_groups
         if e is None and allowed and not set(groups) & set(allowed):
             e = HttpError(403, "forbidden", "forbidden", audited=True)
+        refusal = account_refusal(
+            user, self.config.allowed_domains, self.config.block_personal_domains
+        )
+        if e is None and refusal is not None:
+            # Also refuses an access token minted before the rule was turned on.
+            self._audit.bind(actor=user).log(
+                "gateway_account_refused", request_id=request_id, reason=refusal
+            )
+            e = HttpError(403, "account not allowed", "account_not_allowed", audited=True)
         if e is not None:
             # Audited here, where the user is known: the caller only sees the error.
             self._log_rejection(e, request_id, user, peer)

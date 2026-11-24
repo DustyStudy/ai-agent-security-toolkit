@@ -4,7 +4,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
-Version 0.13.0 (`pyproject.toml` and `agentsec.__version__`); date this section when it is tagged.
+## [0.13.0] - 2026-11-24
 
 ### Added
 - `agentsec bundle verify` works on a machine that cannot read a group's `dlp.fingerprint_key` (an unset variable, or a key file that is missing or readable only by the gateway's user): it verifies the signature, hashes and contents as before and prints a note naming the key reference. A malformed reference, or a key that is present but under 32 bytes, still fails, and the gateway itself still refuses a bundle whose key it cannot read.
@@ -349,7 +349,8 @@ Tagged but never released; use 0.4.1.
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.9.0...v0.10.0

@@ -110,6 +110,7 @@ class GatewayConfig:
     tokens: TokenSettings | None = None  # set: users may mint access tokens (POST /tokens)
     egress: EgressSettings | None = None  # set: URL arguments are checked against signed feeds
     policy_hook: PolicyHookSettings | None = None  # set: an external service vets each tool call
+    saml: Any = None  # SamlSettings when set: /saml/login and /saml/acs mint access tokens
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,7 @@ _TOP = {
     "dlp",
     "egress",
     "policy_hook",
+    "saml",
 }
 _SECTIONS: dict[str, set[str]] = {
     "listen": {
@@ -257,6 +259,19 @@ _SECTIONS: dict[str, set[str]] = {
     },
     "blocklist": {"name", "kind", "file", "max_age_h"},
     "policy_hook": {"url", "timeout_s", "auth"},
+    "saml": {
+        "idp_entity_id",
+        "idp_sso_url",
+        "idp_cert",
+        "sp_entity_id",
+        "acs_url",
+        "user_attribute",
+        "groups_attribute",
+        "require_mfa",
+        "mfa_contexts",
+        "leeway_s",
+        "token_ttl_days",
+    },
 }
 
 
@@ -493,6 +508,76 @@ def siem_headers(target: SiemTarget) -> dict[str, str]:
         return {}
     secret = resolve_secret(target.auth_ref)
     return {target.auth_header: f"{target.auth_scheme} {secret}".strip()}
+
+
+def _saml(data: dict[str, Any], base: Path, tokens: TokenSettings | None) -> Any:
+    if "saml" not in data:
+        return None
+    from agentsec.gateway.saml import SamlServiceProvider, SamlSettings
+
+    try:
+        import lxml  # noqa: F401
+        import signxml  # noqa: F401
+    except ImportError as e:
+        raise ConfigError(f"saml needs the 'saml' extra ({e})") from None
+    if tokens is None:
+        raise ConfigError("saml signs users in to mint access tokens: add a tokens section")
+    section = _section(data, "saml")
+
+    def text(key: str, required: bool = True) -> str | None:
+        value = section.get(key)
+        if value is None and not required:
+            return None
+        value = _typed(value, str, f"saml.{key}")
+        if not value.strip():
+            raise ConfigError(f"saml.{key} must not be empty")
+        return value
+
+    sso, acs = text("idp_sso_url"), text("acs_url")
+    assert sso is not None and acs is not None  # noqa: S101 - required above
+    for key, url in (("idp_sso_url", sso), ("acs_url", acs)):
+        parts = urlsplit(url)
+        loopback = _is_loopback(parts.hostname or "")
+        if not (parts.scheme == "https" or (parts.scheme == "http" and loopback)):
+            raise ConfigError(f"saml.{key} must be https (http only for a loopback host)")
+    if urlsplit(acs).path != "/saml/acs":
+        raise ConfigError("saml.acs_url must be this gateway's https://<host>/saml/acs")
+    cert_path = base / str(text("idp_cert"))
+    try:
+        pem = cert_path.read_text(encoding="ascii")
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConfigError(f"saml.idp_cert: {e}") from None
+    ttl_days = section.get("token_ttl_days")
+    ttl_s = None
+    if ttl_days is not None:
+        ttl_s = _positive(section, "token_ttl_days", None, float) * 86400
+        if ttl_s > tokens.max_ttl_s:
+            raise ConfigError("saml.token_ttl_days is above tokens.max_ttl_days")
+    leeway = _typed(section.get("leeway_s", 60.0), float, "saml.leeway_s")
+    if not 0 <= leeway <= 300:
+        raise ConfigError("saml.leeway_s must be between 0 and 300 seconds")
+    require_mfa = _typed(section.get("require_mfa", False), bool, "saml.require_mfa")
+    contexts = _strs(section.get("mfa_contexts", []), "saml.mfa_contexts")
+    if require_mfa and not contexts:
+        raise ConfigError("saml.require_mfa needs mfa_contexts (AuthnContextClassRef values)")
+    settings = SamlSettings(
+        idp_entity_id=str(text("idp_entity_id")),
+        idp_sso_url=sso,
+        idp_cert_pem=pem,
+        sp_entity_id=str(text("sp_entity_id")),
+        acs_url=acs,
+        user_attribute=text("user_attribute", required=False),
+        groups_attribute=text("groups_attribute", required=False),
+        require_mfa=require_mfa,
+        mfa_contexts=contexts,
+        leeway_s=float(leeway),
+        token_ttl_s=ttl_s,
+    )
+    try:
+        SamlServiceProvider(settings)  # loads the certificate now: a bad one refuses to start
+    except ValueError as e:
+        raise ConfigError(f"saml.idp_cert: {e}") from None
+    return settings
 
 
 def _policy_hook(data: dict[str, Any]) -> PolicyHookSettings | None:
@@ -831,6 +916,7 @@ def load_config(path: str | Path) -> GatewayConfig:
     audit_file = _typed(audit.get("file"), str, "audit.file")
     cef_file = audit.get("cef_file")
 
+    tokens = _tokens(data, base)
     return GatewayConfig(
         policies=policies,
         bundle=bundle,
@@ -885,7 +971,8 @@ def load_config(path: str | Path) -> GatewayConfig:
         mcp_upstreams=mcp_upstreams,
         mcp_session_idle_s=_positive(limits, "mcp_session_idle_s", 3600.0, float),
         mcp_require_pins=require_pins,
-        tokens=_tokens(data, base),
+        tokens=tokens,
         egress=_egress(data, base),
         policy_hook=_policy_hook(data),
+        saml=_saml(data, base, tokens),
     )

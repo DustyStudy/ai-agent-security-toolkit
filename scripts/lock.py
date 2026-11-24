@@ -36,10 +36,12 @@ LOCKS: dict[str, list[str]] = {
         "gateway",
         "--extra",
         "mcp",
+        "--extra",
+        "saml",
         f"{REQ}build.in",
     ],
     # What the container image installs: the gateway and its MCP endpoint, no dev tools.
-    "gateway": ["pyproject.toml", "--extra", "gateway", "--extra", "mcp"],
+    "gateway": ["pyproject.toml", "--extra", "gateway", "--extra", "mcp", "--extra", "saml"],
     "integrations": [
         "pyproject.toml",
         "--extra",
@@ -50,6 +52,8 @@ LOCKS: dict[str, list[str]] = {
         "langchain",
         "--extra",
         "gateway",
+        "--extra",
+        "saml",
         f"{REQ}langgraph.in",
         f"{REQ}build.in",
     ],  # fmt: skip

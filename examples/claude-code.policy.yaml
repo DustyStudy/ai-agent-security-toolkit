@@ -20,7 +20,37 @@ taint:
   enabled: true
   action: approve
 
+# Folders the agent may read, for every path argument of every tool (Read, Grep, Glob, ...).
+# A tool's own roots must sit inside these; a path argument without roots gets them.
+files:
+  read_roots: [/home/me/project]
+  deny_patterns: ['(^|[\\/])\.env', '\.pem$', '(^|[\\/])id_(rsa|ed25519)']
+
 tools:
+  Glob:
+    description: Find files by name in the checkout.
+    args:
+      pattern: {type: string, required: true, max_length: 500}
+      path: {type: path}
+
+  Grep:
+    description: Search file contents in the checkout.
+    args:
+      pattern: {type: string, required: true, max_length: 1000}
+      path: {type: path}
+      glob: {type: string, max_length: 500}
+      type: {type: string, max_length: 50}
+      output_mode: {type: string, enum: [content, files_with_matches, count]}
+      head_limit: {type: integer, minimum: 0}
+      offset: {type: integer, minimum: 0}
+      multiline: {type: boolean}
+      "-i": {type: boolean}
+      "-n": {type: boolean}
+      "-A": {type: integer, minimum: 0}
+      "-B": {type: integer, minimum: 0}
+      "-C": {type: integer, minimum: 0}
+      context: {type: integer, minimum: 0}
+
   Read:
     description: Read a file in the checkout.
     # Not marked returns_untrusted: an agent reads files first thing, so every session would be

@@ -487,6 +487,73 @@ class _Limiter:
                     del self._active[user]
 
 
+class _TokenBudget:
+    """Per-user model tokens over a rolling 24 hours, in memory: per gateway process.
+
+    shortcut: a restart forgets what was spent, and each replica counts on its own; move the
+    ledger to shared storage when budgets must hold across restarts or replicas.
+    Checked before the upstream call and charged after it, so requests already in flight (at most
+    concurrent_requests per user) can take a user past the budget by those requests' tokens.
+    """
+
+    WINDOW_S = 86400.0
+
+    def __init__(self, per_day: int, clock: Callable[[], float]) -> None:
+        self._per_day, self._clock = per_day, clock
+        self._spent: dict[str, deque[tuple[float, int]]] = {}
+        self._totals: dict[str, int] = {}
+        self._lock = threading.Lock()
+        self._swept = clock()
+
+    def _expire(self, user: str, now: float) -> None:
+        spent = self._spent.get(user)
+        while spent and now - spent[0][0] >= self.WINDOW_S:
+            self._totals[user] -= spent.popleft()[1]
+        if spent is not None and not spent:
+            del self._spent[user], self._totals[user]
+
+    def check(self, user: str) -> None:
+        with self._lock:
+            now = self._clock()
+            if now - self._swept >= 3600:
+                # Forget users with nothing left in the window, or every user ever seen stays.
+                self._swept = now
+                for u in list(self._spent):
+                    self._expire(u, now)
+            self._expire(user, now)
+            if self._totals.get(user, 0) < self._per_day:
+                return
+            # Retry once enough of the oldest spending has left the window to go under budget.
+            over, wait = self._totals[user] - self._per_day, 1
+            for at, tokens in self._spent[user]:
+                over -= tokens
+                if over < 0:
+                    wait = math.ceil(self.WINDOW_S - (now - at))
+                    break
+        raise HttpError(429, "token budget exceeded", "budget_exceeded", retry_after=max(1, wait))
+
+    def charge(self, user: str, tokens: int) -> None:
+        if tokens <= 0:
+            return
+        with self._lock:
+            self._spent.setdefault(user, deque()).append((self._clock(), tokens))
+            self._totals[user] = self._totals.get(user, 0) + tokens
+
+
+def _tokens_used(usage: Any, max_tokens: int) -> int:
+    """The upstream's reported total, or max_tokens when it reported none (an upper bound on the
+    completion; the prompt then goes uncounted)."""
+    if isinstance(usage, dict):
+        total = usage.get("total_tokens")
+        if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+            return total
+        parts = [usage.get("prompt_tokens"), usage.get("completion_tokens")]
+        counts = [p for p in parts if isinstance(p, int) and not isinstance(p, bool) and p >= 0]
+        if len(counts) == 2:
+            return sum(counts)
+    return max_tokens
+
+
 class _AuditBudget:
     """Per-peer token bucket for audit records written before authentication.
 
@@ -628,6 +695,11 @@ class Gateway:
         self._oidc = None if config.oidc is None else OidcVerifier(config.oidc, fetch=jwks_fetch)
         self._auth_slots = asyncio.Semaphore(MAX_CONCURRENT_AUTH)
         self._limiter = _Limiter(config.requests_per_min, config.concurrent_requests, clock)
+        self._budget = (
+            None
+            if config.tokens_per_user_per_day is None
+            else _TokenBudget(config.tokens_per_user_per_day, clock)
+        )
         self._preauth_audit = _AuditBudget(PREAUTH_AUDIT_BURST, PREAUTH_AUDIT_PER_MIN, clock)
         # Two pools, so slow generations cannot starve auth and policy lookups of threads. A
         # request holds at most one upstream thread, and _upstream_active (event loop only) keeps
@@ -1328,14 +1400,21 @@ class Gateway:
             if enforce:
                 raise HttpError(400, "request blocked by input policy", "input_blocked")
         self._screen_outbound(req, upstream, log, gp)
+        if self._budget is not None:
+            try:
+                self._budget.check(user)
+            except HttpError as e:
+                log.log("gateway_budget_exceeded", retry_after_s=e.retry_after)
+                e.audited = True
+                raise
 
         if stream and gp.stream_mode == "holdback":
             req["model"], req["stream"] = upstream.model, True
-            if include_usage:
+            if include_usage or self._budget is not None:
                 req["stream_options"] = {"include_usage": True}
             events = self._holdback_events(
                 upstream, json.dumps(req).encode(), mw, session, enforce, log, gp,
-                request_id, include_usage, removed_tools,
+                request_id, include_usage, removed_tools, user, req["max_tokens"],
             )  # fmt: skip
             return 200, events, True
         req["model"], req["stream"] = upstream.model, False
@@ -1348,6 +1427,10 @@ class Gateway:
         except TimeoutError:
             log.log("gateway_upstream_error", upstream=upstream.name, error="timeout")
             raise HttpError(504, "upstream timeout", "upstream_timeout") from None
+        if self._budget is not None:
+            # Charged before the checks: a blocked answer still cost the tokens.
+            usage = raw.get("usage") if isinstance(raw, dict) else None
+            self._budget.charge(user, _tokens_used(usage, req["max_tokens"]))
 
         result = self._check_response(raw, mw, session, enforce, log, gp)
         result.update(
@@ -1375,6 +1458,8 @@ class Gateway:
         request_id: str,
         include_usage: bool,
         removed_tools: list[str],
+        user: str,
+        max_tokens: int,
     ) -> Generator[dict[str, Any], None, None]:
         """Chunks to send. Text is released through Holdback; tool calls only at the end."""
         cfg = self.config
@@ -1392,12 +1477,13 @@ class Gateway:
         calls: dict[int, dict[str, Any]] = {}
         finish: Any = None
         usage: Any = None
-        first = True
+        first, started = True, False
         upstream_events = self._stream_transport(
             upstream, payload, cfg.upstream_timeout_s, cfg.max_response_bytes
         )
         try:
             for event in upstream_events:
+                started = True
                 if not isinstance(event, dict):
                     raise UpstreamError("upstream stream event is not an object")
                 if event.get("error") is not None:
@@ -1461,6 +1547,9 @@ class Gateway:
             raise HttpError(500, "internal error", "internal_error", audited=True) from None
         finally:
             upstream_events.close()  # client gone or upstream failed: stop the upstream too
+            if self._budget is not None and started:
+                # A cut stream without a usage event is charged max_tokens: an upper bound.
+                self._budget.charge(user, _tokens_used(usage, max_tokens))
 
         raw = {
             "choices": [

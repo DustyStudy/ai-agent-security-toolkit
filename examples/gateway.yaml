@@ -67,6 +67,7 @@ limits:
   upstream_timeout_s: 120
   requests_per_min: 60     # per user, per gateway process
   concurrent_requests: 4   # per user
+  # tokens_per_user_per_day: 200000  # per user, rolling 24 h, per gateway process; over it, 429
   max_connections: 1000    # all clients together, before authentication; above it, 503
   header_timeout_s: 10     # a connection that has not sent a whole request head by then is closed
   shutdown_timeout_s: 30   # on SIGTERM, requests in flight get this long to finish

@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- Gateway: `limits.tokens_per_user_per_day` sets a per-user token budget over a rolling 24 hours (off by default). A user over it gets 429 `budget_exceeded` with a `Retry-After`, audited as `gateway_budget_exceeded`, and nothing reaches the model. Usage is the upstream's reported `total_tokens`, or the request's `max_tokens` when it reports none; holdback streams ask the upstream for usage when a budget is set. The count is in memory per gateway process.
+
 ## [0.13.0] - 2026-11-24
 
 ### Added

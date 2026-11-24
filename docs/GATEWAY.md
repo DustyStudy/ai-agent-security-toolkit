@@ -268,6 +268,7 @@ Limits:
 | No group policy matches the user | 403 |
 | Bundle expired | 503 |
 | Rate or concurrency limit | 429 |
+| User over `limits.tokens_per_user_per_day` | 429 `budget_exceeded` with `Retry-After` (seconds until enough of the oldest spending leaves the 24-hour window); audited as `gateway_budget_exceeded`; nothing is forwarded |
 | More than `limits.max_connections` (default 1000) connections and requests open | 503 from the HTTP server: plain text, not audited or counted in `/metrics` |
 | More than 8 token verifications in flight (`oidc` mode) | 503 |
 | More than 32 upstream model calls in flight | 503 `busy`, at once (not queued) |
@@ -361,6 +362,7 @@ docker run -d --name agentsec-gateway \
 - Without `bundle.state_file`, rollback protection across restarts relies on `min_revision` and `expires`.
 - An access token keeps the groups its user had at issue time until it expires or is revoked. The gateway never learns of an IdP change by itself: tokens are revoked only when `agentsec token offboard` runs (see **Offboarding** in the token section), so access lasts until your automation calls it and every store accepts the revocation.
 - Tool-call limits (`max_calls`) count per request, not per user over time.
+- `limits.tokens_per_user_per_day` counts the `total_tokens` each upstream reports, over a rolling 24 hours, in the gateway process's memory: a restart forgets it and each replica counts on its own. A response with no usage report is charged its `max_tokens`. The check runs before the upstream call and the charge after it, so requests already in flight can take a user past the budget. With a budget set, holdback streams always ask the upstream for usage (clients still see it only if they ask). It counts tokens, not money.
 - Path and URL argument rules are evaluated on the gateway host, which may not match where the client runs the tool.
 - Upstream addresses are not checked: `upstreams` and `mcp_upstreams` URLs come from the operator's config (a client can never supply one), are usually loopback or private by design, and are resolved by the HTTP client on each connection. Whoever controls DNS for an upstream's hostname chooses where its requests and credential go; use an IP literal or `https` for an upstream that is not on loopback.
 - Outbound screening finds only what the secret rules recognise (known key formats, private keys, token shapes); a password in prose or an encoded secret passes. It is per upstream, not per group. Audio and file parts, and remote image URLs, are refused in every mode.

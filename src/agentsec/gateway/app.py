@@ -748,7 +748,8 @@ class Gateway:
         self._tokens = (
             None if config.tokens is None else TokenStore(config.tokens.store, clock=wall_clock)
         )
-        self._scim = self._scim_secret = None
+        self._scim = None
+        self._scim_secret: bytes | None = None
         if config.scim_token_ref is not None and config.tokens is not None:
             from agentsec.gateway.scim import ScimDirectory
 
@@ -935,11 +936,9 @@ class Gateway:
         """/scim/v2/Users and /scim/v2/ServiceProviderConfig for the IdP's provisioning."""
         from agentsec.gateway.scim import SERVICE_PROVIDER_CONFIG, ScimError
 
-        scim, secret = self._scim, self._scim_secret
-        assert scim is not None and secret is not None  # noqa: S101 - the route checks it
-        auth = [v for k, v in scope.get("headers", []) if k.lower() == b"authorization"]
-        given = auth[0][7:] if len(auth) == 1 and auth[0][:7].lower() == b"bearer " else b""
-        if not hmac.compare_digest(given, secret):
+        scim = self._scim
+        assert scim is not None  # noqa: S101 - the route checks it
+        if not self._scim_authorized(scope):
             self._log_auth_failed(request_id, "scim: bad bearer token", _peer(scope))
             await self._scim_json(send, 401, ScimError(401, "unauthenticated").body(), request_id)
             return
@@ -991,6 +990,12 @@ class Gateway:
             await self._scim_json(send, e.status, e.body(), request_id)
             return
         await self._scim_json(send, status, payload, request_id)
+
+    def _scim_authorized(self, scope: Scope) -> bool:
+        assert self._scim_secret is not None  # noqa: S101 - set with the directory
+        auth = [v for k, v in scope.get("headers", []) if k.lower() == b"authorization"]
+        given = auth[0][7:] if len(auth) == 1 and auth[0][:7].lower() == b"bearer " else b""
+        return hmac.compare_digest(given, self._scim_secret)
 
     async def _scim_body(self, receive: Receive) -> Any:
         from agentsec.gateway.scim import ScimError

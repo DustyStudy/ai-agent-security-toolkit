@@ -9,6 +9,7 @@ from agentsec.sandbox.adapters import (
 from agentsec.sandbox.blocklist import Blocklist
 from agentsec.sandbox.guard import Decision, Session, ToolDenied, ToolGuard, Verdict
 from agentsec.sandbox.policy import ArgRule, Policy, PolicyError, TaintPolicy, ToolRule
+from agentsec.sandbox.policy_hook import HttpPolicyHook
 from agentsec.sandbox.subprocess_runner import (
     CommandDenied,
     ExecRule,
@@ -23,6 +24,7 @@ __all__ = [
     "CommandDenied",
     "Decision",
     "ExecRule",
+    "HttpPolicyHook",
     "Policy",
     "PolicyError",
     "SafeCommandRunner",

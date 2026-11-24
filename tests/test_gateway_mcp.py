@@ -779,3 +779,40 @@ def test_an_older_mcp_sdk_is_refused_with_a_clear_error(installed):
 def test_the_tested_sdk_and_newer_are_accepted():
     for installed in ("2.3.0", "2.10.1", "3.0.0"):
         gwmcp.require_sdk(installed)
+
+
+def test_the_policy_hook_reaches_the_mcp_path(tmp_path, monkeypatch):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen = []
+
+    class Deny(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            seen.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"allow": false}')
+
+        def log_message(self, *args):
+            pass
+
+    hook = HTTPServer(("127.0.0.1", 0), Deny)
+    threading.Thread(target=hook.serve_forever, daemon=True).start()
+    monkeypatch.setenv("MAIL_MCP_TOKEN", "t")
+    extra = f"policy_hook: {{url: 'http://127.0.0.1:{hook.server_port}/'}}\n"
+    upstreams = Upstreams(docs=docs_server(), mail=mail_server())
+    app = Gateway(write_config(tmp_path, extra), sink=MemorySink(), mcp_connector=upstreams.connect)
+
+    async def main(url):
+        async with client(url) as c:
+            await c.list_tools()
+            return await c.call_tool("mail__send", {"to": "bob@corp.example"})
+
+    try:
+        with serving(app) as url:
+            result = run(main(url))
+    finally:
+        hook.shutdown()
+    assert result.is_error and "external policy" in text(result)
+    assert upstreams.servers["mail"].sent == []
+    assert seen and seen[0]["tool"] == "mail__send" and seen[0]["actor"] == "alice"

@@ -34,6 +34,14 @@ client.chat.completions.create(model="llama3.1-8b", messages=[{"role": "user", "
    - `oidc`: one `Authorization: Bearer <JWT>` from your IdP, verified against its JWKS (fetched over https). Only asymmetric algorithms are accepted; `iss`, `aud`, `exp`, `iat` and `sub` must be present and valid; a key that declares an algorithm verifies only that algorithm. Keys are cached and refreshed after half of `jwks_cache_s`; if the IdP is down, the cached keys work until `jwks_cache_s`, then every token is refused. Key fetches, for an unknown `kid` or a stale cache, happen at most once a minute and have a total deadline. The audit log records why a token failed; the client only sees 401.
 
    In both modes `allowed_groups` restricts access by group.
+
+   **Company accounts only.** `identity.allowed_domains` (for example `[corp.example, "*.corp.example"]`) requires the user name to be an email address in one of those domains. `identity.block_personal_domains: true` refuses consumer mailboxes (gmail.com, outlook.com, icloud.com, proton.me and about 40 more; the list is `agentsec.gateway.accounts.PERSONAL_DOMAINS`). With either rule on, a user name that is not an address with exactly one `@` and an ASCII domain is refused, so look-alike Unicode domains never match. A refused account gets 403 `account_not_allowed`, recorded as `gateway_account_refused` with the reason. The rules also apply to access tokens minted before they were turned on. In `oidc` mode, set `user_claim: email` (and have the IdP verify addresses) for these rules to make sense.
+
+   ```yaml
+   identity:
+     allowed_domains: [corp.example, "*.corp.example"]
+     block_personal_domains: true
+   ```
 2. **Rebuild the request.** Only known fields go upstream (`model`, `messages`, `tools`, `tool_choice`, `temperature`, `max_tokens`, ...). `model` picks a configured upstream by name, so a client can never choose a URL. `max_tokens` is capped and `n` must be 1.
 3. **Filter tools.** Tools the policy does not allow, and tool definitions that look poisoned, are removed before the model sees them. A `tool_choice` naming a removed tool gets a 400.
 4. **Screen input.** Every message is scanned for prompt injection. `role: tool` messages count as untrusted and taint the request, whatever their content, so the policy's taint rules (deny side-effecting tools after reading untrusted content) apply to the answer. A flagged message blocks the request. Content parts are an allowlist: `text`, and `image_url` only as an inline `data:` image. A remote image URL is blocked here. Every other part type (`video_url`, `audio_url`, `input_audio`, `file`, ...) is refused with a 400 in every mode, because a model server that fetches a URL would fetch whatever address the user names.
@@ -198,6 +206,25 @@ egress:
 - **Audit and metrics.** Each match is an `egress_blocked` record: `source` (`tool_call` or `model_text`), `tool`, `argument`, `host`, `url_sha256` (no audit record holds a URL argument: `tool_request` stores it as `sha256:<hex>` too), `matched`, `match_value`, `entry`, `list`, `list_sha256`, `list_age_s`, `resolved`. The request's `gateway_request` record carries the mode. `/dashboard` shows each list's entries, age and status. `/metrics` adds `agentsec_gateway_blocklist_age_seconds{list=...}`; matches count under `agentsec_gateway_events_total{event="egress_blocked"}`.
 - **Limits.** This checks the argument, not the connection: the client or MCP server resolves the name again later, redirects are not followed, URLs inside free-form strings are not seen, and feeds lag new attacker infrastructure. Apply the same feeds at your egress firewall, and use a filtering resolver (see docs/PRODUCTION.md).
 
+## External policy or DLP service
+
+`policy_hook` sends every tool call the local policy allows to your own service before the call reaches the client (model path) or the MCP upstream. This applies to calls that need approval too. The call goes ahead only on an explicit `{"allow": true}`.
+
+```yaml
+policy_hook:
+  url: https://dlp.corp.example/v1/tool-call   # https, or http to a loopback address only
+  timeout_s: 5                                 # default 5
+  auth: env:AGENTSEC_POLICY_HOOK_TOKEN         # optional; sent as "Authorization: Bearer ..."
+```
+
+The gateway POSTs `{"tool": ..., "arguments": {...}, "verdict": "allow", "reasons": [], "actor": "alice@corp.example"}`. The arguments are sent as the model wrote them, unredacted, because a DLP service has to see them. The hook fails closed: any of the following denies the call.
+
+- an error, a timeout, or a status other than 200
+- a redirect (it would replay the arguments and the token to another host)
+- an answer over 64 KB, one that is not JSON, or one where `allow` is anything but `true`
+
+Each answer is audited as `policy_hook` with `allowed` and, on failure, only the error type. The service sits in the path of every tool call, so make it highly available. Library users pass `ToolGuard(policy_hook=HttpPolicyHook(url), policy_hook_timeout_s=...)` or any callable `(call, decision) -> bool`.
+
 ## Testing the gateway with the fuzzer
 
 `agentsec fuzz` can attack the gateway like any OpenAI-compatible endpoint, so you can compare the attack-success rate with and without it:
@@ -280,6 +307,12 @@ Limits:
   - `Origin`: a request that carries one is refused unless it is listed in `listen.allowed_origins` (exact origins such as `https://chat.corp.example`, no wildcards, default empty). Clients that are not browsers send no `Origin` and are unaffected. A browser app that calls the gateway, same-origin or not, must be listed. The admin listener refuses every `Origin`.
   - `Host`: its name must be one of `listen.allowed_hosts` (names such as `gateway.corp.example`, without a port, no wildcards). The port in `Host` is not compared: the name is what a rebinding page cannot fake, and a forwarded port differs from the configured one. Unset with a loopback `listen.host`, the list is `localhost`, `127.0.0.1`, `[::1]` and `listen.host`. A non-loopback listener requires an explicit list containing the name your proxy forwards. The admin listener always requires a loopback name. A request with no `Host` header at all (HTTP/1.0, which no browser sends) is served.
   - `GET /healthz` on the main listener is exempt from both checks, because a container probe sends the pod address as `Host`. It returns a constant.
+- **IP allowlist.** `listen.allowed_clients` (CIDR networks, IPv4 or IPv6, default empty, meaning any address) limits the main listener to those peers. A peer outside the list gets a 403 `client_not_allowed` before authentication, recorded as a `gateway_rejected` audit event. `GET /healthz` is exempt, as above. An IPv4 peer on a dual-stack socket (`::ffff:10.0.0.7`) matches its IPv4 network. The check uses the TCP peer, never `X-Forwarded-For`, so behind an auth proxy the peer is the proxy. The loader therefore refuses a list that leaves out a `trusted_proxies` network, and it refuses `/0` and networks with host bits set. To limit end users behind a proxy, allowlist them at the proxy or load balancer.
+
+  ```yaml
+  listen:
+    allowed_clients: [10.20.0.0/16, 2001:db8:20::/48]
+  ```
 - **Upstream TLS.** Configure an HTTPS endpoint with a trusted certificate for every remote model and MCP service. Loopback endpoints also accept HTTP for local services.
 - **TLS.** A non-loopback `listen.host` needs `listen.tls`, or `tls_terminated_by_proxy: true` when the auth proxy terminates TLS on the same host or a trusted network.
 - **One process.** Rate limits and the audit chain are per process. Run one replica per audit file.

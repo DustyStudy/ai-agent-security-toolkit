@@ -1,0 +1,38 @@
+# Loki + Alloy beside the gateway, on the gateway's container network with no published ports.
+# Pin each image by digest when you pull it. See README.md.
+services:
+  loki:
+    image: grafana/loki:3.6.20
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    user: "10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 384m
+    restart: unless-stopped
+    volumes:
+      - ./loki.yaml:/etc/loki/loki.yaml:ro
+      - /opt/loki/data:/loki            # chown 10001 first
+    networks: [aitk]
+
+  alloy:
+    image: grafana/alloy:v1.21.3
+    # Storage moved off the image default: user 10001 can't create it there.
+    command: ["run", "--storage.path=/alloy-data", "--server.http.listen-addr=127.0.0.1:12345",
+              "/etc/alloy/config.alloy"]
+    user: "10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 96m
+    restart: unless-stopped
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+      - /opt/alloy/data:/alloy-data     # chown 10001 first; holds the read position
+      - /var/lib/agentsec/audit.jsonl:/var/log/agentsec/audit.jsonl:ro
+    depends_on: [loki]
+    networks: [aitk]
+
+networks:
+  aitk:
+    external: true                      # the gateway's network

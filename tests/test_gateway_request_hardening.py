@@ -280,6 +280,16 @@ def test_an_oidc_failure_reason_does_not_echo_the_token(tmp_path):
     }
 
 
+def test_a_missing_token_is_audited_as_missing(tmp_path):
+    pytest.importorskip("jwt")
+    from tests.test_gateway_oidc import oidc_gateway
+
+    app, sink = oidc_gateway(tmp_path)
+    assert call(app, body=chat(), peer="10.5.5.5")[0] == 401
+    (record,) = records(sink, "gateway_auth_failed")
+    assert record["data"]["reason"] == "no bearer token"
+
+
 # ------------------------------------------------------------------- G6: no proxies
 
 

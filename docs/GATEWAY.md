@@ -42,6 +42,20 @@ client.chat.completions.create(model="llama3.1-8b", messages=[{"role": "user", "
      allowed_domains: [corp.example, "*.corp.example"]
      block_personal_domains: true
    ```
+
+   **Require MFA** (`oidc` mode). `identity.oidc.require_mfa: true` accepts a token only if the IdP says the sign-in used more than one factor: its `amr` claim (RFC 8176, a list) contains a value from `mfa_amr` (default `[mfa]`, which Microsoft Entra ID, Okta and Auth0 send), or its `acr` claim is one of `mfa_acr` (for example the level-of-assurance values you set up in Keycloak or Ping). Values are compared exactly. A missing or malformed claim counts as no MFA. A valid token without MFA gets 403 `mfa_required`, recorded as `gateway_mfa_required` with the user. Access tokens record whether they were minted after an MFA sign-in, and with `require_mfa` on, a token minted without one (for example before the rule was turned on) gets the same 403, so users mint a new one after signing in with MFA. In `trusted_header` mode, enforce MFA in the auth proxy or IdP; the gateway cannot see how the user signed in.
+
+   ```yaml
+   identity:
+     mode: oidc
+     oidc:
+       issuer: https://idp.corp.example/realms/main
+       audience: agentsec-gateway
+       jwks_url: https://idp.corp.example/realms/main/protocol/openid-connect/certs
+       require_mfa: true
+       mfa_amr: [mfa]                   # default
+       mfa_acr: [urn:corp:loa:2]        # optional
+   ```
 2. **Rebuild the request.** Only known fields go upstream (`model`, `messages`, `tools`, `tool_choice`, `temperature`, `max_tokens`, ...). `model` picks a configured upstream by name, so a client can never choose a URL. `max_tokens` is capped and `n` must be 1.
 3. **Filter tools.** Tools the policy does not allow, and tool definitions that look poisoned, are removed before the model sees them. A `tool_choice` naming a removed tool gets a 400.
 4. **Screen input.** Every message is scanned for prompt injection. `role: tool` messages count as untrusted and taint the request, whatever their content, so the policy's taint rules (deny side-effecting tools after reading untrusted content) apply to the answer. A flagged message blocks the request. Content parts are an allowlist: `text`, and `image_url` only as an inline `data:` image. A remote image URL is blocked here. Every other part type (`video_url`, `audio_url`, `input_audio`, `file`, ...) is refused with a 400 in every mode, because a model server that fetches a URL would fetch whatever address the user names.

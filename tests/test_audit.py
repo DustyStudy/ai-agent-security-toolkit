@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
+import pytest
+
 from agentsec.cli import main
 from agentsec.middleware import AuditLogger, FileSink, MemorySink, verify_file, verify_records
 from agentsec.middleware.audit import compute_hash
@@ -260,3 +262,48 @@ def test_non_finite_floats_are_written_as_strings_standard_json_parsers_accept(t
     data = json.loads(line, parse_constant=refuse)["data"]  # strict parsers reject NaN
     assert data == {"nan": "nan", "vals": ["inf", 1.5]}
     assert verify_file(path).ok
+
+
+# ---------------------------------------------- checkpoint anchoring (tail truncation, rebuild)
+
+
+def _anchored_log(tmp_path):
+    log = tmp_path / "audit.jsonl"
+    logger = AuditLogger(FileSink(str(log)))
+    for i in range(5):
+        logger.log("tool_call", n=i)
+    cp = tmp_path / "checkpoint.json"
+    cp.write_text(json.dumps(logger.checkpoint()))
+    logger.log("tool_call", n=5)  # records after the checkpoint are fine
+    return log, cp
+
+
+def test_verify_with_checkpoint_passes_on_an_intact_log(tmp_path):
+    log, cp = _anchored_log(tmp_path)
+    assert main(["audit", "verify", str(log), "--checkpoint", str(cp)]) == 0
+
+
+def test_verify_with_checkpoint_catches_tail_truncation(tmp_path, capsys):
+    log, cp = _anchored_log(tmp_path)
+    lines = log.read_text().splitlines(keepends=True)
+    log.write_text("".join(lines[:3]))  # a valid chain, just shorter: undetectable without it
+    assert main(["audit", "verify", str(log)]) == 0
+    assert main(["audit", "verify", str(log), "--checkpoint", str(cp)]) == 1
+    assert "truncated" in capsys.readouterr().err
+
+
+def test_verify_with_checkpoint_catches_a_rebuilt_log(tmp_path):
+    log, cp = _anchored_log(tmp_path)
+    log.unlink()
+    forged = AuditLogger(FileSink(str(log)))
+    for i in range(6):
+        forged.log("tool_call", n=i, note="nothing to see")
+    assert main(["audit", "verify", str(log)]) == 0
+    assert main(["audit", "verify", str(log), "--checkpoint", str(cp)]) == 1
+
+
+@pytest.mark.parametrize("bad", ["[]", "{}", '{"seq": "1", "hash": "x"}', "not json"])
+def test_verify_rejects_a_malformed_checkpoint(tmp_path, bad):
+    log, cp = _anchored_log(tmp_path)
+    cp.write_text(bad)
+    assert main(["audit", "verify", str(log), "--checkpoint", str(cp)]) in (1, 2)

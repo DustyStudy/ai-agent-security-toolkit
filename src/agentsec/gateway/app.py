@@ -27,7 +27,7 @@ import urllib.request
 import uuid
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Generator, Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -119,14 +119,58 @@ AUDIT_KEEP_FIELDS = frozenset(
 
 
 class HttpError(Exception):
-    def __init__(self, status: int, message: str, code: str, *, audited: bool = False) -> None:
+    def __init__(
+        self,
+        status: int,
+        message: str,
+        code: str,
+        *,
+        audited: bool = False,
+        retry_after: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.status, self.message, self.code = status, message, code
         self.audited = audited  # already has its own audit record; do not log it twice
+        self.retry_after = retry_after  # seconds, sent as Retry-After
 
 
 class UpstreamError(Exception):
     pass
+
+
+class UpstreamRateLimited(UpstreamError):
+    """The provider answered 429 (rate limit or quota). Clients get 429, not 502."""
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__("upstream returned HTTP 429")
+        self.retry_after = retry_after
+
+
+MAX_RETRY_AFTER_S = 300
+
+
+def _retry_after(value: str | None) -> int:
+    """The provider's Retry-After in whole seconds, clamped to 1..300; 1 if absent or a date.
+
+    Only digits are read, so nothing the provider wrote reaches the client but a small number.
+    """
+    value = (value or "").strip()
+    if not value.isascii() or not value.isdigit():
+        return 1
+    return min(max(int(value[:6]), 1), MAX_RETRY_AFTER_S)
+
+
+def _upstream_http_error(err: UpstreamError, audited: bool = False) -> HttpError:
+    """The client-facing error for a failed upstream call."""
+    if isinstance(err, UpstreamRateLimited):
+        return HttpError(
+            429,
+            "upstream rate limited",
+            "upstream_rate_limited",
+            audited=audited,
+            retry_after=err.retry_after,
+        )
+    return HttpError(502, "upstream error", "upstream_error", audited=audited)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -195,15 +239,49 @@ def _watch(sock: socket.socket | None) -> None:
         deadline.watch(sock)
 
 
+def _connect_within_deadline(
+    address: tuple[str, int], timeout: Any = None, source_address: Any = None, **kw: Any
+) -> socket.socket:
+    host, port = address
+    deadline = getattr(_DEADLINE, "current", None)
+    if deadline is None:
+        return socket.create_connection(address, timeout, source_address, **kw)
+    # getaddrinfo cannot be interrupted, and the system resolver may wait far longer than the
+    # call may. One thread per lookup, not a shared pool: a name that hangs must not queue
+    # other upstreams' lookups behind it. Calls are already bounded by the upstream pool.
+    lookup: Future[Any] = Future()
+
+    def resolve() -> None:
+        try:
+            lookup.set_result(socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM))
+        except BaseException as e:  # noqa: BLE001 - handed to the waiting call
+            lookup.set_exception(e)
+
+    threading.Thread(target=resolve, name="agentsec-dns", daemon=True).start()
+    try:
+        infos = lookup.result(timeout=max(deadline.at - time.monotonic(), 0.0))
+    except TimeoutError:
+        raise TimeoutError("upstream name resolution timed out") from None
+    error: OSError = OSError("name resolved to no address")
+    for *_, sockaddr in infos:
+        try:  # a numeric address: create_connection does no lookup of its own
+            return socket.create_connection((str(sockaddr[0]), port), timeout, source_address, **kw)
+        except OSError as e:
+            error = e
+    raise error
+
+
 class _WatchedHTTPConnection(http.client.HTTPConnection):
     def connect(self) -> None:
+        self._create_connection = _connect_within_deadline
         super().connect()
         _watch(self.sock)
 
 
 class _WatchedHTTPSConnection(http.client.HTTPSConnection):
     def connect(self) -> None:
-        super().connect()  # self.sock is the TLS socket from here on
+        self._create_connection = _connect_within_deadline
+        super().connect()  # self.sock is the TLS socket from here on; SNI uses self.host
         _watch(self.sock)
 
 
@@ -262,6 +340,10 @@ def _upstream_failure(e: Exception, deadline: _Deadline) -> Exception:
         return e
     if isinstance(e, urllib.error.HTTPError):
         e.close()  # the error body is never read; release the connection
+        if e.code == 429:
+            return UpstreamRateLimited(
+                _retry_after(e.headers.get("Retry-After") if e.headers else None)
+            )
         return UpstreamError(f"upstream returned HTTP {e.code}")
     if isinstance(e, urllib.error.URLError):
         reason = e.reason
@@ -1262,7 +1344,7 @@ class Gateway:
             raw = self._transport(upstream, payload, cfg.upstream_timeout_s, cfg.max_response_bytes)
         except UpstreamError as e:
             log.log("gateway_upstream_error", upstream=upstream.name, error=str(e))
-            raise HttpError(502, "upstream error", "upstream_error") from None
+            raise _upstream_http_error(e) from None
         except TimeoutError:
             log.log("gateway_upstream_error", upstream=upstream.name, error="timeout")
             raise HttpError(504, "upstream timeout", "upstream_timeout") from None
@@ -1354,7 +1436,7 @@ class Gateway:
                 error=str(e),
                 released_chars=len(held.released),
             )
-            raise HttpError(502, "upstream error", "upstream_error", audited=True) from None
+            raise _upstream_http_error(e, audited=True) from None
         except TimeoutError:
             self._audit_cut_stream(held, mw, log, enforce)
             log.log(
@@ -1773,7 +1855,13 @@ class Gateway:
 
     # ------------------------------------------------------------- responses
     @staticmethod
-    async def _json(send: Send, status: int, payload: dict[str, Any], request_id: str) -> None:
+    async def _json(
+        send: Send,
+        status: int,
+        payload: dict[str, Any],
+        request_id: str,
+        extra_headers: list[tuple[bytes, bytes]] | None = None,
+    ) -> None:
         body = json.dumps(payload).encode()
         await send(
             {
@@ -1783,6 +1871,7 @@ class Gateway:
                     (b"content-type", b"application/json"),
                     (b"x-request-id", request_id.encode()),
                     (b"cache-control", b"no-store"),
+                    *(extra_headers or []),
                 ],
             }
         )
@@ -1790,7 +1879,8 @@ class Gateway:
 
     async def _error(self, send: Send, e: HttpError, request_id: str) -> None:
         payload = {"error": {"message": e.message, "type": "gateway_error", "code": e.code}}
-        await self._json(send, e.status, payload, request_id)
+        extra = [] if e.retry_after is None else [(b"retry-after", str(e.retry_after).encode())]
+        await self._json(send, e.status, payload, request_id, extra)
 
     @staticmethod
     async def _sse(send: Send, result: dict[str, Any], request_id: str) -> None:

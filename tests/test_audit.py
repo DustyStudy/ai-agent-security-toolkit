@@ -247,3 +247,16 @@ def test_credentials_are_removed_from_metadata_and_structured_fields():
     for private in (token, "sample-private-value", "sid=private"):
         assert private not in serialized
     assert verify_records(sink.records).ok
+
+
+def test_non_finite_floats_are_written_as_strings_standard_json_parsers_accept(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    AuditLogger(FileSink(path)).log("score", nan=float("nan"), vals=[float("inf"), 1.5])
+    line = path.read_text(encoding="utf-8")
+
+    def refuse(name):
+        raise ValueError(name)
+
+    data = json.loads(line, parse_constant=refuse)["data"]  # strict parsers reject NaN
+    assert data == {"nan": "nan", "vals": ["inf", 1.5]}
+    assert verify_file(path).ok

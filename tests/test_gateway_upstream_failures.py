@@ -224,22 +224,50 @@ def test_a_stream_that_stalls_before_release_is_a_plain_504(tmp_path, monkeypatc
 # ---------------------------------------------------- bad statuses never leak upstream text
 
 
-@pytest.mark.parametrize("status", ["429 Too Many Requests", "500 Internal Server Error"])
+@pytest.mark.parametrize(
+    ("status", "client_status", "code", "retry_after"),
+    [
+        ("429 Too Many Requests", 429, "upstream_rate_limited", b"30"),
+        ("500 Internal Server Error", 502, "upstream_error", None),
+    ],
+)
 @pytest.mark.parametrize("holdback", [False, True])
-def test_upstream_error_statuses_are_502_without_upstream_text(
-    tmp_path, monkeypatch, stub, status, holdback, caplog
+def test_upstream_error_statuses_are_mapped_without_upstream_text(
+    tmp_path, monkeypatch, stub, status, client_status, code, retry_after, holdback, caplog
 ):
     error = {"error": {"message": f"quota for key {KEY} exceeded, see {INTERNAL}"}}
     stub.handler = respond(status, json.dumps(error).encode(), extra=b"Retry-After: 30\r\n")
     app, sink = real_gateway(tmp_path, monkeypatch, stub, holdback=holdback)
+    headers: dict = {}
     with caplog.at_level(logging.DEBUG):
-        code, body = call(app, body=chat(stream=holdback))
-    assert code == 502 and body["error"]["code"] == "upstream_error"
+        got, body = call(app, body=chat(stream=holdback), response_headers=headers)
+    assert got == client_status and body["error"]["code"] == code
+    assert headers.get(b"retry-after") == retry_after
     assert upstream_errors(sink)[-1]["error"] == f"upstream returned HTTP {status[:3]}"
     # The key went to the upstream, and nowhere else: not the client, the audit or the logs.
     assert f"Bearer {KEY}".encode() in stub.requests[0]
     for where in (json.dumps(body), audit_text(sink), caplog.text):
         assert KEY not in where and "10.9.8.7" not in where and "quota" not in where
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        (b"", b"1"),  # none sent
+        (b"Retry-After: 0\r\n", b"1"),
+        (b"Retry-After: 86400\r\n", b"300"),  # a daily quota: clients still back off, bounded
+        (b"Retry-After: Wed, 21 Oct 2026 07:28:00 GMT\r\n", b"1"),  # dates are not echoed
+        (b"Retry-After: 5; see http://10.9.8.7\r\n", b"1"),
+    ],
+)
+def test_upstream_retry_after_is_clamped_and_never_echoed(
+    tmp_path, monkeypatch, stub, header, expected
+):
+    stub.handler = respond("429 Too Many Requests", b"{}", extra=header)
+    app, _ = real_gateway(tmp_path, monkeypatch, stub)
+    headers: dict = {}
+    assert call(app, body=chat(), response_headers=headers)[0] == 429
+    assert headers[b"retry-after"] == expected
 
 
 # ------------------------------------------------------------ broken bodies are 502, not 500
@@ -494,7 +522,7 @@ def test_failed_upstream_calls_still_count_against_the_rate_limit(tmp_path, monk
         "limits:\n  upstream_timeout_s: 2\n  requests_per_min: 2\n"
     )
     app = Gateway(write_config(tmp_path, extra), sink=MemorySink())
-    assert [call(app, body=chat())[0] for _ in range(3)] == [502, 502, 429]
+    assert [call(app, body=chat())[0] for _ in range(3)] == [502, 502, 429]  # ours, not theirs
     assert len(stub.requests) == 2
 
 
@@ -507,3 +535,27 @@ def test_max_tokens_is_capped_on_streamed_requests(tmp_path):
     assert status == 200
     assert stream.requests[0]["max_tokens"] == 50
     assert "max_completion_tokens" not in stream.requests[0]
+
+
+def test_a_hung_name_lookup_ends_at_the_call_deadline(monkeypatch):
+    real = socket.getaddrinfo
+    release = threading.Event()
+
+    def hung(host, *args, **kwargs):
+        if host == "hung.invalid":
+            release.wait(10)  # a resolver that is not answering
+        return real(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", hung)
+    up = Upstream("local", "http://hung.invalid:9/v1", "m")
+    try:
+        for call_it in (
+            lambda: http_transport(up, b"{}", 0.5, 1000),
+            lambda: list(http_stream_transport(up, b"{}", 0.5, 1000)),
+        ):
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                call_it()
+            assert time.monotonic() - started < 2
+    finally:
+        release.set()

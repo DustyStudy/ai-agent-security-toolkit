@@ -538,6 +538,7 @@ def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 # Deeper documents are refused whatever the Python version: before 3.14 the json module
 # raised RecursionError on deep nesting, 3.14 parses it, and the consumer's parser may not.
 MAX_JSON_DEPTH = 256
+MAX_JSON_CHARS = 1_000_000
 
 
 def _too_deep(doc: Any, limit: int = MAX_JSON_DEPTH) -> bool:
@@ -557,12 +558,22 @@ class JsonSchemaValidator:
 
     name = "json_schema"
 
-    def __init__(self, schema: dict[str, Any], action: Action = Action.BLOCK) -> None:
+    def __init__(
+        self,
+        schema: dict[str, Any],
+        action: Action = Action.BLOCK,
+        *,
+        max_chars: int = MAX_JSON_CHARS,
+    ) -> None:
         jsonschema.Draft202012Validator.check_schema(schema)
         self._validator = jsonschema.Draft202012Validator(schema)
         self.action = action
+        self.max_chars = max_chars
 
     def check(self, text: str) -> list[Violation]:
+        if len(text) > self.max_chars:
+            # Parsing and validating is unbounded work on attacker-sized model output.
+            return [Violation(self.name, f"output exceeds {self.max_chars} chars", self.action)]
         try:
             # NaN and Infinity are not JSON, and NaN passes every minimum and maximum.
             doc = json.loads(

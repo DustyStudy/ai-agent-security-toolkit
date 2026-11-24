@@ -6,6 +6,7 @@ Skipped unless ``langchain-core`` is installed (``pip install "ai-agent-security
 from __future__ import annotations
 
 import asyncio
+import warnings
 
 import pytest
 
@@ -168,3 +169,12 @@ def test_langgraph_tool_node_round_trip():
     assert ok.content == "5"
     assert "refused by security policy" in denied.content
     assert RAN == ["add"]
+
+
+def test_guard_tool_without_a_session_warns_like_wrap():
+    guard, _ = _guard()
+    with pytest.warns(UserWarning, match="default_session"):
+        guard_tool(add, guard)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        guard_tool(add, guard, Session())

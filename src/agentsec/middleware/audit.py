@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -468,6 +469,8 @@ class AuditLogger:
             return [self._clean(value[0], keep), self._clean_item(value[0], value[1], keep)]
         if isinstance(value, list | tuple | set | frozenset):
             return [self._clean(v, keep) for v in value]
+        if isinstance(value, float) and not math.isfinite(value):
+            return repr(value)  # "nan", "inf": NaN/Infinity are not JSON other parsers accept
         if isinstance(value, int | float | bool) or value is None:
             return value
         return self._clean_str(repr(value), keep)

@@ -68,6 +68,23 @@ def _check_headers(headers: dict[str, str]) -> None:
             raise ValueError(f"header {name}: value is not a valid header value")
 
 
+def _resolve_ref(ref: str, what: str) -> str:
+    """Resolve an ``env:``/``file:`` reference to a header-safe secret, never echoing it."""
+    from agentsec.gateway.config import resolve_secret  # env:/file: only, never literal
+
+    try:
+        secret = resolve_secret(ref)
+    except (OSError, UnicodeDecodeError) as e:
+        # Not the exception text: a decode error quotes bytes of the file.
+        reason = e.strerror if isinstance(e, OSError) and e.strerror else "not UTF-8 text"
+        raise ValueError(f"{what} file: reference cannot be read: {reason}") from None
+    if not secret or not all(33 <= ord(ch) <= 126 for ch in secret):
+        # Checked here, never echoed: an invalid header value would otherwise end up,
+        # secret included, in the exception text the report records.
+        raise ValueError(f"{what} {ref.partition(':')[0]}: reference is empty or not printable")
+    return secret
+
+
 def _post(
     url: str,
     body: bytes,
@@ -385,7 +402,12 @@ class AnthropicTarget:
                 text_parts.append(block.text)
             elif block.type == "tool_use":
                 calls.append(ToolCall(name=block.name, arguments=dict(block.input), id=block.id))
-        return TargetResponse(text="\n".join(text_parts), tool_calls=calls)
+        return TargetResponse(
+            text="\n".join(text_parts),
+            tool_calls=calls,
+            # The API's own safety stop: scored like a gateway refusal, as blocked.
+            blocked=getattr(msg, "stop_reason", None) == "refusal",
+        )
 
 
 class OllamaTarget:
@@ -481,22 +503,11 @@ class OpenAICompatTarget:
         self.model = model
         self.headers = {"Content-Type": "application/json", **(headers or {})}
         _check_headers(self.headers)
+        for name, value in list(self.headers.items()):
+            if value.startswith(("env:", "file:")):  # keeps API keys out of shell history
+                self.headers[name] = _resolve_ref(value, f"header {name}")
         if token is not None:
-            from agentsec.gateway.config import resolve_secret  # env:/file: only, never literal
-
-            try:
-                secret = resolve_secret(token)
-            except (OSError, UnicodeDecodeError) as e:
-                # Not the exception text: a decode error quotes bytes of the file.
-                reason = e.strerror if isinstance(e, OSError) and e.strerror else "not UTF-8 text"
-                raise ValueError(f"token file: reference cannot be read: {reason}") from None
-            if not secret or not all(33 <= ord(ch) <= 126 for ch in secret):
-                # Checked here, never echoed: an invalid header value would otherwise end up,
-                # token included, in the exception text the report records.
-                raise ValueError(
-                    f"token {token.partition(':')[0]}: reference is empty or not printable"
-                )
-            self.headers["Authorization"] = f"Bearer {secret}"
+            self.headers["Authorization"] = f"Bearer {_resolve_ref(token, 'token')}"
         self.stream = stream
         self.system_prompt = system_prompt
         self.seed = seed
@@ -704,7 +715,7 @@ def _from_sse(text: str) -> TargetResponse:
 
 
 def _openai_compat(spec: str, timeout: float | None = None) -> OpenAICompatTarget:
-    """``<base_url>#model=NAME[&token=env:VAR][&stream=1][&header=Name:value]``."""
+    """``<base_url>#model=NAME[&token=env:VAR][&stream=1][&header=Name:value|Name:env:VAR]``."""
     url, _, fragment = spec.partition("#")
     opts = parse_qs(fragment, keep_blank_values=True)
     unknown = set(opts) - {"model", "token", "stream", "header"}

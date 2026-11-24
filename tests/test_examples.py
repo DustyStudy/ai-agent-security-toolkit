@@ -68,6 +68,50 @@ def test_example_gateway_config_is_valid(name, monkeypatch):
     assert main(["serve", "--config", str(ROOT / "examples" / name), "--check"]) == 0
 
 
+def test_example_gateway_egress_block_is_valid_once_uncommented(tmp_path, monkeypatch):
+    """The commented egress section in gateway.yaml must load as soon as signed feeds exist."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    monkeypatch.setenv("AGENTSEC_DLP_FINGERPRINT_KEY", "k" * 64)
+    lines, on = [], False
+    for line in (ROOT / "examples" / "gateway.yaml").read_text(encoding="utf-8").splitlines():
+        on = line.startswith("# egress:") or (on and line.startswith("#  "))
+        lines.append(line[2:] if on else line)
+    assert any(line.startswith("egress:") for line in lines)
+    (tmp_path / "gateway.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (tmp_path / "policy.yaml").write_bytes((ROOT / "examples" / "policy.yaml").read_bytes())
+
+    key = Ed25519PrivateKey.generate()
+    (tmp_path / "feeds.key").write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    (tmp_path / "feeds.pub").write_bytes(
+        key.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+    )
+    feeds = tmp_path / "feeds"
+    feeds.mkdir()
+    (feeds / "drop.txt").write_text("192.0.2.0/24 ; SBL-TEST\n", encoding="utf-8")
+    (feeds / "urlhaus-hosts.txt").write_text("0.0.0.0 bad.example\n", encoding="utf-8")
+    for name, kind, file in [
+        ("drop", "ip", "drop.txt"),
+        ("urlhaus", "domain", "urlhaus-hosts.txt"),
+    ]:
+        argv = ["egress", "sign-feed", str(feeds / file), "--kind", kind, "--name", name]
+        assert main([*argv, "--key", f"file:{tmp_path / 'feeds.key'}"]) == 0
+
+    config = ["serve", "--config", str(tmp_path / "gateway.yaml"), "--check"]
+    assert main(config) == 0
+    (feeds / "drop.txt.sig").unlink()
+    assert main(config) != 0  # an unsigned feed refuses startup
+
+
 def test_example_agent_loop_guards_tools_and_writes_verifiable_audit(tmp_path):
     ex = _load_example()
     client = _Client("Here is the summary.")

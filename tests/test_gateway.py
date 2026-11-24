@@ -77,7 +77,13 @@ class FakeUpstream:
 
 
 def call(
-    app, path="/v1/chat/completions", body=None, method="POST", headers=USER, peer="127.0.0.1"
+    app,
+    path="/v1/chat/completions",
+    body=None,
+    method="POST",
+    headers=USER,
+    peer="127.0.0.1",
+    response_headers=None,  # a dict to fill with the response's headers
 ):
     scope = {
         "type": "http",
@@ -99,6 +105,8 @@ def call(
     status = sent[0]["status"]
     payload = b"".join(m.get("body", b"") for m in sent[1:])
     ctype = dict(sent[0]["headers"])[b"content-type"]
+    if response_headers is not None:
+        response_headers.update(dict(sent[0]["headers"]))
     if ctype == b"text/event-stream":
         return status, payload.decode()
     return status, json.loads(payload)

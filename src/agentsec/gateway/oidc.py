@@ -108,6 +108,8 @@ class OidcVerifier:
         self._clock = clock
         self._lock = threading.Lock()
         self._keys: dict[str, tuple[Any, Any]] = {}  # kid -> (PyJWK, the JWK's own "alg")
+        # user -> time of a session revocation: tokens issued at or before it are refused.
+        self.revoked_before: dict[str, float] = {}
         self._fetched_at: float | None = None
         self._last_attempt = -math.inf
 
@@ -193,6 +195,10 @@ class OidcVerifier:
             or len(user) > 256
         ):
             raise TokenRejected(f"claim {s.user_claim!r} is missing or not a usable string")
+        cutoff = self.revoked_before.get(user)
+        iat = claims.get("iat")
+        if cutoff is not None and (not isinstance(iat, int | float) or iat <= cutoff):
+            raise TokenRejected("token issued before the user's sessions were revoked")
         raw_groups = claims.get(s.groups_claim, [])
         if not isinstance(raw_groups, list) or not all(isinstance(g, str) for g in raw_groups):
             raise TokenRejected(f"claim {s.groups_claim!r} must be a list of strings")

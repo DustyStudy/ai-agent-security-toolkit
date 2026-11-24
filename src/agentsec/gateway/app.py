@@ -13,6 +13,7 @@ import contextvars
 import dataclasses
 import functools
 import hashlib
+import hmac
 import http.client
 import ipaddress
 import json
@@ -44,10 +45,13 @@ from agentsec.gateway.bundle import (
     write_state,
 )
 from agentsec.gateway.config import (
+    ConfigError,
     GatewayConfig,
     Upstream,
     loopback_hosts,
     resolve_secret,
+    siem_headers,
+    siem_sink,
     unpinned,
 )
 from agentsec.gateway.dashboard import (
@@ -75,6 +79,7 @@ from agentsec.middleware.cef import CefSink
 from agentsec.middleware.dlp import MAX_MATCH_RECORDS, DlpMatch
 from agentsec.middleware.injection import InjectionScanner
 from agentsec.middleware.pipeline import AgentMiddleware
+from agentsec.middleware.siem import BackgroundSink
 from agentsec.middleware.validators import BlocklistLinkValidator, OutputGuard
 from agentsec.sandbox.adapters import parse_openai_tool_call
 from agentsec.sandbox.blocklist import Blocklist
@@ -683,7 +688,7 @@ class Gateway:
         self.config = config
         self._transport = transport
         self._stream_transport = stream_transport
-        delivery: RetrySink | None = None
+        delivery: list[Any] = []
         self._audit_probe: Callable[[], None] | None = None
         if sink is None:
             sink = FileSink(config.audit_file)
@@ -694,8 +699,11 @@ class Gateway:
                 # The hash-chained file is the record; CEF is a copy for the SIEM, and TeeSink
                 # carries on (and logs) if that copy fails.
                 cef = open(config.cef_file, "a", encoding="utf-8")  # noqa: SIM115 - lives with the app
-                delivery = RetrySink(CefSink(cef))
-                sink = TeeSink(sink, delivery)
+                delivery.append(RetrySink(CefSink(cef)))
+            # Network feeds deliver from a worker thread: a slow SIEM never holds a request.
+            delivery += [BackgroundSink(siem_sink(t, siem_headers(t))) for t in config.siem]
+            if delivery:
+                sink = TeeSink(sink, *delivery)
         self.metrics = Metrics()
         self.metrics.delivery = delivery
         sink = CountingSink(sink, self.metrics)  # counts a record only once it was written
@@ -739,6 +747,11 @@ class Gateway:
         self._tokens = (
             None if config.tokens is None else TokenStore(config.tokens.store, clock=wall_clock)
         )
+        self._revoke_secret = None
+        if config.admin_revoke_token_ref is not None:
+            self._revoke_secret = resolve_secret(config.admin_revoke_token_ref).encode()
+            if len(self._revoke_secret) < 32:
+                raise ConfigError("admin.revoke_token must be at least 32 characters")
         hook = config.policy_hook
         # Read once at start, like upstream keys: a missing secret refuses startup.
         self._hook_headers = (
@@ -814,6 +827,7 @@ class Gateway:
                 self._audit.log(event, **data)
 
     # ------------------------------------------------------------------ ASGI
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             return  # lifespan is turned off in serve(); websockets are not served
@@ -903,6 +917,7 @@ class Gateway:
             await self._json(send, status, payload, request_id)
 
     # ------------------------------------------------------------------ tokens
+
     async def _serve_tokens(
         self, scope: Scope, receive: Receive, send: Send, user: str, groups: tuple[str, ...],
         token_id: str | None, request_id: str, policies: PolicySet, gp: GroupPolicy,
@@ -1056,10 +1071,12 @@ class Gateway:
         return counted
 
     # ------------------------------------------------------------------ admin
+
     async def admin(self, scope: Scope, receive: Receive, send: Send) -> None:
         """The admin listener: /healthz, /readyz, /metrics, /dashboard, /evidence/. Loopback only.
 
-        Every route is a GET that changes nothing: there is no write endpoint here by design.
+        Every route is a GET that changes nothing, except POST /sessions/revoke, which exists
+        only when ``admin.revoke_token`` is set and needs that secret as a bearer token.
         """
         if scope["type"] != "http":
             return
@@ -1071,6 +1088,15 @@ class Gateway:
             await self._error(send, e, request_id)
             return
         path, method = scope["path"], scope["method"]
+        if path == "/sessions/revoke" and method == "POST" and self._revoke_secret is not None:
+            try:
+                answer = await self._revoke_sessions(scope, receive, request_id)
+            except HttpError as e:
+                self._log_rejection(e, request_id, None, _peer(scope))
+                await self._error(send, e, request_id)
+                return
+            await self._json(send, 200, answer, request_id)
+            return
         evidence = path.startswith("/evidence/")
         if method != "GET" or not (
             evidence or path in {"/healthz", "/readyz", "/metrics", "/dashboard"}
@@ -1157,6 +1183,7 @@ class Gateway:
         await self._json(send, 503 if expired or not audit_ok else 200, payload, request_id)
 
     # ------------------------------------------------------------ policy
+
     def _group_policy(self, groups: tuple[str, ...]) -> tuple[PolicySet, GroupPolicy]:
         self._maybe_reload()
         policies = self._policies  # one read: the request keeps this revision throughout
@@ -1238,6 +1265,51 @@ class Gateway:
             self._log_allow_expiry(new)
         finally:
             self._reload_lock.release()
+
+    async def _revoke_sessions(
+        self, scope: Scope, receive: Receive, request_id: str
+    ) -> dict[str, Any]:
+        """POST /sessions/revoke {"user": ..., "disable": false}: end a user's sessions now.
+
+        Revokes their access tokens, refuses OIDC tokens issued until now, and ends their MCP
+        sessions. ``disable`` also refuses new tokens and the SSO identity until re-enabled.
+        """
+        assert self._revoke_secret is not None  # noqa: S101 - checked by the caller
+        auth = [v for k, v in scope.get("headers", []) if k.lower() == b"authorization"]
+        given = auth[0][7:] if len(auth) == 1 and auth[0][:7].lower() == b"bearer " else b""
+        if not hmac.compare_digest(given, self._revoke_secret):
+            raise HttpError(401, "unauthenticated", "unauthenticated")
+        try:
+            body = json.loads(await self._read_body(receive))
+        except ValueError:
+            raise HttpError(400, "body must be JSON", "bad_request") from None
+        user = body.get("user") if isinstance(body, dict) else None
+        disable = body.get("disable", False) if isinstance(body, dict) else None
+        if not isinstance(user, str) or not user or len(user) > 256 or not user.isprintable():
+            raise HttpError(400, "user must be a non-empty string", "bad_request")
+        if not isinstance(disable, bool) or set(body) - {"user", "disable"}:
+            raise HttpError(400, "only user and disable (a boolean) are accepted", "bad_request")
+        revoked, disabled = 0, False
+        if self._tokens is not None:
+            tokens = self._tokens
+            revoked = await self._off_loop(
+                self._control_pool, tokens.disable_user if disable else tokens.revoke_user, user
+            )
+            disabled = disable
+        if self._oidc is not None:
+            self._oidc.revoked_before[user] = time.time()
+        mcp = self._mcp.end_sessions(user) if self._mcp is not None else 0
+        answer = {
+            "user": user,
+            "tokens_revoked": revoked,
+            "oidc_tokens_refused_until_now": self._oidc is not None,
+            "mcp_sessions_ended": mcp,
+            "disabled": disabled,
+        }
+        if disable and self._tokens is None:
+            answer["note"] = "disable needs a tokens section (the disabled list lives there)"
+        self._audit.log("gateway_sessions_revoked", request_id=request_id, **answer)
+        return answer
 
     def policy_hook_args(self, user: str) -> dict[str, Any]:
         """``ToolGuard`` keyword arguments for the configured external policy service, if any."""
@@ -1417,6 +1489,7 @@ class Gateway:
                 return b"".join(chunks)
 
     # ------------------------------------------------------------- the request
+
     def _complete(
         self,
         body: bytes,

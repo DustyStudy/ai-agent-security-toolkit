@@ -65,7 +65,7 @@ client.chat.completions.create(model="llama3.1-8b", messages=[{"role": "user", "
    - `buffer` (default): the gateway calls the model without streaming, checks the whole answer, then sends it as SSE chunks. Time to first token is the full generation time.
    - `holdback`: the gateway streams from the model and releases text once it is more than `output.holdback_chars` (default 256) non-whitespace characters behind the newest text and the output checks find nothing in the window around it. Text after an unclosed `[`, `![`, `<` (quoted attribute values included) or code fence is held until it closes, so a link is checked whole. A reference-style image (`![a]`, `![a][b]`) can use a URL defined anywhere in the answer, so everything from it on is held for the final check. A model stream that ends without `[DONE]` is an upstream error, never a finished answer. Tool calls are always held until the answer ends, then checked as in buffer mode. If the window ever holds something to redact or block, or the held text grows past 8 times the window, the rest of that answer is buffered.
    - Either way, the full text is checked again at the end. In holdback mode, if that check changes text that was already sent (a secret longer than the window, say), the gateway ends the stream with an `output_violation` error event and no `[DONE]`, and writes a `gateway_output_violation_after_delivery` audit record with `severity: high`. Clients should treat a stream without `[DONE]` as failed.
-7. **Audit.** Every request, decision and change goes to a hash-chained JSONL log, with the user as `actor`, the request id as `session_id`, and the group list and policy revision on the request record. `cef_file` adds a CEF copy for a SIEM forwarder.
+7. **Audit.** Every request, decision and change goes to a hash-chained JSONL log, with the user as `actor`, the request id as `session_id`, and the group list and policy revision on the request record. `cef_file` adds a CEF copy for a SIEM forwarder, and `audit.siem` ships every record to a SIEM over syslog or HTTPS (see [SIEM export](#siem-export)).
 
 `mode: monitor` computes and logs every decision but delivers requests and answers unchanged. Identity, body and rate limits apply in both modes.
 
@@ -189,6 +189,19 @@ curl -X POST https://llm-gateway.corp.example/tokens \
 - **Issue.** Only an SSO identity (trusted proxy header or OIDC token) can mint, list or revoke tokens: a token cannot manage tokens, so a leaked one cannot mint more. `POST /tokens` requires `Content-Type: application/json`, which a cross-site form cannot send. Each user may hold `max_per_user` live tokens.
 - **Revoke.** Users list and revoke their own with `GET /tokens` and `DELETE /tokens/<id>`. Admins run `agentsec token list --config gateway.yaml [--user U]` and `agentsec token revoke --config gateway.yaml --id ID` (or `--user U` for all of a user's tokens, for example when someone leaves). `token revoke` exits 1 when nothing matched. Admins re-enable a disabled user with `agentsec token enable --config gateway.yaml --user U`. There is no command to issue a token outside SSO. Expired and revoked tokens leave the store 7 days afterwards; the audit log keeps the record of them.
 - **Storage.** Only a SHA-256 hash is stored; a token is 256 random bits, so the hash cannot be reversed. On POSIX the store is created owner-only. Back it up like any credential store; losing it only means users mint new tokens.
+- **End a user's sessions now.** Set `admin.revoke_token: env:AGENTSEC_REVOKE_TOKEN` (a secret of at least 32 characters, read at start) to turn on `POST /sessions/revoke` on the admin listener. That listener is loopback only, so run the call on the gateway host or through your own authenticated tunnel:
+
+  ```bash
+  curl -s -X POST http://127.0.0.1:9100/sessions/revoke \
+    -H "Authorization: Bearer $AGENTSEC_REVOKE_TOKEN" -d '{"user": "alice@corp.example", "disable": false}'
+  ```
+
+  The call does three things:
+  - It revokes all of the user's access tokens.
+  - It refuses every OIDC token for that user issued up to now (an `iat` at or before the call), so the user must sign in again.
+  - It ends the user's MCP sessions (their session ids get a 404).
+
+  `"disable": true` also refuses new tokens and the SSO identity until `agentsec token enable`, which needs a `tokens` section. The answer counts what was ended, and the call is audited as `gateway_sessions_revoked`. A wrong or missing secret gets a 401. Without `revoke_token` the endpoint does not exist. **Limits:** the OIDC cutoff is held in memory, so a restart forgets it (`disable` persists in the token store). A trusted-header identity cannot be signed out by the gateway: end that session at the auth proxy, or use `disable`.
 - **Audit.** Issue and revoke through the API are audited; `gateway_request` and `gateway_mcp_call` records carry the `token_id` used, never the token. Revocations from the CLI are recorded in the store (the audit chain belongs to the gateway process).
 - **Offboarding.** `agentsec token offboard --config gw1.yaml [--config gw2.yaml ...] --ledger offboard.db [--events FILE|-]` revokes tokens when the identity provider disables a user or removes one from a group. The events are one JSON document, chosen because every IdP automation (an Okta Workflow or event hook, an Entra Logic App or lifecycle workflow, a Keycloak event listener) can post a flat payload from a script: `{"disabled_users": ["a@example.com"], "removed_groups": [{"user": "b@example.com", "group": "admins"}]}`. A disabled user loses every live token; for a removed group, only that user's tokens issued with that group are revoked (a token without it keeps working, as it never carried the access). Repeat `--config` for every gateway: each config's `tokens.store` is revoked, and the command touches only token stores, so run it where those files are reachable. A user disabled this way cannot be issued a new access token until `agentsec token enable` runs. The gateway also refuses that user's SSO identity (an OIDC bearer token or the trusted header) with 403 `user_disabled`. **Known gap:** the disabled list is the token store, so a gateway with no `tokens` section, or one whose store was not passed with `--config`, still accepts a disabled user's IdP-issued JWT until its own `exp`; keep IdP token lifetimes short. The toolkit has no IdP client; the automation supplies the document.
   - **Ledger.** Each (event, store) pair is a row in the SQLite `--ledger` that stays pending until that store accepts the revocation, so a store that is down is retried on the next run (run it from cron or a timer, with no `--events`, as well as from the IdP automation). Replays are safe; if a finished event arrives again, for a user who was re-enabled and then disabled, it is applied again. A pending row is not dropped when its config is no longer passed.
@@ -239,6 +252,33 @@ The gateway POSTs `{"tool": ..., "arguments": {...}, "verdict": "allow", "reason
 
 Each answer is audited as `policy_hook` with `allowed` and, on failure, only the error type. The service sits in the path of every tool call, so make it highly available. Library users pass `ToolGuard(policy_hook=HttpPolicyHook(url), policy_hook_timeout_s=...)` or any callable `(call, decision) -> bool`.
 
+## SIEM export
+
+`audit.siem` sends every audit record, as it is written, to one or more collectors. It speaks plain standards, so any SIEM or log pipeline works: RFC 5424 syslog (octet-counted framing over TCP and TLS) or one HTTP `POST` per record.
+
+```yaml
+audit:
+  file: audit.jsonl              # stays the hash-chained record of truth
+  siem:
+    - url: tls://siem.example.com:6514   # syslog over TLS
+      format: cef                        # cef (default) or json
+      ca_file: siem-ca.pem               # optional: trust this CA instead of the system store
+      cert_file: gw.pem                  # optional client certificate (mTLS)
+      key_file: gw-key.pem
+    - url: https://http-inputs.example.com/services/collector/raw
+      format: json
+      auth: env:SIEM_TOKEN               # env:/file: reference, never the secret itself
+      auth_header: Authorization         # default
+      auth_scheme: Splunk                # default Bearer; "" sends the secret alone
+      timeout_s: 5
+```
+
+- `url`: `tls://host:port` or `https://...` for anything crossing the network. `udp://` and `tcp://` syslog and `http://` are accepted only to a loopback host, such as a local Vector, Fluent Bit or rsyslog relay. TLS is 1.2 or later and verifies the server's certificate and name. HTTP redirects are refused, so the token is never replayed elsewhere.
+- `format`: `cef` sends the same escaped CEF line as `cef_file`; `json` sends the audit record itself, with its `hash` and `prev_hash`, so the receiver can check the chain.
+- Syslog messages use facility 13 (log audit), a severity derived from the record (a denial is warning, a blocked secret is error), the record's `ts` as the timestamp and its `event` as MSGID. UDP datagrams are cut at 8 KB; use TCP or TLS for large records.
+- Delivery runs in a background thread per feed, so a slow or unreachable SIEM never delays a request. A failed record is retried, in order, after 1, 2, 4 ... up to 60 seconds. Watch `agentsec_gateway_siem_backlog_records` (see [Metrics](#metrics-and-readiness)). The backlog is in memory: a restart, or an outage longer than 100,000 records, loses the undelivered tail from the feed but never from the audit file, which you can re-ship.
+- The loader checks every entry at start-up (URL, format, auth reference, certificate files) and refuses to start on a mistake.
+
 ## Testing the gateway with the fuzzer
 
 `agentsec fuzz` can attack the gateway like any OpenAI-compatible endpoint, so you can compare the attack-success rate with and without it:
@@ -264,7 +304,7 @@ Set `admin: {port: 9090}` (and optionally `host`, which must be a loopback IP su
 - `GET /metrics`: Prometheus text.
   - `agentsec_gateway_events_total{event}`: every audit event written, counted only once the record is on disk. Blocks and denials are events such as `gateway_tool_calls_withheld`, `gateway_tools_removed`, `gateway_input_blocked`, `gateway_output_changed`, `gateway_auth_failed` and `gateway_bundle_rejected`.
   - `agentsec_gateway_audit_write_failures_total`: records the local audit file refused. Any increase is lost evidence or failed requests.
-  - `agentsec_gateway_siem_backlog_records`: records written to the audit file but not yet delivered to the `cef_file` feed. The gateway keeps undelivered records in memory and redelivers them oldest first on the next record or scrape, so the SIEM sees every record once, in order, after an outage. A restart drops the backlog (the audit file keeps it). Always 0 without `cef_file`.
+  - `agentsec_gateway_siem_backlog_records`: records written to the audit file but not yet delivered to the `cef_file` feed and the `audit.siem` feeds, summed. The gateway keeps undelivered records in memory and redelivers them oldest first on the next record or scrape, so the SIEM sees every record once, in order, after an outage. A restart drops the backlog (the audit file keeps it). Always 0 without `cef_file` or `audit.siem`. A `siem` feed that is down past 100,000 queued records drops the oldest from memory (never from the audit file).
   - `agentsec_gateway_siem_last_delivery_age_seconds`: seconds since the last successful delivery while a backlog exists; 0 otherwise.
   - `agentsec_gateway_responses_total{status}`: responses sent by the main listener.
   - `agentsec_gateway_policy_info{policy_rev}`, `agentsec_gateway_monitor_groups`, `agentsec_gateway_policy_expiry_timestamp_seconds`.

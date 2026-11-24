@@ -189,4 +189,15 @@ def read_doc(path: str) -> str:
 
 It does not cover a hard link inside a root that points at a file outside it. Hard links cannot cross file systems, so keep roots on a file system that holds nothing else sensitive, or isolate the tool at the OS level.
 
+**Folder rules for every tool.** A top-level `files` section limits which folders the agent can read and write, so a new tool with a path argument cannot open the rest of the disk:
+
+```yaml
+files:
+  read_roots: [/srv/repo]               # every path argument of a read-only tool
+  write_roots: [/srv/repo/out]          # path arguments of side_effects tools (default: read_roots)
+  deny_patterns: ['(^|[\\/])\.env', '\.pem$']   # added to every path argument
+```
+
+A path argument without its own `roots` gets the folder rules. One with its own `roots` must sit inside them, or the policy does not load. Symlinks are resolved before the check, as above. Rules apply to arguments declared `type: path` only, so declare every path a tool takes (Claude Code's `Read`, `Grep` and `Glob` in [the example](../examples/claude-code.policy.yaml)) and avoid `allow_extra_args` on such tools.
+
 `deny_patterns` on a path match case-insensitively, because Windows and macOS file systems ignore case.

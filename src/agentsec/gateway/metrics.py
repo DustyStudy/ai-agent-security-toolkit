@@ -19,6 +19,7 @@ from typing import Any
 from agentsec.gateway.policyset import PolicySet
 from agentsec.middleware.audit import AuditSink, RetrySink
 from agentsec.middleware.dlp import CATEGORIES, SURFACES
+from agentsec.middleware.siem import BackgroundSink
 
 _DLP_ACTIONS = ("monitor", "redact", "block", "allowed")
 
@@ -30,7 +31,8 @@ class Metrics:
         self._responses: Counter[int] = Counter()
         self._dlp: Counter[tuple[str, str, str]] = Counter()
         self._write_failures = 0
-        self.delivery: RetrySink | None = None  # the secondary (SIEM) feed, when configured
+        # The secondary (SIEM) feeds, when configured: RetrySink or BackgroundSink.
+        self.delivery: list[RetrySink | BackgroundSink] = []
 
     def event(self, name: str) -> None:
         with self._lock:
@@ -50,8 +52,8 @@ class Metrics:
             self._responses[status] += 1
 
     def flush(self) -> None:
-        if self.delivery:
-            self.delivery.flush()
+        for feed in self.delivery:
+            feed.flush()
 
     def write_failed(self) -> None:
         with self._lock:
@@ -63,8 +65,8 @@ class Metrics:
             events, responses = dict(self._events), dict(self._responses)
             dlp = dict(self._dlp)
             failures = self._write_failures
-        backlog = self.delivery.backlog if self.delivery else 0
-        age = self.delivery.last_delivery_age if self.delivery and backlog else 0.0
+        backlog = sum(f.backlog for f in self.delivery)
+        age = max((f.last_delivery_age for f in self.delivery if f.backlog), default=0.0)
         return {
             "events": events,
             "responses": responses,

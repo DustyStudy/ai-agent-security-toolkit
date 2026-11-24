@@ -1,8 +1,11 @@
 """Heuristic prompt-injection scanner and "spotlighting" helper.
 
 **This is a tripwire, not a defense.** Pattern matching over natural language is
-trivially bypassed (encoding, translation, paraphrase, homoglyphs). It is
-useful for logging, alerting and cheap early rejection of lazy attacks. The
+trivially bypassed. Before matching it folds invisible characters, compatibility forms,
+look-alike letters, diacritics, leetspeak, spaced-out letters, reversed and upside-down text,
+which stops the lazy variants of those tricks. It does not catch rewording, other languages,
+ROT13 or other encodings, or an instruction split across messages or tool results; tests in
+``tests/test_unicode_evasion.py`` assert each of those misses. It is useful for logging, alerting and cheap early rejection of lazy attacks. The
 controls that actually contain a successful injection are the ones that do not
 depend on recognising it: least-privilege tool policy, taint tracking, output
 validation and audit. The fuzzer in :mod:`agentsec.fuzzer` exists to measure
@@ -21,6 +24,27 @@ _TAG_CHARS = re.compile("[\U000e0000-\U000e007f]")
 # Invisible characters outside category Cf: combining grapheme joiner, Hangul fillers and
 # variation selectors render as nothing but are Mn/Lo, so a category check alone misses them.
 _INVISIBLE_NON_CF = re.compile("[\u034f\u115f\u1160\u3164\uffa0\ufe00-\ufe0f\U000e0100-\U000e01ef]")
+
+# Letters from other scripts and phonetic small capitals that read as Latin ("Ignоre" with a
+# Cyrillic o). NFKC does not fold these.
+_HOMOGLYPHS = str.maketrans(
+    "аеорсхуіјѕԁһԛԝАВЕКМНОРСТХІЈЅ"  # Cyrillic
+    "οανρτικυχΟΑΒΕΖΗΙΚΜΝΡΤΧΥ"  # Greek
+    "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀꜱᴛᴜᴠᴡʏᴢɑɡ",  # small capitals, IPA
+    "aeopcxyijsdhqwABEKMHOPCTXIJSoavptikuxOABEZHIKMNPTXYabcdefghijklmnoprstuvwyzag",
+)
+_LEET = str.maketrans("4@31!0$57", "aaeiiosst")
+# Upside-down text: rotated letters, written in reverse order. Only applied (with the reversal)
+# when a rotated-only letter is present, since b/d/n/p/q/u are ordinary letters too.
+_FLIPPED_ONLY = re.compile(
+    "[\u0250\u0254\u01dd\u025f\u0183\u0265\u1d09\u0131\u027e\u029e\u026f\u0279\u0287\u028c\u028d\u028e]"
+)
+_UNFLIP = str.maketrans(
+    "\u0250q\u0254p\u01dd\u025f\u0183\u0265\u1d09\u0131\u027e\u029e\u026fudb\u0279\u0287n\u028c\u028d\u028e",
+    "abcdefghiijkmnpqrtuvwy",
+)
+# Runs of single letters split by one repeated separator: "i g n o r e", "a.l.l".
+_SPACED = re.compile(r"(?<!\w)\w([ ._\-])\w(?!\w)(?:\1\w(?!\w))+")
 
 # Untrusted content (a fetched page, a large tool result) has no size limit the scanner
 # controls, and scanning it costs work proportional to its length across ~10 regex passes.
@@ -120,7 +144,26 @@ class InjectionScanner:
             for ch in text
             if unicodedata.category(ch) != "Cf" and not _INVISIBLE_NON_CF.match(ch)
         )
-        return unicodedata.normalize("NFKC", visible)
+        folded = unicodedata.normalize("NFKD", unicodedata.normalize("NFKC", visible))
+        # Combining marks go: diacritics ("Ígnóré") and strike-through overlays ("I̷g̷n̷").
+        bare = "".join(ch for ch in folded if not unicodedata.combining(ch))
+        return unicodedata.normalize("NFC", bare).translate(_HOMOGLYPHS)
+
+    @classmethod
+    def _views(cls, text: str) -> list[str]:
+        norm = cls.normalize(text)
+        views = [norm]
+        candidates = [
+            norm.translate(_LEET),  # "1gn0r3 4ll pr3v10us"
+            _SPACED.sub(lambda m: m[0][::2], norm),
+            norm[::-1],  # "snoitcurtsni suoiverp lla erongI"
+        ]
+        if _FLIPPED_ONLY.search(norm):
+            candidates.append(norm[::-1].translate(_UNFLIP))  # "suoᴉʇɔnɹʇsuᴉ ... ǝɹouƃI"
+        for view in candidates:
+            if view != norm:
+                views.append(view)
+        return views
 
     def scan(self, text: str) -> ScanResult:
         truncated = len(text) > self.max_scan_chars
@@ -131,9 +174,9 @@ class InjectionScanner:
         if _TAG_CHARS.search(text) or len(_INVISIBLE.findall(text)) >= 3:
             hits.append("hidden_characters")
             score += 0.6
-        norm = self.normalize(text)
+        views = self._views(text)
         for sig in self.signals:
-            if sig.pattern.search(norm):
+            if any(sig.pattern.search(v) for v in views):
                 hits.append(sig.name)
                 score += sig.weight
         score = min(score, 1.0)

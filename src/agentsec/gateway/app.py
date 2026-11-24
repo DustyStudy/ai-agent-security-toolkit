@@ -1412,9 +1412,9 @@ class Gateway:
         their MCP sessions; ``disable`` also refuses them until re-enabled."""
         revoked, disabled = 0, False
         if self._tokens is not None:
-            tokens = self._tokens
+            store = self._tokens
             revoked = await self._off_loop(
-                self._control_pool, tokens.disable_user if disable else tokens.revoke_user, user
+                self._control_pool, store.disable_user if disable else store.revoke_user, user
             )
             disabled = disable
         if self._oidc is not None:

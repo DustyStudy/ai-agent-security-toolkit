@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-24
+
 ### Added
 - `examples/loki`: Grafana Loki and Alloy setup for keeping the audit log searchable for 30 days on a small host (memory caps, swap, no published ports), with the numbers from staging.
 - SCIM 2.0 user provisioning: a `scim` section (`token`, `require_provisioned`) serves `/scim/v2/Users` and `ServiceProviderConfig` for Entra ID, Okta and other IdPs. Deactivating or deleting a user revokes their access tokens, refuses their OIDC tokens issued until then, ends their MCP sessions and disables them (`gateway_user_deprovisioned`), in any letter case of their name; reactivating re-enables sign-in. With `require_provisioned`, only provisioned, active users get in (403 `user_not_provisioned`). Groups are not provisioned. Needs a `tokens` section.
@@ -374,7 +376,8 @@ Tagged but never released; use 0.4.1.
 ### Security
 - Closed bypasses found in a security review of the toolkit (see the commit history for details).
 
-[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/DustyStudy/ai-agent-security-toolkit/compare/v0.10.0...v0.11.0

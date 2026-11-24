@@ -1,3 +1,3 @@
 """ai-agent-security-toolkit: fuzz, contain, validate and audit LLM agents."""
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"

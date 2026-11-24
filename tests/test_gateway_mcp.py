@@ -279,6 +279,7 @@ def test_a_tool_must_pass_a_listing_before_it_is_called(gateway):
     url, upstreams, _, _ = gateway
 
     # Raw JSON-RPC: the SDK client lists tools by itself before a first call.
+
     async def main():
         async with httpx2.AsyncClient(headers=headers(), timeout=10) as http:
             sid = await raw_initialize(http, url)
@@ -660,6 +661,7 @@ def test_evicting_state_keeps_session_owners(tmp_path, monkeypatch):
 
 
 def test_upstream_responses_are_capped_as_they_stream():
+
     async def main():
         async def body():
             for _ in range(5):
@@ -711,6 +713,7 @@ def test_a_session_with_a_request_in_flight_keeps_its_owner(tmp_path):
 
 
 def test_compressed_upstream_responses_are_refused():
+
     async def main():
         gz = httpx2.MockTransport(
             lambda request: httpx2.Response(200, headers={"Content-Encoding": "gzip"}, content=b"")
@@ -779,6 +782,26 @@ def test_an_older_mcp_sdk_is_refused_with_a_clear_error(installed):
 def test_the_tested_sdk_and_newer_are_accepted():
     for installed in ("2.3.0", "2.10.1", "3.0.0"):
         gwmcp.require_sdk(installed)
+
+
+def test_an_ended_session_is_refused_even_for_its_owner(gateway):
+    url, _, _, app = gateway
+    list_tools = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+
+    async def main():
+        async with httpx2.AsyncClient(headers=headers("alice"), timeout=10) as alice:
+            sid = await raw_initialize(alice, url)
+            hdrs = {
+                "Mcp-Session-Id": sid,
+                "MCP-Protocol-Version": "2025-11-25",
+                "Accept": "application/json, text/event-stream",
+            }
+            before = await alice.post(url, json=list_tools, headers=hdrs)
+            ended = app._mcp.end_sessions("alice")
+            after = await alice.post(url, json=list_tools, headers=hdrs)
+            return before.status_code, ended, after.status_code
+
+    assert run(main()) == (200, 1, 404)
 
 
 def test_the_policy_hook_reaches_the_mcp_path(tmp_path, monkeypatch):

@@ -129,8 +129,11 @@ def test_tls_syslog_verifies_the_server(tmp_path):
     server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     server_ctx.load_cert_chain(cert, key)
     rx = _Listener(1, server_ctx)
-    SyslogSink(f"tls://localhost:{rx.port}", ssl_context=tls_context(cert)).write(REC)
-    assert b"CEF:0|" in rx.join()[0]
+    sink = SyslogSink(f"tls://localhost:{rx.port}", ssl_context=tls_context(cert))
+    sink.write(REC)
+    frames = rx.join()  # keep the client open until read: Windows resets on unread data
+    sink.close()
+    assert b"CEF:0|" in frames[0]
     # Without trusting that CA the handshake fails and the record is not sent.
     rx2 = socket.create_server(("127.0.0.1", 0))
     t = threading.Thread(target=lambda: _accept_tls(rx2, server_ctx), daemon=True)

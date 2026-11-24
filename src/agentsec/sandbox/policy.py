@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -88,11 +89,27 @@ class TaintPolicy:
 
 
 @dataclass
+class FilesPolicy:
+    """Folders the agent may touch, for every ``type: path`` argument of every tool.
+
+    A path argument of a ``side_effects`` tool is a write and gets ``write_roots`` (or, when
+    that is empty, ``read_roots``); any other path argument is a read and gets ``read_roots``.
+    An argument without its own ``roots`` inherits them; one with its own must sit inside
+    them. ``deny_patterns`` are added to every path argument.
+    """
+
+    read_roots: list[str] = field(default_factory=list)
+    write_roots: list[str] = field(default_factory=list)
+    deny_patterns: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Policy:
     tools: dict[str, ToolRule] = field(default_factory=dict)
     taint: TaintPolicy = field(default_factory=TaintPolicy)
     max_total_calls: int | None = None
     version: int = 1
+    files: FilesPolicy = field(default_factory=FilesPolicy)
 
     # ------------------------------------------------------------------ loading
     @classmethod
@@ -100,13 +117,15 @@ class Policy:
         if not isinstance(data, dict):
             raise PolicyError("policy must be a mapping")
         data = dict(data)
-        _reject_unknown(data, {"version", "tools", "taint", "max_total_calls"}, "policy")
+        _reject_unknown(data, {"version", "tools", "taint", "max_total_calls", "files"}, "policy")
         tools_raw = data.get("tools") or {}
         if not isinstance(tools_raw, dict):
             raise PolicyError("'tools' must be a mapping of tool name -> rule")
         if not all(isinstance(name, str) for name in tools_raw):
             raise PolicyError("tool names must be strings")
         tools = {name: _build_tool(name, raw) for name, raw in tools_raw.items()}
+        files = _build(FilesPolicy, data.get("files") or {}, "files")
+        _apply_files(files, tools)
         taint = _build(TaintPolicy, data.get("taint") or {}, "taint")
         if taint.action not in ("deny", "approve"):
             raise PolicyError("taint.action must be 'deny' or 'approve'")
@@ -116,7 +135,9 @@ class Policy:
         version = data.get("version", 1)
         if not _is_int(version):
             raise PolicyError("version must be an integer")
-        return cls(tools=tools, taint=taint, max_total_calls=max_total, version=version)
+        return cls(
+            tools=tools, taint=taint, max_total_calls=max_total, version=version, files=files
+        )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Policy:
@@ -196,6 +217,7 @@ _KINDS: dict[str, tuple[Callable[[Any], bool], str]] = {
 }
 _FIELD_KINDS: dict[str, dict[str, str]] = {
     "TaintPolicy": {"enabled": "bool", "action": "str"},
+    "FilesPolicy": {"read_roots": "strs", "write_roots": "strs", "deny_patterns": "strs"},
     "ToolRule": {
         "name": "str",
         "allow": "bool",
@@ -233,6 +255,43 @@ def _build(cls: type, raw: Any, where: str) -> Any:
         if key in raw and not _KINDS[kind][0](raw[key]):
             raise PolicyError(f"{where}.{key} must be {_KINDS[kind][1]}")
     return cls(**raw)
+
+
+def _inside(path: str, roots: list[str]) -> bool:
+    real = os.path.normcase(os.path.realpath(path))
+    for root in roots:
+        top = os.path.normcase(os.path.realpath(root))
+        try:
+            if os.path.commonpath([real, top]) == top:
+                return True
+        except ValueError:  # different drives on Windows
+            continue
+    return False
+
+
+def _apply_files(files: FilesPolicy, tools: dict[str, ToolRule]) -> None:
+    for root in (*files.read_roots, *files.write_roots):
+        if not os.path.isabs(root):
+            raise PolicyError(f"files: root {root!r} must be an absolute path")
+    for pat in files.deny_patterns:
+        try:
+            re.compile(pat)
+        except re.error as exc:
+            raise PolicyError(f"files.deny_patterns: bad regex {pat!r}: {exc}") from exc
+    for name, rule in tools.items():
+        ceiling = (files.write_roots or files.read_roots) if rule.side_effects else files.read_roots
+        for arg_name, arg in rule.args.items():
+            if arg.type != "path":
+                continue
+            where = f"tools.{name}.args.{arg_name}"
+            if ceiling:
+                if not arg.roots:
+                    arg.roots = list(ceiling)
+                for root in arg.roots:
+                    if not _inside(root, ceiling):
+                        kind = "write" if rule.side_effects and files.write_roots else "read"
+                        raise PolicyError(f"{where}: root {root!r} is outside files.{kind}_roots")
+            arg.deny_patterns = list(dict.fromkeys([*arg.deny_patterns, *files.deny_patterns]))
 
 
 def _build_tool(name: str, raw: Any) -> ToolRule:

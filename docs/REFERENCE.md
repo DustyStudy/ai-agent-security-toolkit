@@ -210,6 +210,16 @@ from agentsec.middleware import AuditLogger, CefSink, FileSink, TeeSink
 audit = AuditLogger(TeeSink(FileSink("audit.jsonl"), CefSink(send_to_syslog)))   # or format_cef(record) yourself
 ```
 
+To ship over the network yourself, `agentsec.middleware.siem` has `SyslogSink("tls://siem:6514")` (RFC 5424, octet-counted; plain `udp://`/`tcp://` only to a loopback relay), `HttpSink("https://...", headers=...)` and `BackgroundSink(sink)`, which delivers from a worker thread in order with retry and backoff:
+
+```python
+from agentsec.middleware.siem import BackgroundSink, SyslogSink
+
+audit = AuditLogger(TeeSink(FileSink("audit.jsonl"), BackgroundSink(SyslogSink("tls://siem:6514"))))
+```
+
+The gateway does this from config (`audit.siem`, see [GATEWAY.md](GATEWAY.md#siem-export)).
+
 Every CEF value is escaped and bounded, so attacker-influenced text cannot forge a field or start a new event. A failing SIEM sink does not interrupt the agent or break the chain. Details are in the [production guide](PRODUCTION.md#audit-trail). The CEF output has not been ingested by a specific SIEM product.
 
 ## 4. Threat model an agent (STRIDE-for-agents)

@@ -47,6 +47,8 @@ from agentsec.gateway.config import (
     Upstream,
     loopback_hosts,
     resolve_secret,
+    siem_headers,
+    siem_sink,
     unpinned,
 )
 from agentsec.gateway.dashboard import (
@@ -74,6 +76,7 @@ from agentsec.middleware.cef import CefSink
 from agentsec.middleware.dlp import MAX_MATCH_RECORDS, DlpMatch
 from agentsec.middleware.injection import InjectionScanner
 from agentsec.middleware.pipeline import AgentMiddleware
+from agentsec.middleware.siem import BackgroundSink
 from agentsec.middleware.validators import BlocklistLinkValidator, OutputGuard
 from agentsec.sandbox.adapters import parse_openai_tool_call
 from agentsec.sandbox.blocklist import Blocklist
@@ -682,7 +685,7 @@ class Gateway:
         self.config = config
         self._transport = transport
         self._stream_transport = stream_transport
-        delivery: RetrySink | None = None
+        delivery: list[Any] = []
         self._audit_probe: Callable[[], None] | None = None
         if sink is None:
             sink = FileSink(config.audit_file)
@@ -693,8 +696,11 @@ class Gateway:
                 # The hash-chained file is the record; CEF is a copy for the SIEM, and TeeSink
                 # carries on (and logs) if that copy fails.
                 cef = open(config.cef_file, "a", encoding="utf-8")  # noqa: SIM115 - lives with the app
-                delivery = RetrySink(CefSink(cef))
-                sink = TeeSink(sink, delivery)
+                delivery.append(RetrySink(CefSink(cef)))
+            # Network feeds deliver from a worker thread: a slow SIEM never holds a request.
+            delivery += [BackgroundSink(siem_sink(t, siem_headers(t))) for t in config.siem]
+            if delivery:
+                sink = TeeSink(sink, *delivery)
         self.metrics = Metrics()
         self.metrics.delivery = delivery
         sink = CountingSink(sink, self.metrics)  # counts a record only once it was written

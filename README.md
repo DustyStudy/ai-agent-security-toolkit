@@ -22,10 +22,10 @@ agentsec fuzz --target builtin:guarded --quiet
 ```
 
 ```text
-171/500 attacks succeeded (ASR 34.2%); 329 blocked, 0 errors
+144/500 attacks succeeded (ASR 28.8%); 356 blocked, 0 errors
 ```
 
-All 171 successes were canary echoes, where the simulator repeated a planted marker. The guarded run recorded zero successful cases of tool misuse, exfiltration, or prompt leakage. The [five-minute tour](docs/TOUR.md) walks through the output and shows how to check those outcomes in CI.
+All 144 successes were canary echoes, where the simulator repeated a planted marker. The guarded run recorded zero successful cases of tool misuse, exfiltration, or prompt leakage. The [five-minute tour](docs/TOUR.md) walks through the output and shows how to check those outcomes in CI.
 
 ## What you can do
 

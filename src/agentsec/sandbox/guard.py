@@ -107,21 +107,34 @@ class ToolGuard:
         blocklist: Blocklist | None = None,
         dlp: DlpPolicy | None = DEFAULT_DLP,
         approval_timeout_s: float | None = None,
+        policy_hook: Approver | None = None,
+        policy_hook_timeout_s: float = 5.0,
     ) -> None:
         """``dlp`` checks every string in a call's arguments for credentials, non-human
         identities and PII (see :mod:`agentsec.middleware.dlp`); ``None`` turns that off.
 
         ``approval_timeout_s``: an approver that has not answered within this many seconds
         refuses the call. A sync approver is then asked in a worker thread, which is left
-        running past the limit (its late answer is ignored)."""
-        if approval_timeout_s is not None and not (
-            isinstance(approval_timeout_s, int | float)
-            and not isinstance(approval_timeout_s, bool)
-            and math.isfinite(approval_timeout_s)
-            and approval_timeout_s > 0
+        running past the limit (its late answer is ignored).
+
+        ``policy_hook``: called as ``hook(call, decision)`` for every call the local policy
+        does not deny, before any approver, e.g. :class:`agentsec.sandbox.HttpPolicyHook` for
+        an external DLP or policy service. Only ``True`` lets the call go on. Anything else, an
+        exception, or no answer within ``policy_hook_timeout_s`` denies it (fail closed)."""
+        for name, value in (
+            ("approval_timeout_s", approval_timeout_s),
+            ("policy_hook_timeout_s", policy_hook_timeout_s),
         ):
-            raise ValueError("approval_timeout_s must be a positive finite number of seconds")
+            if value is not None and not (
+                isinstance(value, int | float)
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and value > 0
+            ):
+                raise ValueError(f"{name} must be a positive finite number of seconds")
         self.approval_timeout_s = approval_timeout_s
+        self.policy_hook = policy_hook
+        self.policy_hook_timeout_s = policy_hook_timeout_s
         self.policy = policy
         self.dlp = dlp
         self.approver = approver
@@ -277,7 +290,13 @@ class ToolGuard:
 
     def _ask(self, approver: Approver, call: ToolCall, decision: Decision) -> Any:
         """The sync approver's answer; TimeoutError past ``approval_timeout_s``."""
-        limit = self.approval_timeout_s
+        return self._limited(approver, call, decision, self.approval_timeout_s, "approver")
+
+    @staticmethod
+    def _limited(
+        approver: Approver, call: ToolCall, decision: Decision, limit: float | None, what: str
+    ) -> Any:
+        """``approver(call, decision)``; TimeoutError past ``limit`` seconds (None: no limit)."""
         if limit is None:
             return approver(call, decision)
         out: dict[str, Any] = {}
@@ -288,11 +307,13 @@ class ToolGuard:
             except BaseException as exc:  # noqa: BLE001 - re-raised in the caller's thread
                 out["error"] = exc
 
-        worker = threading.Thread(target=ask, name="agentsec-approver", daemon=True)
+        worker = threading.Thread(
+            target=ask, name=f"agentsec-{what.replace(' ', '-')}", daemon=True
+        )
         worker.start()
         worker.join(limit)
         if worker.is_alive():
-            raise TimeoutError(f"approver did not answer within {limit:g}s")
+            raise TimeoutError(f"{what} did not answer within {limit:g}s")
         if "error" in out:
             raise out["error"]
         return out["answer"]
@@ -347,7 +368,20 @@ class ToolGuard:
 
     def _begin(self, call: ToolCall, session: Session) -> Decision:
         self._audit("tool_request", session, tool=call.name, arguments=self.logged_arguments(call))
-        return self._audit_dlp(self.evaluate(call, session), session)
+        decision = self._audit_dlp(self.evaluate(call, session), session)
+        if self.policy_hook is None or decision.verdict == Verdict.DENY:
+            return decision
+        try:
+            answer = self._limited(
+                self.policy_hook, call, decision, self.policy_hook_timeout_s, "policy hook"
+            )
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            return self._hooked(call, session, decision, None, exc)
+        if inspect.isawaitable(answer):
+            if inspect.iscoroutine(answer):
+                answer.close()
+            return self._hooked(call, session, decision, None, TypeError("async hook"))
+        return self._hooked(call, session, decision, answer, None)
 
     async def _abegin(self, call: ToolCall, session: Session) -> Decision:
         self._audit("tool_request", session, tool=call.name, arguments=self.logged_arguments(call))
@@ -355,7 +389,45 @@ class ToolGuard:
             decision = await asyncio.to_thread(self.evaluate, call, session)
         else:
             decision = self.evaluate(call, session)
-        return self._audit_dlp(decision, session)
+        decision = self._audit_dlp(decision, session)
+        if self.policy_hook is None or decision.verdict == Verdict.DENY:
+            return decision
+        try:
+            answer = await asyncio.wait_for(
+                self._aask(self.policy_hook, call, decision), self.policy_hook_timeout_s
+            )
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            return self._hooked(call, session, decision, None, exc)
+        return self._hooked(call, session, decision, answer, None)
+
+    def _hooked(
+        self,
+        call: ToolCall,
+        session: Session,
+        decision: Decision,
+        answer: Any,
+        exc: Exception | None,
+    ) -> Decision:
+        """The policy hook's answer applied: only ``True`` keeps the local decision.
+
+        Only an exception's type is recorded: its message may quote the arguments.
+        """
+        allowed = exc is None and answer is True
+        reason = None
+        if exc is not None:
+            reason = f"external policy unavailable ({type(exc).__name__}); refused"
+        elif not allowed:
+            reason = "denied by external policy"
+        self._audit(
+            "policy_hook",
+            session,
+            tool=call.name,
+            allowed=allowed,
+            **({"error": type(exc).__name__} if exc is not None else {}),
+        )
+        if allowed:
+            return decision
+        return Decision(Verdict.DENY, call.name, (*decision.reasons, str(reason)))
 
     def _audit_dlp(self, decision: Decision, session: Session) -> Decision:
         for match in decision.dlp_matches:

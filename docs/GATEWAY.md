@@ -198,6 +198,25 @@ egress:
 - **Audit and metrics.** Each match is an `egress_blocked` record: `source` (`tool_call` or `model_text`), `tool`, `argument`, `host`, `url_sha256` (no audit record holds a URL argument: `tool_request` stores it as `sha256:<hex>` too), `matched`, `match_value`, `entry`, `list`, `list_sha256`, `list_age_s`, `resolved`. The request's `gateway_request` record carries the mode. `/dashboard` shows each list's entries, age and status. `/metrics` adds `agentsec_gateway_blocklist_age_seconds{list=...}`; matches count under `agentsec_gateway_events_total{event="egress_blocked"}`.
 - **Limits.** This checks the argument, not the connection: the client or MCP server resolves the name again later, redirects are not followed, URLs inside free-form strings are not seen, and feeds lag new attacker infrastructure. Apply the same feeds at your egress firewall, and use a filtering resolver (see docs/PRODUCTION.md).
 
+## External policy or DLP service
+
+`policy_hook` sends every tool call the local policy allows to your own service before the call reaches the client (model path) or the MCP upstream. This applies to calls that need approval too. The call goes ahead only on an explicit `{"allow": true}`.
+
+```yaml
+policy_hook:
+  url: https://dlp.corp.example/v1/tool-call   # https, or http to a loopback address only
+  timeout_s: 5                                 # default 5
+  auth: env:AGENTSEC_POLICY_HOOK_TOKEN         # optional; sent as "Authorization: Bearer ..."
+```
+
+The gateway POSTs `{"tool": ..., "arguments": {...}, "verdict": "allow", "reasons": [], "actor": "alice@corp.example"}`. The arguments are sent as the model wrote them, unredacted, because a DLP service has to see them. The hook fails closed: any of the following denies the call.
+
+- an error, a timeout, or a status other than 200
+- a redirect (it would replay the arguments and the token to another host)
+- an answer over 64 KB, one that is not JSON, or one where `allow` is anything but `true`
+
+Each answer is audited as `policy_hook` with `allowed` and, on failure, only the error type. The service sits in the path of every tool call, so make it highly available. Library users pass `ToolGuard(policy_hook=HttpPolicyHook(url), policy_hook_timeout_s=...)` or any callable `(call, decision) -> bool`.
+
 ## Testing the gateway with the fuzzer
 
 `agentsec fuzz` can attack the gateway like any OpenAI-compatible endpoint, so you can compare the attack-success rate with and without it:

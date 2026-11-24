@@ -104,6 +104,14 @@ class GatewayConfig:
     mcp_require_pins: bool = False  # set: every mcp_upstream needs reviewed pins, or no start
     tokens: TokenSettings | None = None  # set: users may mint access tokens (POST /tokens)
     egress: EgressSettings | None = None  # set: URL arguments are checked against signed feeds
+    policy_hook: PolicyHookSettings | None = None  # set: an external service vets each tool call
+
+
+@dataclass(frozen=True)
+class PolicyHookSettings:
+    url: str
+    timeout_s: float = 5.0
+    auth_ref: str | None = None  # env:/file: reference; sent as "Authorization: Bearer <it>"
 
 
 MAX_SECRET_FILE_BYTES = 65536  # keys and tokens; a bigger file is a wrong path
@@ -142,6 +150,7 @@ _TOP = {
     "audit",
     "dlp",
     "egress",
+    "policy_hook",
 }
 _SECTIONS: dict[str, set[str]] = {
     "listen": {
@@ -213,6 +222,7 @@ _SECTIONS: dict[str, set[str]] = {
         "reload_interval_s",
     },
     "blocklist": {"name", "kind", "file", "max_age_h"},
+    "policy_hook": {"url", "timeout_s", "auth"},
 }
 
 
@@ -368,6 +378,28 @@ def _tokens(data: dict[str, Any], base: Path) -> TokenSettings | None:
         max_per_user=_positive(section, "max_per_user", 20),
         offboarding_deadline_s=_positive(section, "offboarding_deadline_s", 3600.0, float),
     )
+
+
+def _policy_hook(data: dict[str, Any]) -> PolicyHookSettings | None:
+    if "policy_hook" not in data:
+        return None
+    section = _section(data, "policy_hook")
+    url = _typed(section.get("url"), str, "policy_hook.url")
+    auth = section.get("auth")
+    if auth is not None:
+        auth = _typed(auth, str, "policy_hook.auth")
+        if not auth.startswith(("env:", "file:")):
+            raise ConfigError("policy_hook.auth must be a reference: 'env:NAME' or 'file:/path'")
+    settings = PolicyHookSettings(
+        url=url, timeout_s=_positive(section, "timeout_s", 5.0, float), auth_ref=auth
+    )
+    try:
+        from agentsec.sandbox.policy_hook import HttpPolicyHook
+
+        HttpPolicyHook(url)  # same URL rules as at run time
+    except ValueError as e:
+        raise ConfigError(f"policy_hook.url: {e}") from e
+    return settings
 
 
 def _pin_file(path: Path) -> dict[str, str]:
@@ -727,4 +759,5 @@ def load_config(path: str | Path) -> GatewayConfig:
         mcp_require_pins=require_pins,
         tokens=_tokens(data, base),
         egress=_egress(data, base),
+        policy_hook=_policy_hook(data),
     )

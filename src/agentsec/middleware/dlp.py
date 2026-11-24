@@ -29,6 +29,7 @@ from agentsec.middleware.redact import (
     DEFAULT_MAX_SCAN_CHARS,
     _Rule,
     find_sensitive,
+    fold,
 )
 
 SURFACES = ("output", "tool_args", "tool_results", "upstream")
@@ -330,7 +331,8 @@ class DlpPolicy:
             text, max_scan_chars=len(text), include_email=True, extra=self.detectors
         )
         for f in found:
-            value = text[f.start : f.end]
+            # Folded: an allowlisted value or fingerprint must not change with a zero-width space.
+            value = fold(text[f.start : f.end])
             if _REFERENCE.fullmatch(value):
                 continue
             allowed_by = self._allowed_by(value, f.kind, surface, tool, today)

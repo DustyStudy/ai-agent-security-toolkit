@@ -15,7 +15,7 @@ $ agentsec fuzz --target builtin:naive --quiet
 
 ```console
 $ agentsec fuzz --target builtin:guarded --quiet
-171/500 attacks succeeded (ASR 34.2%); 329 blocked, 0 errors
+144/500 attacks succeeded (ASR 28.8%); 356 blocked, 0 errors
 ```
 
 The same simulated model behind the scanner, tool policy and output guard. The remaining 34% are attacks that only make the model *say* something (a planted canary word). Now look at what those layers do about the dangerous outcomes:

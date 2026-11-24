@@ -5,10 +5,11 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import sys
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -490,6 +491,29 @@ def cmd_probe_isolation(args: argparse.Namespace) -> int:
     return 1 if status["reachable"] else 2 if status["unchecked"] else 0
 
 
+def _verify_key_resolver(unavailable: list[str]) -> Callable[[str], str]:
+    """For ``bundle verify``: resolve ``dlp.fingerprint_key`` normally, but when the key is
+    only readable on the gateway host (unset variable, missing or unreadable file), record the
+    reference and stand in a placeholder. Signature, hashes and every other check still run;
+    a malformed reference or a key that is present but too short still fails."""
+    from agentsec.middleware.dlp import _resolve
+
+    def resolve(ref: str) -> str:
+        kind, _, value = ref.partition(":")
+        try:
+            return _resolve(ref)
+        except (FileNotFoundError, PermissionError):
+            if kind != "file":
+                raise
+        except DlpConfigError:
+            if kind != "env" or os.environ.get(value):
+                raise
+        unavailable.append(ref)
+        return "x" * 32  # never used to fingerprint anything: verify only parses
+
+    return resolve
+
+
 def cmd_bundle(args: argparse.Namespace) -> int:
     from agentsec.gateway.bundle import BundleError, load_bundle, load_public_key, sign_bundle
     from agentsec.gateway.config import ConfigError, resolve_secret
@@ -500,10 +524,20 @@ def cmd_bundle(args: argparse.Namespace) -> int:
             out = sign_bundle(args.dir, resolve_secret(args.key).encode())
             print(f"signed: {out}")
         else:
+            unavailable: list[str] = []
             with open(args.public_key, "rb") as fh:
-                policies = load_bundle(args.dir, load_public_key(fh.read()))
+                policies = load_bundle(
+                    args.dir,
+                    load_public_key(fh.read()),
+                    resolve_secret=_verify_key_resolver(unavailable),
+                )
             groups = ", ".join(g.group for g in policies.groups)
             print(f"bundle ok: {policies.revision}, expires {policies.expires}, groups {groups}")
+            for ref in dict.fromkeys(unavailable):
+                print(
+                    f"  note: dlp.fingerprint_key {ref} is not readable here; the gateway "
+                    "checks it when it loads the bundle"
+                )
             for g in policies.groups:
                 expired, soon = g.dlp.allow_expiry()
                 for e in expired:

@@ -4,7 +4,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+Version 0.13.0 (`pyproject.toml` and `agentsec.__version__`); date this section when it is tagged.
+
 ### Added
+- `agentsec bundle verify` works on a machine that cannot read a group's `dlp.fingerprint_key` (an unset variable, or a key file that is missing or readable only by the gateway's user): it verifies the signature, hashes and contents as before and prints a note naming the key reference. A malformed reference, or a key that is present but under 32 bytes, still fails, and the gateway itself still refuses a bundle whose key it cannot read.
+- Docs and `examples/gateway.yaml` recommend `outbound.on_secret: block` on every upstream run by a third party.
 - `examples/gateway.yaml` has a `dlp` section (credentials and non-human identities redacted in answers and blocked in tool arguments, PII redacted in answers and monitored in tool arguments, email monitored) with `fingerprint_key: env:AGENTSEC_DLP_FINGERPRINT_KEY`, so `--check` on the example needs that variable set.
 - DLP allowlist expiry: the gateway audits `dlp_allow_expired` and `dlp_allow_expiring` (within 14 days) per group at start and on each bundle load, and `agentsec bundle verify` warns about both.
 - `agentsec dlp hash --key <fingerprint_key>`: prints the HMAC-SHA256 of a value read from stdin (no echo at a terminal) for a `dlp.allow` entry's `match.hmac_sha256`, and says which built-in kind matches the whole value. The value is never printed. **Changed:** allowlist entries no longer accept an unkeyed `match.sha256` (a plain hash of a password, SSN or card number in the bundle is reversed by guessing); use `hmac_sha256`, which needs `dlp.fingerprint_key`.

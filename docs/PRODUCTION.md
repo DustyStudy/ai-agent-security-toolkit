@@ -96,6 +96,7 @@ The gateway's [egress blocklist](GATEWAY.md#egress-blocklist) catches tool calls
 - [ ] Containment fuzz gate (`--max-asr 0` on tool misuse, exfiltration and prompt leak) runs on every change to the agent
 - [ ] Agent runs with least-privilege credentials inside a container or microVM; IMDSv2 with hop limit 1 on cloud hosts
 - [ ] With the gateway: `agentsec probe-isolation --config gateway.yaml --gateway-host <gateway>` exits 0 from a client workstation after each deployment and on a schedule in CI (see [Check that nothing can go around the gateway](GATEWAY.md#check-that-nothing-can-go-around-the-gateway)). The gateway is a control only if model and MCP servers accept connections from it alone
+- [ ] With the gateway: every upstream run by a third party (a hosted model API) has `outbound.on_secret: block`, and `outbound.on_pii` is set to match your data-handling agreement with that provider
 - [ ] Known limitations from the README have been read and accepted
 
 ## Reporting a vulnerability

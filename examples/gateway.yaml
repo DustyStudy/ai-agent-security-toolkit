@@ -76,6 +76,11 @@ upstreams:                 # "model" in a request selects one of these by name; 
     url: http://127.0.0.1:11434/v1   # Ollama's OpenAI-compatible API; reachable from the gateway only
     model: llama3.1:8b
     # api_key: env:VLLM_API_KEY      # env:NAME or file:/path; literal keys are refused
+  # hosted-model:                    # a third-party provider: set on_secret: block (recommended)
+  #   url: https://api.provider.example/v1
+  #   model: provider-model-name
+  #   api_key: env:PROVIDER_API_KEY
+  #   outbound: {on_secret: block}   # never send credentials or cloud tokens to the provider
 
 # mcp_upstreams:          # one /mcp endpoint for IDEs and agents (needs the mcp extra)
 #   jira: {url: https://mcp-jira.internal/mcp, auth: file:/run/secrets/jira-mcp-token}

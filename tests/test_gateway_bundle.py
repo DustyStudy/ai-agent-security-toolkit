@@ -513,3 +513,43 @@ def test_bundle_verify_warns_about_allowlist_expiry(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "support: dlp.allow old expired" in out and "support: dlp.allow soon expires" in out
     assert "later" not in out
+
+
+def _keyed_group(ref):
+    return (
+        "# textwrap.dedent keeps the indentation\n  - group: support\n    tools: policies/eng.yaml\n"
+        f"    models: [local]\n    dlp:\n      fingerprint_key: '{ref}'\n"
+    )
+
+
+def test_bundle_verify_works_where_the_fingerprint_key_is_not_present(
+    tmp_path, monkeypatch, capsys
+):
+    from agentsec.cli import main
+
+    monkeypatch.delenv("AGENTSEC_TEST_DLP_KEY", raising=False)
+    for ref in ("env:AGENTSEC_TEST_DLP_KEY", f"file:{tmp_path / 'missing'}"):
+        root = make_bundle(tmp_path / "b", extra_entries=_keyed_group(ref))
+        assert main(["bundle", "verify", str(root), "--public-key", str(pub(tmp_path))]) == 0
+        out = capsys.readouterr().out
+        assert "bundle ok" in out and f"dlp.fingerprint_key {ref} is not readable here" in out
+        # The gateway itself still refuses to load the bundle without the key.
+        with pytest.raises((BundleError, OSError), match="not set|No such file"):
+            load(root)
+
+
+def test_bundle_verify_still_checks_a_present_key_and_the_reference(tmp_path, monkeypatch, capsys):
+    from agentsec.cli import main
+
+    monkeypatch.setenv("AGENTSEC_TEST_DLP_KEY", "short")
+    for ref in ("env:AGENTSEC_TEST_DLP_KEY", "vault:x"):
+        root = make_bundle(tmp_path / "b", extra_entries=_keyed_group(ref))
+        assert main(["bundle", "verify", str(root), "--public-key", str(pub(tmp_path))]) == 1
+        assert "fingerprint_key" in capsys.readouterr().err
+    monkeypatch.setenv("AGENTSEC_TEST_DLP_KEY", "k" * 32)
+    root = make_bundle(tmp_path / "b", extra_entries=_keyed_group("env:AGENTSEC_TEST_DLP_KEY"))
+    assert main(["bundle", "verify", str(root), "--public-key", str(pub(tmp_path))]) == 0
+    assert "not readable here" not in capsys.readouterr().out
+    (root / "policies" / "eng.yaml").write_text("version: 1\n")  # signature still checked
+    monkeypatch.delenv("AGENTSEC_TEST_DLP_KEY")
+    assert main(["bundle", "verify", str(root), "--public-key", str(pub(tmp_path))]) == 1

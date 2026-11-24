@@ -18,6 +18,7 @@ import binascii
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -247,8 +248,13 @@ def load_bundle(
     upstreams: set[str] | None = None,
     mcp_upstreams: set[str] | None = None,
     now: datetime | None = None,
+    resolve_secret: Callable[[str], str] | None = None,
 ) -> PolicySet:
-    """Verify and parse a bundle. ``upstreams`` checks each group's ``models`` against config."""
+    """Verify and parse a bundle. ``upstreams`` checks each group's ``models`` against config.
+
+    ``resolve_secret`` resolves each group's ``dlp.fingerprint_key`` reference (default:
+    environment variable or file contents).
+    """
     manifest_bytes, contents = verify_bundle(root, public_key)
     manifest = _parse_manifest(manifest_bytes)
     unknown = set(manifest) - _MANIFEST_KEYS
@@ -309,7 +315,7 @@ def load_bundle(
             raise BundleError(f"{where}.input values must be booleans")
         try:
             # fingerprint_key is an env:/file: reference: the bundle is signed, not secret.
-            dlp = DlpPolicy.from_dict(e.get("dlp"))
+            dlp = DlpPolicy.from_dict(e.get("dlp"), resolve_secret=resolve_secret)
             entry = group_policy(
                 group,
                 parsed[tools],

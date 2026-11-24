@@ -92,6 +92,7 @@ class GatewayConfig:
     bundle: BundleSettings | None = None  # set: policies come from a signed bundle
     log_content: bool = False
     cef_file: str | None = None
+    siem: tuple[SiemTarget, ...] = ()  # live audit feeds, delivered in the background
     max_body_bytes: int = 1024 * 1024
     max_response_bytes: int = 5 * 1024 * 1024
     max_tokens_cap: int = 4096
@@ -116,6 +117,19 @@ class PolicyHookSettings:
     url: str
     timeout_s: float = 5.0
     auth_ref: str | None = None  # env:/file: reference; sent as "Authorization: Bearer <it>"
+
+
+@dataclass(frozen=True)
+class SiemTarget:
+    url: str  # udp://, tcp://, tls://host:port (syslog) or https:// (HTTP event endpoint)
+    format: str = "cef"  # cef or json
+    timeout_s: float = 5.0
+    auth_ref: str | None = None  # HTTP only: env:/file: reference sent in auth_header
+    auth_header: str = "Authorization"
+    auth_scheme: str = "Bearer"  # prefix before the secret; "" sends the secret alone
+    ca_file: str | None = None
+    cert_file: str | None = None  # client certificate (mTLS)
+    key_file: str | None = None
 
 
 MAX_SECRET_FILE_BYTES = 65536  # keys and tokens; a bigger file is a wrong path
@@ -205,7 +219,18 @@ _SECTIONS: dict[str, set[str]] = {
         "header_timeout_s",
         "shutdown_timeout_s",
     },
-    "audit": {"file", "log_content", "cef_file"},
+    "audit": {"file", "log_content", "cef_file", "siem"},
+    "siem": {
+        "url",
+        "format",
+        "timeout_s",
+        "auth",
+        "auth_header",
+        "auth_scheme",
+        "ca_file",
+        "cert_file",
+        "key_file",
+    },
     "upstream": {"url", "model", "api_key", "outbound"},
     "outbound": {"on_secret", "on_pii"},
     "mcp_upstream": {"url", "auth", "pins"},
@@ -395,6 +420,68 @@ def _domains(identity: dict[str, Any]) -> tuple[str, ...]:
             raise ConfigError(f"identity.allowed_domains: {d!r} is not a domain (or *.domain)")
         out.append(d)
     return tuple(out)
+
+
+def _siem(audit: dict[str, Any], base: Path) -> tuple[SiemTarget, ...]:
+    entries = audit.get("siem", [])
+    if not isinstance(entries, list):
+        raise ConfigError("audit.siem must be a list")
+    out = []
+    for i, raw in enumerate(entries):
+        where = f"audit.siem[{i}]"
+        e = _section({where: raw}, where, "siem")
+        url = _typed(e.get("url"), str, f"{where}.url")
+        files = {
+            k: None if e.get(k) is None else str(base / _typed(e[k], str, f"{where}.{k}"))
+            for k in ("ca_file", "cert_file", "key_file")
+        }
+        auth = e.get("auth")
+        if auth is not None and not _typed(auth, str, f"{where}.auth").startswith(
+            ("env:", "file:")
+        ):
+            raise ConfigError(f"{where}.auth must be a reference: 'env:NAME' or 'file:/path'")
+        target = SiemTarget(
+            url=url,
+            format=_typed(e.get("format", "cef"), str, f"{where}.format"),
+            timeout_s=_positive(e, "timeout_s", 5.0, float),
+            auth_ref=auth,
+            auth_header=_typed(e.get("auth_header", "Authorization"), str, f"{where}.auth_header"),
+            auth_scheme=_typed(e.get("auth_scheme", "Bearer"), str, f"{where}.auth_scheme"),
+            **files,
+        )
+        if auth is not None and not url.startswith(("https:", "http:")):
+            raise ConfigError(f"{where}.auth is for HTTP targets; syslog uses cert_file (mTLS)")
+        try:
+            siem_sink(target, headers={})  # same URL and TLS checks as at start-up; no I/O
+        except (ValueError, OSError) as e2:
+            raise ConfigError(f"{where}: {e2}") from e2
+        out.append(target)
+    return tuple(out)
+
+
+def siem_sink(target: SiemTarget, headers: dict[str, str]) -> Any:
+    """The (unbuffered) sink for one ``audit.siem`` entry."""
+    from agentsec.middleware.siem import HttpSink, SyslogSink, tls_context
+
+    ctx = None
+    if target.ca_file or target.cert_file:
+        ctx = tls_context(target.ca_file, target.cert_file, target.key_file)
+    if target.url.startswith(("https:", "http:")):
+        return HttpSink(
+            target.url,
+            format=target.format,
+            headers=headers,
+            timeout_s=target.timeout_s,
+            ssl_context=ctx,
+        )
+    return SyslogSink(target.url, format=target.format, timeout_s=target.timeout_s, ssl_context=ctx)
+
+
+def siem_headers(target: SiemTarget) -> dict[str, str]:
+    if target.auth_ref is None:
+        return {}
+    secret = resolve_secret(target.auth_ref)
+    return {target.auth_header: f"{target.auth_scheme} {secret}".strip()}
 
 
 def _policy_hook(data: dict[str, Any]) -> PolicyHookSettings | None:
@@ -770,6 +857,7 @@ def load_config(path: str | Path) -> GatewayConfig:
         else str(base / _typed(evidence_dir, str, "admin.evidence_dir")),
         log_content=_typed(audit.get("log_content", False), bool, "audit.log_content"),
         cef_file=None if cef_file is None else str(base / _typed(cef_file, str, "cef_file")),
+        siem=_siem(audit, base),
         max_body_bytes=_positive(limits, "max_body_bytes", 1024 * 1024),
         max_response_bytes=_positive(limits, "max_response_bytes", 5 * 1024 * 1024),
         max_tokens_cap=_positive(limits, "max_tokens_cap", 4096),

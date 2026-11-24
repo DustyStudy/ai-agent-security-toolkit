@@ -203,7 +203,7 @@ def test_siem_outage_and_recovery_are_visible_and_lossless(tmp_path):
     now = [1000.0]
     config = dataclasses.replace(write_config(tmp_path), cef_file=str(tmp_path / "cef.log"))
     app = Gateway(config, transport=FakeUpstream())
-    siem, delivery = FlakySiem(), app.metrics.delivery
+    siem, delivery = FlakySiem(), app.metrics.delivery[0]
     delivery._sink, delivery._clock, delivery._last_ok = siem, lambda: now[0], now[0]
 
     def signals():

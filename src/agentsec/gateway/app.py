@@ -27,7 +27,7 @@ import urllib.request
 import uuid
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Generator, Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -239,11 +239,6 @@ def _watch(sock: socket.socket | None) -> None:
         deadline.watch(sock)
 
 
-# Name lookups run here so a call can stop waiting at its deadline: getaddrinfo cannot be
-# interrupted, and the system resolver's own timeout can be far longer than the call's.
-_RESOLVER = ThreadPoolExecutor(max_workers=8, thread_name_prefix="agentsec-dns")
-
-
 def _connect_within_deadline(
     address: tuple[str, int], timeout: Any = None, source_address: Any = None, **kw: Any
 ) -> socket.socket:
@@ -251,11 +246,21 @@ def _connect_within_deadline(
     deadline = getattr(_DEADLINE, "current", None)
     if deadline is None:
         return socket.create_connection(address, timeout, source_address, **kw)
-    lookup = _RESOLVER.submit(socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM)
+    # getaddrinfo cannot be interrupted, and the system resolver may wait far longer than the
+    # call may. One thread per lookup, not a shared pool: a name that hangs must not queue
+    # other upstreams' lookups behind it. Calls are already bounded by the upstream pool.
+    lookup: Future[Any] = Future()
+
+    def resolve() -> None:
+        try:
+            lookup.set_result(socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM))
+        except BaseException as e:  # noqa: BLE001 - handed to the waiting call
+            lookup.set_exception(e)
+
+    threading.Thread(target=resolve, name="agentsec-dns", daemon=True).start()
     try:
         infos = lookup.result(timeout=max(deadline.at - time.monotonic(), 0.0))
     except TimeoutError:
-        lookup.cancel()
         raise TimeoutError("upstream name resolution timed out") from None
     error: OSError = OSError("name resolved to no address")
     for *_, sockaddr in infos:
@@ -336,7 +341,9 @@ def _upstream_failure(e: Exception, deadline: _Deadline) -> Exception:
     if isinstance(e, urllib.error.HTTPError):
         e.close()  # the error body is never read; release the connection
         if e.code == 429:
-            return UpstreamRateLimited(_retry_after(e.headers.get("Retry-After")))
+            return UpstreamRateLimited(
+                _retry_after(e.headers.get("Retry-After") if e.headers else None)
+            )
         return UpstreamError(f"upstream returned HTTP {e.code}")
     if isinstance(e, urllib.error.URLError):
         reason = e.reason

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -10,6 +11,43 @@ from dataclasses import dataclass
 # attacker-influenceable text of unbounded size (audit log fields, tool output, tool-call
 # exception text) across a dozen regex rules, so it needs a cost ceiling.
 DEFAULT_MAX_SCAN_CHARS = 200_000
+
+# Invisible characters outside category Cf (combining grapheme joiner, Hangul fillers,
+# variation selectors, which carry "emoji smuggling"): dropped like Cf before matching.
+_INVISIBLE_NON_CF = frozenset(
+    "\u034f\u115f\u1160\u3164\uffa0"
+    + "".join(map(chr, range(0xFE00, 0xFE10)))
+    + "".join(map(chr, range(0xE0100, 0xE01F0)))
+)
+
+
+def _fold_char(ch: str) -> str:
+    if unicodedata.category(ch) == "Cf" or ch in _INVISIBLE_NON_CF:
+        return ""
+    return unicodedata.normalize("NFKC", ch)
+
+
+def fold(text: str) -> str:
+    """``text`` as a reader sees it: invisible characters dropped, compatibility forms
+    (fullwidth, circled, math alphanumerics) folded to their plain form."""
+    return text if text.isascii() else "".join(map(_fold_char, text))
+
+
+def _folded(text: str) -> tuple[str, list[int] | None]:
+    """``fold(text)`` plus, for each folded character, the index it came from in ``text``.
+
+    A zero-width space or a fullwidth letter inside a key ("AKIA\u200b...") hides it from every
+    detector but not from the person or program that reads it, so detectors run on this.
+    """
+    if text.isascii():
+        return text, None
+    out: list[str] = []
+    origin: list[int] = []
+    for i, ch in enumerate(text):
+        folded = _fold_char(ch)
+        out.append(folded)
+        origin += [i] * len(folded)
+    return "".join(out), origin
 
 
 @dataclass(frozen=True)
@@ -368,7 +406,8 @@ def find_sensitive(
     Only the first ``max_scan_chars`` characters are scanned; pass ``max_scan_chars=len(text)``
     (or ``math.inf``) to scan all of it regardless of size.
     """
-    scanned = text if len(text) <= max_scan_chars else text[:max_scan_chars]
+    prefix = text if len(text) <= max_scan_chars else text[:max_scan_chars]
+    scanned, origin = _folded(prefix)
     found: list[Finding] = []
     rules = (*((*_RULES, _EMAIL) if include_email and include_pii else _RULES), *extra)
     for rule in rules:
@@ -381,7 +420,10 @@ def find_sensitive(
                 # otherwise hide the card inside a longer candidate that fails the check.
                 pos = m.start() + 1
                 continue
-            found.append(Finding(rule.kind, m.start(rule.group), m.end(rule.group), rule.category))
+            start, end = m.start(rule.group), m.end(rule.group)
+            if origin is not None:  # back to positions in the caller's text
+                start, end = origin[start], origin[end - 1] + 1
+            found.append(Finding(rule.kind, start, end, rule.category))
             pos = max(m.end(), m.start() + 1)
     found.sort(key=lambda f: (f.start, -(f.end - f.start)))
     merged: list[Finding] = []

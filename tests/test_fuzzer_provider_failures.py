@@ -538,6 +538,21 @@ def test_a_binary_token_file_is_refused_without_quoting_its_bytes(tmp_path):
     assert "xff" not in str(e.value) and "SECRET" not in str(e.value)
 
 
+def test_an_oversized_token_file_is_refused(tmp_path):
+    (tmp_path / "tok").write_text("a" * 70000)  # a wrong path, such as a log or a dump
+    with pytest.raises(ValueError, match="over 65536 bytes"):
+        OpenAICompatTarget("http://h/v1", "m", token=f"file:{tmp_path}/tok")
+
+
+def test_a_header_value_can_be_an_env_reference(monkeypatch):
+    monkeypatch.setenv("FUZZ_API_KEY", "sk-from-env")
+    t = load_target("openai-compat:http://h/v1#model=m&header=X-Api-Key:env:FUZZ_API_KEY")
+    assert t.headers["X-Api-Key"] == "sk-from-env"
+    monkeypatch.delenv("FUZZ_API_KEY")
+    with pytest.raises(ValueError, match="FUZZ_API_KEY"):
+        load_target("openai-compat:http://h/v1#model=m&header=X-Api-Key:env:FUZZ_API_KEY")
+
+
 @pytest.mark.parametrize(
     "spec",
     [

@@ -49,6 +49,7 @@ Newest first. Say what ran, where, and whether it used mocks.
 
 ## Backlog (not release blockers)
 
-- Gateway: no per-user token or spend budget over time; only `max_tokens_cap` per request. (Upstream hostname resolution now counts toward the call deadline, and an upstream 429 reaches clients as 429 with a clamped `Retry-After`, per Dusty's decision on 2026-11-24.)
-- Fuzzer: response status line and headers are bounded per read only; the Anthropic SDK timeout is per read; `module:callable` targets have no wall-clock limit; no circuit breaker across cases. (`header=` now takes `env:`/`file:` references, secret files are capped at 64 KiB, and Anthropic refusals score as blocked.)
-- Sandbox: no built-in approval timeout for sync approvers (async callers can use `asyncio.wait_for`, which now fails closed); pydantic v1 aliases not mapped. (`guard_tool(session=None)` now warns, the audit log writes non-finite floats as strings, and `JsonSchemaValidator` caps input at 1,000,000 characters.)
+- Gateway: an upstream 429 or quota error reaches clients as 502 `upstream_error` without `Retry-After` (documented). Mapping it to 429/503 with a sanitised `Retry-After` is a behaviour change to decide on.
+- Gateway: upstream hostname resolution is outside the call deadline (bounded only by the system resolver). No per-user token or spend budget over time; only `max_tokens_cap` per request.
+- Fuzzer: response status line and headers are bounded per read only; the Anthropic SDK timeout is per read; `module:callable` targets have no wall-clock limit; no circuit breaker across cases; `header=` accepts literal API keys (an `env:` reference would keep them out of shell history); `token=file:` has no size cap; Anthropic `stop_reason: "refusal"` is not scored as blocked.
+- Sandbox: no built-in approval timeout for sync approvers (async callers can use `asyncio.wait_for`, which now fails closed); `guard_tool(session=None)` binds the default session without the warning `wrap()` gives; pydantic v1 aliases not mapped; audit writes NaN/Infinity as non-standard JSON; `JsonSchemaValidator` has no input size cap.

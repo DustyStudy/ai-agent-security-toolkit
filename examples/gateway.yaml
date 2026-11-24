@@ -82,16 +82,6 @@ upstreams:                 # "model" in a request selects one of these by name; 
   #   api_key: env:PROVIDER_API_KEY
   #   outbound: {on_secret: block}   # never send credentials or cloud tokens to the provider
 
-# egress:                 # deny tool calls to hosts on signed threat feeds (docs/GATEWAY.md, "Egress blocklist")
-#   public_key_file: feeds.pub        # Ed25519 key of the FEED signer, never the bundle key
-#   blocklists:                       # each file needs FILE.sig from `agentsec egress sign-feed`
-#     - {name: drop, kind: ip, file: feeds/drop.txt, max_age_h: 48}
-#     - {name: urlhaus, kind: domain, file: feeds/urlhaus-hosts.txt, max_age_h: 48}
-#   except_hosts: []
-#   on_stale: warn                    # deny: refuse URL arguments while a feed is stale
-#   check_model_links: true
-#   state_file: egress-state.json     # refuse a feed rollback across restarts
-
 # mcp_upstreams:          # one /mcp endpoint for IDEs and agents (needs the mcp extra)
 #   jira: {url: https://mcp-jira.internal/mcp, auth: file:/run/secrets/jira-mcp-token}
 #   docs: {url: https://mcp-docs.internal/mcp, pins: pins/docs.json}

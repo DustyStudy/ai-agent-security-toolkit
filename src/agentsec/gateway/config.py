@@ -103,9 +103,6 @@ class GatewayConfig:
     egress: EgressSettings | None = None  # set: URL arguments are checked against signed feeds
 
 
-MAX_SECRET_FILE_BYTES = 65536  # keys and tokens; a bigger file is a wrong path
-
-
 def resolve_secret(ref: str) -> str:
     kind, _, value = ref.partition(":")
     if kind == "env":
@@ -114,11 +111,7 @@ def resolve_secret(ref: str) -> str:
             raise ConfigError(f"environment variable {value!r} is not set")
         return secret
     if kind == "file":
-        with open(value, "rb") as fh:
-            data = fh.read(MAX_SECRET_FILE_BYTES + 1)
-        if len(data) > MAX_SECRET_FILE_BYTES:
-            raise ConfigError(f"secret file {value!r} is over {MAX_SECRET_FILE_BYTES} bytes")
-        return data.decode("utf-8").strip()
+        return Path(value).read_text(encoding="utf-8").strip()
     raise ConfigError("secrets must be references: 'env:NAME' or 'file:/path'")
 
 

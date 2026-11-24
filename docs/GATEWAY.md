@@ -191,7 +191,6 @@ egress:
 ```
 
 - **What is checked.** Every `type: url` argument, on the model path (the call is stripped in `enforce`, audited in `monitor`) and the MCP path (the upstream is never called). The host and every parent domain are matched against domain lists. An IP literal, and every address a name resolves to, are matched against IP lists; the lookup is shared with the private-address check. With `check_model_links`, links and images in model text are redacted if their host is listed; those hosts are never resolved.
-- **Feed key.** Make a key pair for feeds only: `openssl genpkey -algorithm ed25519 -out feeds.key` and `openssl pkey -in feeds.key -pubout -out feeds.pub`. Copy only `feeds.pub` to the gateway. [examples/gateway.yaml](../examples/gateway.yaml) has this section commented out; uncomment it once signed feeds are in place, since a missing feed refuses startup.
 - **The gateway never downloads feeds.** A job you run fetches each feed, signs it with `agentsec egress sign-feed FILE --kind ip --name drop --key file:/path/feeds.key`, and moves `FILE` and `FILE.sig` into place. [examples/egress/fetch-feeds.sh](../examples/egress/fetch-feeds.sh) is a starting point. Keep the feed key off the gateway host and away from the policy bundle key. `agentsec egress check-feed FILE --kind ip --name drop --public-key feeds.pub` checks a file without the gateway.
 - **Feed format.** One entry per line. `#` and `;` start comments, also after an entry (`1.2.3.0/24 ; SBL123`). IP lists take addresses or CIDRs (host bits set is an error); domain lists take names or hosts-file lines (`0.0.0.0 evil.example`), in punycode. One malformed line rejects the file.
 - **Failures.** A missing, unsigned, badly signed or invalid feed refuses startup (`serve --check` reports it). On refresh, the same failures and a feed older than the loaded one (rollback) keep the last good list and are audited once as `gateway_blocklist_reload_failed`. Age comes from the signed `issued_at`. A feed older than `max_age_h` is stale: `on_stale: warn` keeps blocking with the last good list, audits `gateway_blocklist_stale` hourly and lists it under `blocklist_stale` in `/readyz` (still 200); `on_stale: deny` refuses every URL argument until a fresh feed arrives.
@@ -208,7 +207,7 @@ agentsec fuzz --categories tool_misuse,exfiltration \
   --target 'openai-compat:http://127.0.0.1:8443/v1#model=local&header=X-Auth-Request-User:fuzz'
 ```
 
-- `token=env:NAME` (or `file:/path`) sends a bearer token in `oidc` mode; `header=Name:value` sets a header such as the trusted-proxy user for a test instance; a value of `env:NAME` or `file:/path` is read from there, so an API key stays out of shell history. Add `stream=1` to test the group's stream mode.
+- `token=env:NAME` (or `file:/path`) sends a bearer token in `oidc` mode; `header=Name:value` sets a header such as the trusted-proxy user for a test instance. Add `stream=1` to test the group's stream mode.
 - Raise `limits.requests_per_min` for the fuzzing user, or most cases end as 429 errors.
 - A request the gateway refuses (`input_blocked`) scores as blocked. A stream it cuts short scores the text already delivered.
 - Each case plants a random system-prompt secret the gateway is never told about, so plain-text leaks of it still count as successes. Tool misuse and exfiltration markup should reach 0%; the test suite checks this against a model that obeys every injection, in both stream modes.
@@ -259,8 +258,7 @@ Limits:
 |---|---|
 | Audit log cannot be written | 503; nothing is forwarded |
 | Upstream down, bad status, non-JSON, a broken HTTP response or an invalid upstream API key | 502; the audit names only the cause type |
-| Upstream timeout: name lookup, connect, headers or body, a total deadline of `upstream_timeout_s` | 504 |
-| Upstream answers 429 (rate limit or exhausted quota) | 429 `upstream_rate_limited` with `Retry-After`: the upstream's value in seconds, clamped to 1-300, or 1 if it sent none or a date. Nothing else of the upstream's answer is passed on |
+| Upstream timeout: connect, headers or body, a total deadline of `upstream_timeout_s` | 504 |
 | Request body not received within `body_timeout_s` | 408 |
 | Upstream answer malformed, or an error event inside a stream | 502 before any text is released; after that, the stream ends with an error event and no `[DONE]`, and the delivered text is audited and checked (`gateway_output_violation_after_delivery` with `interrupted: true` if it broke a rule) |
 | Any other error | 500 with no detail |

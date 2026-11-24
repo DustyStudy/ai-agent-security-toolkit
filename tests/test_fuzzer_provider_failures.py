@@ -357,7 +357,7 @@ def test_a_backend_error_mid_stream_with_harmless_text_is_an_error_not_a_defence
     assert main(["fuzz", "--target", spec, "--max-cases", "2", "--quiet", "--max-asr", "1"]) == 2
     # Behind the toolkit's guards the cut answer is still not a defence: every case the model
     # answered is an error (the input scanner may block some before the model is called).
-    guarded = run(load_target(f"guarded:{spec}"), FuzzConfig(max_cases=6))
+    guarded = run(load_target(f"guarded:{spec}"), FuzzConfig(max_cases=20))
     answered = [r for r in guarded.results if not r.blocked]
     assert answered and all(r.error and "IncompleteResponse" in r.error for r in answered)
 

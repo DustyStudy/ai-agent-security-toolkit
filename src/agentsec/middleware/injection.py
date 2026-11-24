@@ -1,8 +1,9 @@
 """Heuristic prompt-injection scanner and "spotlighting" helper.
 
 **This is a tripwire, not a defense.** Pattern matching over natural language is
-trivially bypassed (encoding, translation, paraphrase, homoglyphs). It is
-useful for logging, alerting and cheap early rejection of lazy attacks. The
+trivially bypassed (encoding, translation, paraphrase). Look-alike letters, diacritics,
+leetspeak and spaced-out letters are folded before matching, which stops only the lazy
+variants of those tricks. It is useful for logging, alerting and cheap early rejection of lazy attacks. The
 controls that actually contain a successful injection are the ones that do not
 depend on recognising it: least-privilege tool policy, taint tracking, output
 validation and audit. The fuzzer in :mod:`agentsec.fuzzer` exists to measure
@@ -21,6 +22,18 @@ _TAG_CHARS = re.compile("[\U000e0000-\U000e007f]")
 # Invisible characters outside category Cf: combining grapheme joiner, Hangul fillers and
 # variation selectors render as nothing but are Mn/Lo, so a category check alone misses them.
 _INVISIBLE_NON_CF = re.compile("[\u034f\u115f\u1160\u3164\uffa0\ufe00-\ufe0f\U000e0100-\U000e01ef]")
+
+# Letters from other scripts and phonetic small capitals that read as Latin ("Ignоre" with a
+# Cyrillic o). NFKC does not fold these.
+_HOMOGLYPHS = str.maketrans(
+    "аеорсхуіјѕԁһԛԝАВЕКМНОРСТХІЈЅ"  # Cyrillic
+    "οανρτικυχΟΑΒΕΖΗΙΚΜΝΡΤΧΥ"  # Greek
+    "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀꜱᴛᴜᴠᴡʏᴢɑɡ",  # small capitals, IPA
+    "aeopcxyijsdhqwABEKMHOPCTXIJSoavptikuxOABEZHIKMNPTXYabcdefghijklmnoprstuvwyzag",
+)
+_LEET = str.maketrans("4@31!0$57", "aaeiiosst")
+# Runs of single letters split by one repeated separator: "i g n o r e", "a.l.l".
+_SPACED = re.compile(r"(?<!\w)\w([ ._\-])\w(?!\w)(?:\1\w(?!\w))+")
 
 # Untrusted content (a fetched page, a large tool result) has no size limit the scanner
 # controls, and scanning it costs work proportional to its length across ~10 regex passes.
@@ -120,7 +133,22 @@ class InjectionScanner:
             for ch in text
             if unicodedata.category(ch) != "Cf" and not _INVISIBLE_NON_CF.match(ch)
         )
-        return unicodedata.normalize("NFKC", visible)
+        folded = unicodedata.normalize("NFKD", unicodedata.normalize("NFKC", visible))
+        # Combining marks go: diacritics ("Ígnóré") and strike-through overlays ("I̷g̷n̷").
+        bare = "".join(ch for ch in folded if not unicodedata.combining(ch))
+        return unicodedata.normalize("NFC", bare).translate(_HOMOGLYPHS)
+
+    @classmethod
+    def _views(cls, text: str) -> list[str]:
+        norm = cls.normalize(text)
+        views = [norm]
+        for view in (
+            norm.translate(_LEET),  # "1gn0r3 4ll pr3v10us"
+            _SPACED.sub(lambda m: m[0][::2], norm),
+        ):
+            if view != norm:
+                views.append(view)
+        return views
 
     def scan(self, text: str) -> ScanResult:
         truncated = len(text) > self.max_scan_chars
@@ -131,9 +159,9 @@ class InjectionScanner:
         if _TAG_CHARS.search(text) or len(_INVISIBLE.findall(text)) >= 3:
             hits.append("hidden_characters")
             score += 0.6
-        norm = self.normalize(text)
+        views = self._views(text)
         for sig in self.signals:
-            if sig.pattern.search(norm):
+            if any(sig.pattern.search(v) for v in views):
                 hits.append(sig.name)
                 score += sig.weight
         score = min(score, 1.0)

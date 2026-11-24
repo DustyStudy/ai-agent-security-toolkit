@@ -779,3 +779,23 @@ def test_an_older_mcp_sdk_is_refused_with_a_clear_error(installed):
 def test_the_tested_sdk_and_newer_are_accepted():
     for installed in ("2.3.0", "2.10.1", "3.0.0"):
         gwmcp.require_sdk(installed)
+
+
+def test_an_ended_session_is_refused_even_for_its_owner(gateway):
+    url, _, _, app = gateway
+    list_tools = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+
+    async def main():
+        async with httpx2.AsyncClient(headers=headers("alice"), timeout=10) as alice:
+            sid = await raw_initialize(alice, url)
+            hdrs = {
+                "Mcp-Session-Id": sid,
+                "MCP-Protocol-Version": "2025-11-25",
+                "Accept": "application/json, text/event-stream",
+            }
+            before = await alice.post(url, json=list_tools, headers=hdrs)
+            ended = app._mcp.end_sessions("alice")
+            after = await alice.post(url, json=list_tools, headers=hdrs)
+            return before.status_code, ended, after.status_code
+
+    assert run(main()) == (200, 1, 404)

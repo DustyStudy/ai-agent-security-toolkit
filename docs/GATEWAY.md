@@ -34,6 +34,14 @@ client.chat.completions.create(model="llama3.1-8b", messages=[{"role": "user", "
    - `oidc`: one `Authorization: Bearer <JWT>` from your IdP, verified against its JWKS (fetched over https). Only asymmetric algorithms are accepted; `iss`, `aud`, `exp`, `iat` and `sub` must be present and valid; a key that declares an algorithm verifies only that algorithm. Keys are cached and refreshed after half of `jwks_cache_s`; if the IdP is down, the cached keys work until `jwks_cache_s`, then every token is refused. Key fetches, for an unknown `kid` or a stale cache, happen at most once a minute and have a total deadline. The audit log records why a token failed; the client only sees 401.
 
    In both modes `allowed_groups` restricts access by group.
+
+   **Company accounts only.** `identity.allowed_domains` (for example `[corp.example, "*.corp.example"]`) requires the user name to be an email address in one of those domains. `identity.block_personal_domains: true` refuses consumer mailboxes (gmail.com, outlook.com, icloud.com, proton.me and about 40 more; the list is `agentsec.gateway.accounts.PERSONAL_DOMAINS`). With either rule on, a user name that is not an address with exactly one `@` and an ASCII domain is refused, so look-alike Unicode domains never match. A refused account gets 403 `account_not_allowed`, recorded as `gateway_account_refused` with the reason. The rules also apply to access tokens minted before they were turned on. In `oidc` mode, set `user_claim: email` (and have the IdP verify addresses) for these rules to make sense.
+
+   ```yaml
+   identity:
+     allowed_domains: [corp.example, "*.corp.example"]
+     block_personal_domains: true
+   ```
 2. **Rebuild the request.** Only known fields go upstream (`model`, `messages`, `tools`, `tool_choice`, `temperature`, `max_tokens`, ...). `model` picks a configured upstream by name, so a client can never choose a URL. `max_tokens` is capped and `n` must be 1.
 3. **Filter tools.** Tools the policy does not allow, and tool definitions that look poisoned, are removed before the model sees them. A `tool_choice` naming a removed tool gets a 400.
 4. **Screen input.** Every message is scanned for prompt injection. `role: tool` messages count as untrusted and taint the request, whatever their content, so the policy's taint rules (deny side-effecting tools after reading untrusted content) apply to the answer. A flagged message blocks the request. Content parts are an allowlist: `text`, and `image_url` only as an inline `data:` image. A remote image URL is blocked here. Every other part type (`video_url`, `audio_url`, `input_audio`, `file`, ...) is refused with a 400 in every mode, because a model server that fetches a URL would fetch whatever address the user names.

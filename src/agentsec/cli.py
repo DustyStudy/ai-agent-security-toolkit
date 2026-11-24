@@ -750,8 +750,9 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument(
         "--timeout",
         type=float,
-        help="wall-clock seconds per case for HTTP and model targets, retries included "
-        "(default: 60 for http(s)://, 300 for ollama: and openai-compat:; per request for anthropic:)",
+        help="wall-clock seconds per case for HTTP, model and module:callable targets, retries "
+        "included (default: 60 for http(s)://, 300 for ollama:, openai-compat: and "
+        "module:callable; per request for anthropic:)",
     )
     f.add_argument("--json", help="write full JSON report to this path")
     f.add_argument("--md", help="write Markdown report to this path")

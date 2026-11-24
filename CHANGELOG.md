@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 - Gateway: `limits.tokens_per_user_per_day` sets a per-user token budget over a rolling 24 hours (off by default). A user over it gets 429 `budget_exceeded` with a `Retry-After`, audited as `gateway_budget_exceeded`, and nothing reaches the model. Usage is the upstream's reported `total_tokens`, or the request's `max_tokens` when it reports none; holdback streams ask the upstream for usage when a budget is set. The count is in memory per gateway process.
+- Fuzzer: `module:callable` targets get a wall-clock limit per case (`--timeout`, default 300 seconds). An `async def` is cancelled at the limit; a synchronous callable is left running in a worker thread, the case is an error, and if that call is still running when the next case starts, the run stops and the remaining cases are recorded as errors.
 
 ## [0.13.0] - 2026-11-24
 

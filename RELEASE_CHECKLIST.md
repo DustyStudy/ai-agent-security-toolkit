@@ -1,12 +1,12 @@
-# Release checklist: 0.12.0
+# Release checklist: 0.14.0
 
 The release tracker for the next version (the `[Unreleased]` section of CHANGELOG.md). Each
 criterion has a pass/fail check that someone else can rerun. Keep it current: a later session
 picks up from the **Status** and **Evidence / blocker** columns.
 
-- **Release branch:** `claude/project-thread-zxl7cq` (PR into `main`; nothing is merged, tagged or published without the maintainer's approval)
+- **Release branch:** `claude/project-thread-kr6wz2` (PR into `main`; nothing is merged, tagged or published without the maintainer's approval)
 - **Candidate:** the branch head named in the latest "Verification log" entry below
-- **Verdict (2026-11-23):** RELEASED. 0.12.0 is on PyPI and ghcr.io. R21 (staging acceptance) stays open per deployment, not for the package
+- **Verdict (2026-11-24):** CANDIDATE. 0.14.0 ships the 12 PRs merged since 0.13.0 (#159-#170). Local checks pass; waiting on PR CI, tag and the two publish approvals. R21 (staging acceptance) stays open per deployment, not for the package
 - **Target users:** teams running LLM agents (Python libraries: fuzzer, ToolGuard sandbox, middleware, threat model) and platform teams running the `agentsec serve` gateway in front of local models and MCP servers
 - **Distribution:** PyPI package `ai-agent-security-toolkit` (sdist + wheel, provenance attested) and the gateway container image, both published by `.github/workflows/release.yml` and `image.yml` from a `v*.*.*` tag on `main`
 - **Owner key:** `claude` = the release session on this branch; `maintainer` = Dusty (decisions, approvals, access); `CI` = GitHub Actions on the PR
@@ -35,14 +35,15 @@ Status values: `PASS` (evidence attached), `FAIL`, `OPEN` (not yet run), `BLOCKE
 | R16 | Hash-pinned locks match `pyproject.toml` | `python scripts/lock.py && git diff --exit-code -- requirements` | claude, CI | | PASS | Local: no diff |
 | R17 | Live model evaluation recorded for this candidate | Fuzz matrix against a real model, direct and behind the full stack, with model, hardware and date recorded in `docs/PROOF.md` | maintainer | R2 | PASS | Live run on `922a7e0`, 2026-11-22, Llama 3.1 8B via local Ollama 0.40.10, RTX 5070 Ti laptop GPU, Windows 11, Python 3.12.10: bare 35.5% / guarded 0.4% (0 tool misuse, exfiltration or prompt leak; 2 canary echoes); tool_result bare 4.0% / guarded 0.0%. Matches PROOF.md within run-to-run variation; recorded in `docs/PROOF.md`. **Live model, no mocks; no paid calls** |
 | R18 | Docs and CHANGELOG describe every behaviour change in this candidate | Each fix in this branch has a CHANGELOG line; README/docs flags and exit codes match `--help` | claude | R11-R13 | PASS | CHANGELOG `[Unreleased]` has a line for every fix (Changed (breaking), Fixed, Security); README documents `--timeout` and refused runs; docs/GATEWAY.md failure table and docs/SANDBOX.md approver rule updated (`b5b0b33`) |
-| R19 | Version set for the release | `pyproject.toml` version = tag; CHANGELOG `[Unreleased]` renamed with the release date | maintainer | R1-R18 | PASS | Maintainer approved 2026-11-23: `pyproject.toml` and `agentsec.__version__` are 0.12.0; CHANGELOG section `[0.12.0] - 2026-11-23`. Tag `v0.12.0` must match (checked by `release.yml`) |
-| R20 | Release published from `main` | PR merged, tag `v0.12.0` on `main`, `release.yml` and `image.yml` succeed, PyPI shows the version | maintainer | R19 | PASS | PR #141 merged as `51b535c` (main CI 31/31 green); tag `v0.12.0` on it; `release.yml` (build, release, pypi) and `image.yml` (scan, push to ghcr.io, provenance, verify) succeeded 2026-11-23; PyPI lists 0.12.0; GitHub release has wheel, sdist, SBOM and attestations |
+| R19 | Version set for the release | `pyproject.toml` version = tag; CHANGELOG `[Unreleased]` renamed with the release date | maintainer | R1-R18 | PASS | Maintainer approved a release 2026-11-24: `pyproject.toml` and `agentsec.__version__` are 0.14.0; CHANGELOG section `[0.14.0] - 2026-11-24`. Tag `v0.14.0` must match (checked by `release.yml`) |
+| R20 | Release published from `main` | PR merged, tag `v0.14.0` on `main`, `release.yml` and `image.yml` succeed, PyPI shows the version | maintainer | R19 | OPEN | Previous: 0.13.0 tag on `5160158`, published 2026-11-24 |
 | R21 | Staging acceptance for gateway deployments | The table in `docs/PRODUCTION.md` "Gateway acceptance before employee rollout" (identity/offboarding, network isolation, tool authorization, audit retention, rollback) | maintainer | R20 | BLOCKED | Needs a staging environment with the real IdP and network; none available to this session. Applies to each deployment, not to the package release |
 
 ## Verification log
 
 Newest first. Say what ran, where, and whether it used mocks.
 
+- **2026-11-24, 0.14.0 candidate (main `b6902f1` + version bump), local Linux, Python 3.13.18.** R1 (ruff, format, mypy) clean; R5 sdist + wheel built from `requirements-release-tools.txt`, `twine check --strict` passed, wheel has `py.typed` and `threats.yaml`; R6 `agentsec --version` 0.14.0 and `policy validate --strict examples/policy.yaml` OK; R7 guarded ASR 0 (`--max-asr 0` exit 0); R8 render diff empty; R16 locks no diff. R2-R4 and R9-R15 are covered by the PR's CI matrix and rerun on the tag by `release.yml`/`image.yml`. R17's live-model run is from 0.12.0; the feature PRs since were tested in staging, not against a live model. Mocks: built-in simulators only. Licence stays MIT.
 - **2026-11-22, `c5a05c7` (release candidate).** CI 32/32 green (R4). Local full suite 1872 passed. Code after `b5b0b33` changed only the JSON depth limit and two test deadlines, so the clean-build, wheel, container and end-to-end evidence from `b5b0b33` stands for the code paths it exercised.
 - **2026-11-22, `b5b0b33` (integrated), local Linux, Python 3.13.18, Docker 29.10.0.** R2, R5-R7, R9-R14, R18 rerun from a clean worktree and a non-editable wheel install. Mocks: built-in simulators (R7), a local stub upstream (R10, R11), stub servers and a mocked Anthropic SDK in tests (R12). No live provider was called.
 - **2026-11-22, `80a1cba`, local Linux, Python 3.13.18 (Docker 29.10.0 for R9).** R1, R3, R5-R10, R14-R16 as above. Mocks: R7 uses the built-in simulators; R10 and R11 use a local stub upstream; no live provider was called.

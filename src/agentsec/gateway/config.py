@@ -89,6 +89,7 @@ class GatewayConfig:
     max_body_bytes: int = 1024 * 1024
     max_response_bytes: int = 5 * 1024 * 1024
     max_tokens_cap: int = 4096
+    tokens_per_user_per_day: int | None = None  # set: model tokens a user may use per 24 hours
     upstream_timeout_s: float = 120.0
     requests_per_min: int = 60
     concurrent_requests: int = 4
@@ -176,6 +177,7 @@ _SECTIONS: dict[str, set[str]] = {
         "max_body_bytes",
         "max_response_bytes",
         "max_tokens_cap",
+        "tokens_per_user_per_day",
         "upstream_timeout_s",
         "requests_per_min",
         "concurrent_requests",
@@ -690,6 +692,9 @@ def load_config(path: str | Path) -> GatewayConfig:
         max_body_bytes=_positive(limits, "max_body_bytes", 1024 * 1024),
         max_response_bytes=_positive(limits, "max_response_bytes", 5 * 1024 * 1024),
         max_tokens_cap=_positive(limits, "max_tokens_cap", 4096),
+        tokens_per_user_per_day=None
+        if limits.get("tokens_per_user_per_day") is None
+        else _positive(limits, "tokens_per_user_per_day", None),
         upstream_timeout_s=_positive(limits, "upstream_timeout_s", 120.0, float),
         requests_per_min=_positive(limits, "requests_per_min", 60),
         concurrent_requests=_positive(limits, "concurrent_requests", 4),

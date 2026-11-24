@@ -23,3 +23,8 @@ async def async_compromised(prompt: str) -> str:
 
 def broken(prompt: str) -> str:
     raise RuntimeError("target is down")
+
+
+async def async_hang(prompt: str) -> str:
+    await asyncio.sleep(60)
+    return "never"

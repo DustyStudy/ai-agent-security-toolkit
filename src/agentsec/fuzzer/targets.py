@@ -11,6 +11,7 @@ import json
 import math
 import re
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -258,6 +259,60 @@ def sync_target(fn: Callable[..., Any]) -> Callable[..., Any]:
 
     bridged.accepts = getattr(fn, "accepts", "text")  # type: ignore[attr-defined]
     return bridged
+
+
+DEFAULT_CALLABLE_TIMEOUT_S = 300.0
+
+
+def time_limited(fn: Callable[..., Any], timeout: float) -> Callable[..., Any]:
+    """``fn`` with a wall-clock limit of ``timeout`` seconds per call (TimeoutError past it).
+
+    An ``async def`` is cancelled at the limit. A synchronous callable cannot be stopped from
+    outside, so it runs in a worker thread that is left behind; while that call is still running,
+    the next call raises :class:`TargetUnavailable` (stopping the run) rather than run the target
+    twice at once.
+    """
+    accepts = getattr(fn, "accepts", "text")
+    too_slow = f"no response within the {timeout:g}s case timeout"
+    if inspect.iscoroutinefunction(fn):
+
+        async def limited_async(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await asyncio.wait_for(fn(*args, **kwargs), timeout)
+            except TimeoutError:
+                raise TimeoutError(too_slow) from None
+
+        limited_async.accepts = accepts  # type: ignore[attr-defined]
+        return sync_target(limited_async)
+    stuck: list[threading.Thread] = []
+
+    def limited(*args: Any, **kwargs: Any) -> Any:
+        if stuck and stuck[0].is_alive():
+            raise TargetUnavailable(
+                "a call that passed the case timeout is still running, and a synchronous "
+                "callable cannot be cancelled"
+            )
+        stuck.clear()
+        out: dict[str, Any] = {}
+
+        def work() -> None:
+            try:
+                out["value"] = fn(*args, **kwargs)
+            except BaseException as exc:  # noqa: BLE001 - re-raised in the caller's thread
+                out["error"] = exc
+
+        worker = threading.Thread(target=work, name="agentsec-fuzz-target", daemon=True)
+        worker.start()
+        worker.join(timeout)
+        if worker.is_alive():
+            stuck.append(worker)
+            raise TimeoutError(too_slow)
+        if "error" in out:
+            raise out["error"]
+        return out["value"]
+
+    limited.accepts = accepts  # type: ignore[attr-defined]
+    return limited
 
 
 def text_target(fn: Callable[[str], Any]) -> Target:
@@ -755,8 +810,9 @@ def load_target(spec: str, *, timeout: float | None = None) -> Target:
     :class:`TargetResponse`, or take a ``str`` and return a ``str``; the loader
     detects which by the callable's ``accepts`` attribute (default: text).
 
-    ``timeout`` (seconds) replaces the default per-case time budget of the HTTP and model
-    targets; builtin and ``module:callable`` targets ignore it.
+    ``timeout`` (seconds) replaces the default per-case time budget of the HTTP, model and
+    ``module:callable`` targets (300 for a callable, see :func:`time_limited`); builtin targets
+    ignore it.
     """
     t: dict[str, Any] = {"timeout": timeout} if timeout is not None else {}
     if spec == "builtin:naive":
@@ -782,6 +838,7 @@ def load_target(spec: str, *, timeout: float | None = None) -> Target:
         return GuardedAgent(model=load_target(inner, timeout=timeout))
     if ":" in spec:
         module_name, _, attr = spec.partition(":")
-        fn = sync_target(getattr(importlib.import_module(module_name), attr))
+        fn = getattr(importlib.import_module(module_name), attr)
+        fn = time_limited(fn, DEFAULT_CALLABLE_TIMEOUT_S if timeout is None else timeout)
         return fn if getattr(fn, "accepts", "text") == "attack_input" else text_target(fn)
     raise ValueError(f"unrecognised target spec {spec!r}")

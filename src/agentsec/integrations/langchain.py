@@ -20,6 +20,7 @@ Not supported: tools with *injected* arguments (``InjectedState``, ``InjectedToo
 Those values would reach the guard as ordinary arguments, so wrap such tools by hand.
 """
 
+import sys
 from collections.abc import Iterable
 from typing import Any
 
@@ -51,18 +52,26 @@ def _by_alias(schema: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     ``Field(alias="recipient")`` only validates under its alias: every call the guard allowed
     failed in the original tool with a ValidationError.
     """
-    if not (isinstance(schema, type) and issubclass(schema, BaseModel)):
+    if not isinstance(schema, type):
         return arguments
-    if schema.model_config.get("populate_by_name") or schema.model_config.get("validate_by_name"):
+    aliases: dict[str, str | None] = {}
+    if issubclass(schema, BaseModel):
+        config = schema.model_config
+        if config.get("populate_by_name") or config.get("validate_by_name"):
+            return arguments
+        for key, info in schema.model_fields.items():
+            va = info.validation_alias
+            aliases[key] = va if isinstance(va, str) else info.alias
+    elif (v1 := sys.modules.get("pydantic.v1")) is not None and issubclass(schema, v1.BaseModel):
+        # pydantic.v1 models, which LangChain still accepts as args_schema. Looked up, not
+        # imported: a v1 schema means it is loaded, and importing it warns on Python 3.14.
+        v1_schema: Any = schema
+        if getattr(v1_schema.__config__, "allow_population_by_field_name", False):
+            return arguments
+        aliases = {key: f.alias for key, f in v1_schema.__fields__.items()}
+    else:
         return arguments
-    out: dict[str, Any] = {}
-    for key, value in arguments.items():
-        info = schema.model_fields.get(key)
-        alias = None
-        if info is not None:
-            alias = info.validation_alias if isinstance(info.validation_alias, str) else info.alias
-        out[alias or key] = value
-    return out
+    return {aliases.get(key) or key: value for key, value in arguments.items()}
 
 
 def guard_tool(

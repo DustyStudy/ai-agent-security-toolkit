@@ -149,6 +149,7 @@ limits:
   max_body_bytes: 1048576
   max_tokens_cap: 4096
   upstream_timeout_s: 120
+  tokens_per_user_per_day: 200000   # optional; rolling 24 h per user
 identity:
   mode: oidc                   # oidc | trusted_header
   oidc:

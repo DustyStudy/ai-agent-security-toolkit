@@ -7,6 +7,7 @@ import copy
 import functools
 import hashlib
 import inspect
+import math
 import threading
 import uuid
 import warnings
@@ -105,9 +106,22 @@ class ToolGuard:
         resolver: Resolver | None = None,
         blocklist: Blocklist | None = None,
         dlp: DlpPolicy | None = DEFAULT_DLP,
+        approval_timeout_s: float | None = None,
     ) -> None:
         """``dlp`` checks every string in a call's arguments for credentials, non-human
-        identities and PII (see :mod:`agentsec.middleware.dlp`); ``None`` turns that off."""
+        identities and PII (see :mod:`agentsec.middleware.dlp`); ``None`` turns that off.
+
+        ``approval_timeout_s``: an approver that has not answered within this many seconds
+        refuses the call. A sync approver is then asked in a worker thread, which is left
+        running past the limit (its late answer is ignored)."""
+        if approval_timeout_s is not None and not (
+            isinstance(approval_timeout_s, int | float)
+            and not isinstance(approval_timeout_s, bool)
+            and math.isfinite(approval_timeout_s)
+            and approval_timeout_s > 0
+        ):
+            raise ValueError("approval_timeout_s must be a positive finite number of seconds")
+        self.approval_timeout_s = approval_timeout_s
         self.policy = policy
         self.dlp = dlp
         self.approver = approver
@@ -225,7 +239,7 @@ class ToolGuard:
                 decision = self._resolve_approval(call, session, decision, None)
             else:
                 try:
-                    answer = self.approver(call, decision)
+                    answer = self._ask(self.approver, call, decision)
                 except Exception as exc:  # noqa: BLE001 - a failing approver refuses the call
                     return self._commit(
                         call, session, self._approver_failed(call, session, decision, exc)
@@ -252,19 +266,47 @@ class ToolGuard:
                 decision = self._resolve_approval(call, session, decision, None)
             else:
                 try:
-                    if inspect.iscoroutinefunction(self.approver):
-                        answer = await self.approver(call, decision)
-                    else:
-                        # A plain approver usually blocks (a prompt, an HTTP round trip), so run
-                        # it in a worker thread rather than stalling every task on the loop.
-                        answer = await asyncio.to_thread(self.approver, call, decision)
-                        if inspect.isawaitable(answer):
-                            answer = await answer
+                    answer = await asyncio.wait_for(
+                        self._aask(self.approver, call, decision), self.approval_timeout_s
+                    )
                 except Exception as exc:  # noqa: BLE001 - a failing approver refuses the call
                     decision = self._approver_failed(call, session, decision, exc)
                 else:
                     decision = self._answer(call, session, decision, answer)
         return self._commit(call, session, decision)
+
+    def _ask(self, approver: Approver, call: ToolCall, decision: Decision) -> Any:
+        """The sync approver's answer; TimeoutError past ``approval_timeout_s``."""
+        limit = self.approval_timeout_s
+        if limit is None:
+            return approver(call, decision)
+        out: dict[str, Any] = {}
+
+        def ask() -> None:
+            try:
+                out["answer"] = approver(call, decision)
+            except BaseException as exc:  # noqa: BLE001 - re-raised in the caller's thread
+                out["error"] = exc
+
+        worker = threading.Thread(target=ask, name="agentsec-approver", daemon=True)
+        worker.start()
+        worker.join(limit)
+        if worker.is_alive():
+            raise TimeoutError(f"approver did not answer within {limit:g}s")
+        if "error" in out:
+            raise out["error"]
+        return out["answer"]
+
+    @staticmethod
+    async def _aask(approver: Approver, call: ToolCall, decision: Decision) -> Any:
+        if inspect.iscoroutinefunction(approver):
+            return await approver(call, decision)
+        # A plain approver usually blocks (a prompt, an HTTP round trip), so run it in a worker
+        # thread rather than stalling every task on the loop.
+        answer = await asyncio.to_thread(approver, call, decision)
+        if inspect.isawaitable(answer):
+            answer = await answer
+        return answer
 
     def _answer(
         self, call: ToolCall, session: Session, decision: Decision, answer: Any

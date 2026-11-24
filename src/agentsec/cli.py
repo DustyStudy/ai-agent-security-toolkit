@@ -60,7 +60,11 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
         mutators=_csv(args.mutators),
         categories=_csv(args.categories),
         max_cases=args.max_cases,
+        max_consecutive_errors=args.max_consecutive_errors,
     )
+    if args.max_consecutive_errors < 0:
+        print("error: --max-consecutive-errors must be 0 or more", file=sys.stderr)
+        return 2
     # A misspelt name must not shrink the matrix silently: an unknown category selects nothing.
     for kind, given, valid in (
         ("scenario", config.scenarios, SCENARIOS),
@@ -750,8 +754,17 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument(
         "--timeout",
         type=float,
-        help="wall-clock seconds per case for HTTP and model targets, retries included "
-        "(default: 60 for http(s)://, 300 for ollama: and openai-compat:; per request for anthropic:)",
+        help="wall-clock seconds per case for HTTP, model and module:callable targets, retries "
+        "included (default: 60 for http(s)://, 300 for ollama:, openai-compat: and "
+        "module:callable; per request for anthropic:)",
+    )
+    f.add_argument(
+        "--max-consecutive-errors",
+        type=int,
+        default=10,
+        metavar="N",
+        help="stop the run after N errors in a row; the rest are recorded as not run "
+        "(default 10, 0 = never stop)",
     )
     f.add_argument("--json", help="write full JSON report to this path")
     f.add_argument("--md", help="write Markdown report to this path")

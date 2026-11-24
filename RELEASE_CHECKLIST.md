@@ -58,15 +58,11 @@ not match `pyproject.toml`.
 - `image.yml`: build, smoke test, Trivy scan, push to ghcr.io with the workflow's own `GITHUB_TOKEN`,
   provenance attestation by image digest, verify. The base image is pinned by digest in `Dockerfile`.
 
-The PyPI upload and the ghcr.io push run in the protected `release` environment, so each waits for
-the maintainer's approval in the Actions run (two approvals per release, one per workflow). One-time
-setup, by the maintainer:
-
-1. Settings, Environments, `release`: required reviewer = the maintainer, prevent self-review off
-   (a sole maintainer must be able to approve), deployment tags = `v*.*.*` only.
-2. PyPI, project `ai-agent-security-toolkit`, Publishing: the trusted publisher names workflow
-   `release.yml` and environment `release` (it named `pypi` before this change).
-3. The old `pypi` environment can be deleted once a release has gone through `release`.
+The PyPI upload and the ghcr.io push run in the protected `pypi` environment (the one the PyPI trusted
+publisher points at), so each waits for the maintainer's approval in the Actions run: two approvals
+per release, one per workflow. Its protection rules (Settings, Environments, `pypi`) must keep the
+maintainer as required reviewer, with prevent self-review off for a sole maintainer, and should limit
+deployments to `v*.*.*` tags.
 
 ## Backlog (not release blockers)
 

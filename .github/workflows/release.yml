@@ -158,13 +158,13 @@ jobs:
     # Trusted publishing: PyPI exchanges this job's OIDC token for a short-lived upload
     # token, so no PyPI credential is stored in the repository. It runs after `release`,
     # so a version only reaches PyPI once its provenance attestation has verified, and
-    # the protected `release` environment holds the upload until the maintainer approves it.
-    # The PyPI trusted publisher must name this workflow (release.yml) and this environment.
+    # the protected `pypi` environment holds the upload until the maintainer approves it.
+    # The PyPI trusted publisher names this workflow (release.yml) and this environment.
     needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
-      name: release
+      name: pypi
       url: https://pypi.org/project/ai-agent-security-toolkit/
     permissions:
       id-token: write # mint the PyPI upload token and sign the PEP 740 attestations

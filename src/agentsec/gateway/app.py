@@ -42,7 +42,13 @@ from agentsec.gateway.bundle import (
     load_bundle,
     write_state,
 )
-from agentsec.gateway.config import GatewayConfig, Upstream, loopback_hosts, unpinned
+from agentsec.gateway.config import (
+    GatewayConfig,
+    Upstream,
+    loopback_hosts,
+    resolve_secret,
+    unpinned,
+)
 from agentsec.gateway.dashboard import (
     DASHBOARD_HEADERS,
     list_evidence,
@@ -73,6 +79,7 @@ from agentsec.sandbox.adapters import parse_openai_tool_call
 from agentsec.sandbox.blocklist import Blocklist
 from agentsec.sandbox.guard import Session, ToolGuard
 from agentsec.sandbox.policy import Policy
+from agentsec.sandbox.policy_hook import HttpPolicyHook
 
 Scope = dict[str, Any]
 Receive = Callable[[], Awaitable[dict[str, Any]]]
@@ -594,6 +601,20 @@ class _AuditBudget:
             bucket[2] = 0
 
 
+def _client_allowed(
+    scope: Scope, nets: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
+) -> bool:
+    """The TCP peer is inside ``nets``. A missing or unparsable peer (a Unix socket) is not."""
+    client = scope.get("client")
+    try:
+        peer = ipaddress.ip_address(client[0]) if client else None
+    except ValueError:
+        return False
+    if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped:
+        peer = peer.ipv4_mapped  # a dual-stack socket reports IPv4 peers as ::ffff:a.b.c.d
+    return peer is not None and any(peer in net for net in nets)
+
+
 def _peer(scope: Scope) -> str | None:
     client = scope.get("client")
     return str(client[0]) if client else None
@@ -716,6 +737,13 @@ class Gateway:
         self._tokens = (
             None if config.tokens is None else TokenStore(config.tokens.store, clock=wall_clock)
         )
+        hook = config.policy_hook
+        # Read once at start, like upstream keys: a missing secret refuses startup.
+        self._hook_headers = (
+            {"Authorization": f"Bearer {resolve_secret(hook.auth_ref)}"}
+            if hook is not None and hook.auth_ref
+            else {}
+        )
         self._origins = frozenset(config.allowed_origins)
         # None: a non-loopback bind with no listen.allowed_hosts; the Host header is not checked.
         self._hosts = frozenset(config.allowed_hosts) or loopback_hosts(config.host)
@@ -738,7 +766,13 @@ class Gateway:
                 ) from e
             extra = {} if mcp_connector is None else {"connector": mcp_connector}
             self._mcp = McpGateway(
-                config, self._audit, self._scanner, clock=clock, blocklist=self._blocklist, **extra
+                config,
+                self._audit,
+                self._scanner,
+                clock=clock,
+                blocklist=self._blocklist,
+                hook_args=self.policy_hook_args,
+                **extra,
             )
         self._audit.log(
             "gateway_start",
@@ -790,6 +824,10 @@ class Gateway:
                 await self._json(send, 200, {"status": "ok"}, request_id)
                 return  # exempt: a container probe sends the pod address as Host
             _check_origin_host(scope, self._origins, self._hosts)
+            if self.config.allowed_clients and not _client_allowed(
+                scope, self.config.allowed_clients
+            ):
+                raise HttpError(403, "client address not allowed", "client_not_allowed")
             user, groups, token_id = await self._identify(scope, request_id)
             _TOKEN_ID.set(token_id)  # recorded on this request's audit records
             # A reload reads and verifies files: off the event loop.
@@ -1188,6 +1226,19 @@ class Gateway:
         finally:
             self._reload_lock.release()
 
+    def policy_hook_args(self, user: str) -> dict[str, Any]:
+        """``ToolGuard`` keyword arguments for the configured external policy service, if any."""
+        hook = self.config.policy_hook
+        if hook is None:
+            return {}
+        return {
+            "policy_hook": HttpPolicyHook(
+                hook.url, headers=self._hook_headers, actor=user, timeout_s=hook.timeout_s
+            ),
+            # The guard's own limit, a little above the HTTP timeout so that one fires first.
+            "policy_hook_timeout_s": hook.timeout_s + 1,
+        }
+
     @staticmethod
     async def _off_loop(pool: ThreadPoolExecutor, fn: Callable[..., Any], *args: Any) -> Any:
         """``asyncio.to_thread`` on one of our own pools (the contextvars come along, as there)."""
@@ -1392,7 +1443,9 @@ class Gateway:
                 blocked_message=gp.output_guard.blocked_message,
             )
             gp = dataclasses.replace(gp, output_guard=guard_out)
-        guard = ToolGuard(gp.policy, audit=log, blocklist=blocklist, dlp=gp.dlp)
+        guard = ToolGuard(
+            gp.policy, audit=log, blocklist=blocklist, dlp=gp.dlp, **self.policy_hook_args(user)
+        )
         mw = AgentMiddleware(
             guard=guard,
             output_guard=gp.output_guard,

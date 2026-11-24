@@ -81,6 +81,8 @@ class GatewayConfig:
     # loopback, otherwise the configuration must supply explicit names.
     allowed_hosts: tuple[str, ...] = ()
     allowed_origins: tuple[str, ...] = ()  # an Origin header outside this list is refused
+    # Peer addresses the main listener serves. Empty: any address (identity still applies).
+    allowed_clients: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = ()
     admin_port: int | None = None  # set: /metrics and /readyz on admin_host:admin_port
     admin_host: str = "127.0.0.1"
     admin_fuzz_report: str | None = None  # an `agentsec fuzz --json` file shown on /dashboard
@@ -104,6 +106,14 @@ class GatewayConfig:
     mcp_require_pins: bool = False  # set: every mcp_upstream needs reviewed pins, or no start
     tokens: TokenSettings | None = None  # set: users may mint access tokens (POST /tokens)
     egress: EgressSettings | None = None  # set: URL arguments are checked against signed feeds
+    policy_hook: PolicyHookSettings | None = None  # set: an external service vets each tool call
+
+
+@dataclass(frozen=True)
+class PolicyHookSettings:
+    url: str
+    timeout_s: float = 5.0
+    auth_ref: str | None = None  # env:/file: reference; sent as "Authorization: Bearer <it>"
 
 
 MAX_SECRET_FILE_BYTES = 65536  # keys and tokens; a bigger file is a wrong path
@@ -142,6 +152,7 @@ _TOP = {
     "audit",
     "dlp",
     "egress",
+    "policy_hook",
 }
 _SECTIONS: dict[str, set[str]] = {
     "listen": {
@@ -151,6 +162,7 @@ _SECTIONS: dict[str, set[str]] = {
         "tls_terminated_by_proxy",
         "allowed_hosts",
         "allowed_origins",
+        "allowed_clients",
     },
     "admin": {"host", "port", "fuzz_report", "evidence_dir"},
     "tls": {"cert_file", "key_file"},
@@ -214,6 +226,7 @@ _SECTIONS: dict[str, set[str]] = {
         "reload_interval_s",
     },
     "blocklist": {"name", "kind", "file", "max_age_h"},
+    "policy_hook": {"url", "timeout_s", "auth"},
 }
 
 
@@ -380,6 +393,28 @@ def _domains(identity: dict[str, Any]) -> tuple[str, ...]:
             raise ConfigError(f"identity.allowed_domains: {d!r} is not a domain (or *.domain)")
         out.append(d)
     return tuple(out)
+
+
+def _policy_hook(data: dict[str, Any]) -> PolicyHookSettings | None:
+    if "policy_hook" not in data:
+        return None
+    section = _section(data, "policy_hook")
+    url = _typed(section.get("url"), str, "policy_hook.url")
+    auth = section.get("auth")
+    if auth is not None:
+        auth = _typed(auth, str, "policy_hook.auth")
+        if not auth.startswith(("env:", "file:")):
+            raise ConfigError("policy_hook.auth must be a reference: 'env:NAME' or 'file:/path'")
+    settings = PolicyHookSettings(
+        url=url, timeout_s=_positive(section, "timeout_s", 5.0, float), auth_ref=auth
+    )
+    try:
+        from agentsec.sandbox.policy_hook import HttpPolicyHook
+
+        HttpPolicyHook(url)  # same URL rules as at run time
+    except ValueError as e:
+        raise ConfigError(f"policy_hook.url: {e}") from e
+    return settings
 
 
 def _pin_file(path: Path) -> dict[str, str]:
@@ -585,6 +620,16 @@ def load_config(path: str | Path) -> GatewayConfig:
         # Whatever the hosts: 0.0.0.0 and 127.0.0.1 on one port overlap.
         raise ConfigError("admin.port must differ from listen.port")
 
+    try:
+        allowed_clients = tuple(
+            ipaddress.ip_network(c, strict=True)
+            for c in _strs(listen.get("allowed_clients", []), "listen.allowed_clients")
+        )
+    except ValueError as e:
+        raise ConfigError(f"listen.allowed_clients: {e}") from e
+    if any(c.prefixlen == 0 for c in allowed_clients):
+        raise ConfigError("listen.allowed_clients must not allow every address (/0); omit it")
+
     identity = _section(data, "identity")
     identity_mode = identity.get("mode", "trusted_header")
     proxies_raw = _strs(identity.get("trusted_proxies", []), "identity.trusted_proxies")
@@ -609,6 +654,12 @@ def load_config(path: str | Path) -> GatewayConfig:
     if any(p.prefixlen == 0 for p in proxies):
         # Every peer could then name any user in a header.
         raise ConfigError("identity.trusted_proxies must not trust every address (/0)")
+    if allowed_clients and any(
+        not any(p.version == c.version and p.subnet_of(c) for c in allowed_clients)  # type: ignore[arg-type]
+        for p in proxies
+    ):
+        # Every request would be refused: the auth proxy is the peer the listener sees.
+        raise ConfigError("listen.allowed_clients must include every identity.trusted_proxies net")
     for p in proxies:
         floor = 16 if p.version == 4 else 48
         if p.prefixlen < floor:
@@ -697,6 +748,7 @@ def load_config(path: str | Path) -> GatewayConfig:
         tls_key_file=None if key is None else str(base / key),
         tls_terminated_by_proxy=behind_proxy,
         allowed_hosts=allowed_hosts,
+        allowed_clients=allowed_clients,
         allowed_origins=allowed_origins,
         admin_host=admin_host,
         admin_port=admin_port,
@@ -726,4 +778,5 @@ def load_config(path: str | Path) -> GatewayConfig:
         mcp_require_pins=require_pins,
         tokens=_tokens(data, base),
         egress=_egress(data, base),
+        policy_hook=_policy_hook(data),
     )

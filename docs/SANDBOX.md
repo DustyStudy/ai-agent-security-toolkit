@@ -156,6 +156,16 @@ The child gets an empty environment unless you pass `env`. Tools that need a few
 
 A `path` argument is resolved (symlinks and `..` included) and must sit under one of its `roots`. `execute`, `aexecute` and everything built on them pass the tool that resolved path, re-checked just before the call, not the raw string. A symlink retargeted after authorization therefore cannot redirect the tool.
 
-A race remains: someone who can write inside a root can still replace a directory on the resolved path with a symlink between that last check and the tool's `open()`. Closing it needs `openat`-style, no-follow opens in the tool itself. If the agent shares a writable directory with an attacker, keep that directory out of the roots or isolate the tool at the OS level.
+A race remains if the tool calls plain `open()`: someone who can write inside a root can replace a directory on the resolved path with a symlink between that last check and the open. Open files in the tool with `agentsec.sandbox.open_within_roots(path, roots, mode)` instead. On Linux and macOS it walks from the root's descriptor one component at a time with `O_NOFOLLOW`, so a symlink swapped onto the path makes the open fail instead of being followed. On Windows it checks after opening that the path is still symlink-free and names the same file, and truncates only after that check. It opens regular files only, so a FIFO cannot hang the tool.
+
+```python
+from agentsec.sandbox import open_within_roots
+
+def read_doc(path: str) -> str:
+    with open_within_roots(path, ["/srv/docs"]) as f:
+        return f.read()
+```
+
+It does not cover a hard link inside a root that points at a file outside it. Hard links cannot cross file systems, so keep roots on a file system that holds nothing else sensitive, or isolate the tool at the OS level.
 
 `deny_patterns` on a path match case-insensitively, because Windows and macOS file systems ignore case.

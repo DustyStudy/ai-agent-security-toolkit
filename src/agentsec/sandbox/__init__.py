@@ -15,6 +15,7 @@ from agentsec.sandbox.subprocess_runner import (
     SafeCommandRunner,
     locked_install_rules,
 )
+from agentsec.sandbox.validators import open_within_roots
 
 __all__ = [
     "ArgRule",
@@ -34,6 +35,7 @@ __all__ = [
     "arun_anthropic_tool_uses",
     "arun_openai_tool_calls",
     "locked_install_rules",
+    "open_within_roots",
     "run_anthropic_tool_uses",
     "run_openai_tool_calls",
 ]

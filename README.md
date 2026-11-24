@@ -21,6 +21,8 @@ pip install ai-agent-security-toolkit
 agentsec fuzz --target builtin:guarded --quiet
 ```
 
+**Built-in simulator output**
+
 ```text
 144/500 attacks succeeded (ASR 28.8%); 356 blocked, 0 errors
 ```
@@ -42,6 +44,8 @@ For repository checks, see [configuration scanning and pinning](docs/REFERENCE.m
 <a name="simulator-results-not-a-model-benchmark"></a>
 
 ## Measured results
+
+### Llama 3.1 8B evaluation
 
 In the 0.12.0 release-candidate evaluation of **Llama 3.1 8B**, attack success fell from **35.5% (177/498)** with the model alone to **0.4% (2/497)** with the full toolkit enabled. Both guarded successes were canary echoes.
 

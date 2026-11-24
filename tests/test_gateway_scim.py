@@ -189,3 +189,20 @@ def test_config_checks(tmp_path, monkeypatch):
     monkeypatch.setenv("SCIM_TOKEN", "short")
     with pytest.raises(ConfigError, match="32"):
         Gateway(write_config(tmp_path, SCIM + TOKENS), transport=FakeUpstream(), sink=MemorySink())
+
+
+def test_no_bearer_value_reaches_the_audit_file(tmp_path):
+    # The real file sink, not MemorySink: what an attacker with the log would read.
+    app = Gateway(write_config(tmp_path, SCIM + TOKENS), transport=FakeUpstream())
+    wrong = "w" * 40
+    scim(app, "GET", "/Users", presented=wrong)
+    rid = create(app, "alice")[1]["id"]
+    minted = call(app, "/tokens", body={"name": "ide"}, headers=[*USER, *JSON])[1]["token"]
+    ide = [(b"authorization", f"Bearer {minted}".encode())]
+    assert call(app, body=chat(), headers=ide)[0] == 200
+    scim(app, "DELETE", f"/Users/{rid}")
+    assert call(app, body=chat(), headers=ide)[0] == 401
+    log = (tmp_path / "audit.jsonl").read_text()
+    assert "gateway_user_deprovisioned" in log and "gateway_auth_failed" in log
+    for value in (SCIM_BEARER, wrong, minted, minted.split("_", 1)[1]):
+        assert value not in log

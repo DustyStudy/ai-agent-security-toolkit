@@ -169,8 +169,9 @@ The gateway accepts SCIM 2.0 provisioning (RFC 7643 and 7644) from Entra ID, Okt
 scim:
   token: env:SCIM_TOKEN        # the bearer token you paste into the IdP, at least 32 characters
   require_provisioned: true    # optional: only users the IdP provisioned may sign in
+  store: scim.db               # optional; the provisioned-user directory (SQLite)
 tokens:
-  store: tokens.db             # the directory is kept in the same file
+  store: tokens.db             # required: deprovisioning disables users here
 ```
 
 In the IdP, set the SCIM base URL to `https://<gateway>/scim/v2` and the authentication to "Bearer token" with that secret. Map the IdP's user to `userName` so it is the same name the gateway sees at sign-in (the OIDC `user_claim`, the SAML NameID or attribute, or the proxy's user header).

@@ -756,7 +756,7 @@ class Gateway:
             self._scim_secret = resolve_secret(config.scim_token_ref).encode()
             if len(self._scim_secret) < 32:
                 raise ConfigError("scim.token must be at least 32 characters")
-            self._scim = ScimDirectory(config.tokens.store, clock=wall_clock)
+            self._scim = ScimDirectory(config.scim_store, clock=wall_clock)
         self._revoke_secret = None
         if config.admin_revoke_token_ref is not None:
             self._revoke_secret = resolve_secret(config.admin_revoke_token_ref).encode()

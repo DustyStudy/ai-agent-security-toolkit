@@ -1,7 +1,7 @@
 """SCIM 2.0 user provisioning (RFC 7643/7644), the subset Entra ID, Okta and OneLogin use.
 
-The IdP creates, updates, deactivates and deletes users at ``/scim/v2/Users``. The directory is
-stored next to the access tokens. What it changes at the gateway:
+The IdP creates, updates, deactivates and deletes users at ``/scim/v2/Users``, kept in a SQLite
+file (``scim.store``). What it changes at the gateway:
 
 * deactivating (``active: false``) or deleting a user ends their sessions now and refuses them
   until they are active again, whatever case their sign-in name arrives in;
@@ -13,6 +13,7 @@ Groups are not provisioned: groups come from the sign-in (token or header), as b
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -82,6 +83,9 @@ def _stamp(t: float) -> str:
 
 class ScimDirectory:
     def __init__(self, path: str | Path, *, clock: Callable[[], float] = time.time) -> None:
+        if not Path(path).exists():
+            # Owner-only before SQLite opens it, like the token store (POSIX; Windows: folder ACL).
+            os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
         self._db = sqlite3.connect(str(path), check_same_thread=False, timeout=5.0)
         self._db.executescript(_SCHEMA)
         self._lock = threading.RLock()  # patch holds it across read, change and write

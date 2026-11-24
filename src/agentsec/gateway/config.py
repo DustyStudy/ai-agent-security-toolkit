@@ -112,6 +112,7 @@ class GatewayConfig:
     policy_hook: PolicyHookSettings | None = None  # set: an external service vets each tool call
     scim_token_ref: str | None = None  # set: /scim/v2 takes provisioning from the IdP
     scim_require_provisioned: bool = False  # set: only users the IdP provisioned get in
+    scim_store: str = "scim.db"  # the provisioned-user directory (SQLite)
 
 
 @dataclass(frozen=True)
@@ -260,7 +261,7 @@ _SECTIONS: dict[str, set[str]] = {
     },
     "blocklist": {"name", "kind", "file", "max_age_h"},
     "policy_hook": {"url", "timeout_s", "auth"},
-    "scim": {"token", "require_provisioned"},
+    "scim": {"token", "require_provisioned", "store"},
 }
 
 
@@ -843,7 +844,7 @@ def load_config(path: str | Path) -> GatewayConfig:
         if not scim_ref.startswith(("env:", "file:")):
             raise ConfigError("scim.token must be a reference: 'env:NAME' or 'file:/path'")
         if tokens is None:
-            # The directory and the disabled list live in the token store.
+            # Deprovisioning disables users, and the disabled list lives in the token store.
             raise ConfigError("scim needs a tokens section")
     return GatewayConfig(
         policies=policies,
@@ -903,6 +904,7 @@ def load_config(path: str | Path) -> GatewayConfig:
         egress=_egress(data, base),
         policy_hook=_policy_hook(data),
         scim_token_ref=scim_ref,
+        scim_store=str(base / _typed(scim.get("store", "scim.db"), str, "scim.store")),
         scim_require_provisioned=_typed(
             scim.get("require_provisioned", False), bool, "scim.require_provisioned"
         ),

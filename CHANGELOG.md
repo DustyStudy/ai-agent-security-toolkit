@@ -10,6 +10,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Fuzzer circuit breaker: after 10 errors in a row (`--max-consecutive-errors N`, `FuzzConfig.max_consecutive_errors`; 0 turns it off) the run stops and the remaining cases are recorded as not run, so a target that is down costs a few cases instead of the whole matrix. Such a run still exits 2 and can never pass `--max-asr`.
 - `ToolGuard(approval_timeout_s=...)`: an approver that has not answered within that many seconds refuses the call (audited), in `authorize()` and `aauthorize()`. Async approvers are cancelled; a sync approver is left running in a worker thread and its late answer is ignored. Off by default.
 
+### Fixed
+- LangChain `guard_tool`: a tool whose `args_schema` is a `pydantic.v1` model with a `Field(alias=...)` failed every allowed call with a ValidationError; the guard now passes the arguments on under their aliases, as it already did for pydantic 2 models (unless the model sets `allow_population_by_field_name`).
+
 ## [0.13.0] - 2026-11-24
 
 ### Added

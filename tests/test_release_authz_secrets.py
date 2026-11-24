@@ -483,3 +483,36 @@ def test_langchain_tool_with_an_aliased_field_runs_when_allowed():
     assert guarded.invoke({"recipient": "bob@corp.com"}) == "sent to bob@corp.com"
     assert "refused" in guarded.invoke({"recipient": "eve@evil.example"})
     assert asyncio.run(guarded.ainvoke({"recipient": "bob@corp.com"})) == "sent to bob@corp.com"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")  # pydantic.v1 warns on Python 3.14
+def test_langchain_tool_with_a_pydantic_v1_aliased_field_runs_when_allowed():
+    pytest.importorskip("langchain_core")
+    v1 = pytest.importorskip("pydantic.v1")
+    from langchain_core.tools import tool
+
+    from agentsec.integrations.langchain import guard_tool
+
+    class Args(v1.BaseModel):
+        to: str = v1.Field(alias="recipient")
+
+    class ByName(v1.BaseModel):
+        to: str = v1.Field(alias="recipient")
+
+        class Config:
+            allow_population_by_field_name = True
+
+    policy = Policy.from_dict(
+        {"tools": {"notify": {"args": {"to": {"type": "string", "pattern": r"[a-z]+@corp\.com"}}}}}
+    )
+    for schema in (Args, ByName):
+
+        @tool(args_schema=schema)
+        def notify(to: str) -> str:
+            """Notify someone."""
+            return f"sent to {to}"
+
+        guarded = guard_tool(notify, ToolGuard(policy), Session())
+        assert guarded.invoke({"recipient": "bob@corp.com"}) == "sent to bob@corp.com"
+        assert "refused" in guarded.invoke({"recipient": "eve@evil.example"})
+        assert asyncio.run(guarded.ainvoke({"recipient": "bob@corp.com"})) == "sent to bob@corp.com"

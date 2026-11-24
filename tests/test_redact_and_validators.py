@@ -163,3 +163,10 @@ def test_block_takes_precedence_over_redact():
     guard = OutputGuard([SecretLeakValidator(), DangerousContentValidator()])
     res = guard.process(f"<script>x</script> {fake_aws_key()}")
     assert not res.allowed
+
+
+def test_json_schema_validator_refuses_oversized_output_before_parsing():
+    v = JsonSchemaValidator({"type": "array"}, max_chars=100)
+    assert v.check("[" + "1," * 10 + "1]") == []
+    (violation,) = v.check("[" + "1," * 100 + "1]")
+    assert "exceeds 100 chars" in violation.message

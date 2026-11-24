@@ -31,7 +31,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without the opti
         'agentsec.integrations.langchain needs LangChain: pip install "ai-agent-security-toolkit[langchain]"'
     ) from exc
 
-from agentsec.sandbox.guard import Session, ToolDenied, ToolGuard
+from agentsec.sandbox.guard import Session, ToolDenied, ToolGuard, _warn_if_shared
 from agentsec.types import ToolCall
 
 __all__ = ["guard_tool", "guard_tools"]
@@ -84,6 +84,7 @@ def guard_tool(
     A single-input ``Tool`` (no ``args_schema``) keeps its one-string schema; the policy
     names its argument ``tool_input``.
     """
+    _warn_if_shared(session)
     policy_name = name or tool.name
     if tool.args_schema is None:
         return _guard_single_input(tool, guard, session, policy_name)

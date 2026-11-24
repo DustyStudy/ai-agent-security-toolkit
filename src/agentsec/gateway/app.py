@@ -119,14 +119,58 @@ AUDIT_KEEP_FIELDS = frozenset(
 
 
 class HttpError(Exception):
-    def __init__(self, status: int, message: str, code: str, *, audited: bool = False) -> None:
+    def __init__(
+        self,
+        status: int,
+        message: str,
+        code: str,
+        *,
+        audited: bool = False,
+        retry_after: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.status, self.message, self.code = status, message, code
         self.audited = audited  # already has its own audit record; do not log it twice
+        self.retry_after = retry_after  # seconds, sent as Retry-After
 
 
 class UpstreamError(Exception):
     pass
+
+
+class UpstreamRateLimited(UpstreamError):
+    """The provider answered 429 (rate limit or quota). Clients get 429, not 502."""
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__("upstream returned HTTP 429")
+        self.retry_after = retry_after
+
+
+MAX_RETRY_AFTER_S = 300
+
+
+def _retry_after(value: str | None) -> int:
+    """The provider's Retry-After in whole seconds, clamped to 1..300; 1 if absent or a date.
+
+    Only digits are read, so nothing the provider wrote reaches the client but a small number.
+    """
+    value = (value or "").strip()
+    if not value.isascii() or not value.isdigit():
+        return 1
+    return min(max(int(value[:6]), 1), MAX_RETRY_AFTER_S)
+
+
+def _upstream_http_error(err: UpstreamError, audited: bool = False) -> HttpError:
+    """The client-facing error for a failed upstream call."""
+    if isinstance(err, UpstreamRateLimited):
+        return HttpError(
+            429,
+            "upstream rate limited",
+            "upstream_rate_limited",
+            audited=audited,
+            retry_after=err.retry_after,
+        )
+    return HttpError(502, "upstream error", "upstream_error", audited=audited)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -291,6 +335,8 @@ def _upstream_failure(e: Exception, deadline: _Deadline) -> Exception:
         return e
     if isinstance(e, urllib.error.HTTPError):
         e.close()  # the error body is never read; release the connection
+        if e.code == 429:
+            return UpstreamRateLimited(_retry_after(e.headers.get("Retry-After")))
         return UpstreamError(f"upstream returned HTTP {e.code}")
     if isinstance(e, urllib.error.URLError):
         reason = e.reason
@@ -1291,7 +1337,7 @@ class Gateway:
             raw = self._transport(upstream, payload, cfg.upstream_timeout_s, cfg.max_response_bytes)
         except UpstreamError as e:
             log.log("gateway_upstream_error", upstream=upstream.name, error=str(e))
-            raise HttpError(502, "upstream error", "upstream_error") from None
+            raise _upstream_http_error(e) from None
         except TimeoutError:
             log.log("gateway_upstream_error", upstream=upstream.name, error="timeout")
             raise HttpError(504, "upstream timeout", "upstream_timeout") from None
@@ -1383,7 +1429,7 @@ class Gateway:
                 error=str(e),
                 released_chars=len(held.released),
             )
-            raise HttpError(502, "upstream error", "upstream_error", audited=True) from None
+            raise _upstream_http_error(e, audited=True) from None
         except TimeoutError:
             self._audit_cut_stream(held, mw, log, enforce)
             log.log(
@@ -1802,7 +1848,13 @@ class Gateway:
 
     # ------------------------------------------------------------- responses
     @staticmethod
-    async def _json(send: Send, status: int, payload: dict[str, Any], request_id: str) -> None:
+    async def _json(
+        send: Send,
+        status: int,
+        payload: dict[str, Any],
+        request_id: str,
+        extra_headers: list[tuple[bytes, bytes]] | None = None,
+    ) -> None:
         body = json.dumps(payload).encode()
         await send(
             {
@@ -1812,6 +1864,7 @@ class Gateway:
                     (b"content-type", b"application/json"),
                     (b"x-request-id", request_id.encode()),
                     (b"cache-control", b"no-store"),
+                    *(extra_headers or []),
                 ],
             }
         )
@@ -1819,7 +1872,8 @@ class Gateway:
 
     async def _error(self, send: Send, e: HttpError, request_id: str) -> None:
         payload = {"error": {"message": e.message, "type": "gateway_error", "code": e.code}}
-        await self._json(send, e.status, payload, request_id)
+        extra = [] if e.retry_after is None else [(b"retry-after", str(e.retry_after).encode())]
+        await self._json(send, e.status, payload, request_id, extra)
 
     @staticmethod
     async def _sse(send: Send, result: dict[str, Any], request_id: str) -> None:

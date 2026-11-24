@@ -259,7 +259,8 @@ Limits:
 |---|---|
 | Audit log cannot be written | 503; nothing is forwarded |
 | Upstream down, bad status, non-JSON, a broken HTTP response or an invalid upstream API key | 502; the audit names only the cause type |
-| Upstream timeout: connect, headers or body, a total deadline of `upstream_timeout_s` | 504 |
+| Upstream timeout: name lookup, connect, headers or body, a total deadline of `upstream_timeout_s` | 504 |
+| Upstream answers 429 (rate limit or exhausted quota) | 429 `upstream_rate_limited` with `Retry-After`: the upstream's value in seconds, clamped to 1-300, or 1 if it sent none or a date. Nothing else of the upstream's answer is passed on |
 | Request body not received within `body_timeout_s` | 408 |
 | Upstream answer malformed, or an error event inside a stream | 502 before any text is released; after that, the stream ends with an error event and no `[DONE]`, and the delivered text is audited and checked (`gateway_output_violation_after_delivery` with `interrupted: true` if it broke a rule) |
 | Any other error | 500 with no detail |

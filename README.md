@@ -1,4 +1,6 @@
-# ![AI Agent Security Toolkit](docs/assets/readme-banner.jpg)
+# AI Agent Security Toolkit
+
+![AI Agent Security Toolkit banner](docs/assets/readme-banner.jpg)
 
 **Test and contain prompt injection in tool-using AI agents.**
 
